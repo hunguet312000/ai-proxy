@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>LiteRouter</title>
+  <link rel="icon" href="/ui/assets/logo.svg?v=20260722context1" type="image/svg+xml">
+  <link rel="icon" href="/ui/assets/favicon.ico?v=20260722context1" sizes="any">
+  <link rel="icon" type="image/png" href="/ui/assets/favicon-32.png?v=20260722context1" sizes="32x32">
+  <link rel="apple-touch-icon" href="/ui/assets/apple-touch-icon.png?v=20260722context1">
+  <link rel="stylesheet" href="/ui/assets/style.css?v=20260722context1">
+  <script defer src="/ui/assets/htmx.min.js?v=20260722context1"></script>
+  <script defer src="/ui/assets/app.js?v=20260722context1"></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip</a>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Primary">
+      <div class="sidebar-top">
+        <a class="logo" href="/ui/endpoint">
+          <span class="logo-mark"><img src="/ui/assets/logo.svg?v=20260722context1" alt="LiteRouter" width="36" height="36"></span>
+          <span class="logo-text"><b>LiteRouter</b><small>local AI proxy</small></span>
+        </a>
+      </div>
+
+      <nav class="sidebar-nav">
+        <p class="nav-group">Workspace</p>
+        <a class="nav-item{{if eq .Tab "endpoint"}} is-active{{end}}" href="/ui/endpoint" data-tab="endpoint" hx-get="/ui/tabs/endpoint" hx-target="#content" hx-push-url="/ui/endpoint" hx-swap="innerHTML settle:80ms">
+          <span class="nav-ico" aria-hidden="true">◎</span><span>Endpoint &amp; Key</span>
+        </a>
+        <a class="nav-item{{if eq .Tab "providers"}} is-active{{end}}" href="/ui/providers" data-tab="providers" hx-get="/ui/tabs/providers" hx-target="#content" hx-push-url="/ui/providers" hx-swap="innerHTML settle:80ms">
+          <span class="nav-ico" aria-hidden="true">⬡</span><span>Providers</span>
+        </a>
+        <a class="nav-item{{if eq .Tab "quota"}} is-active{{end}}" href="/ui/quota" data-tab="quota" hx-get="/ui/tabs/quota" hx-target="#content" hx-push-url="/ui/quota" hx-swap="innerHTML settle:80ms">
+          <span class="nav-ico" aria-hidden="true">◔</span><span>Quota Tracker</span>
+        </a>
+
+
+        <a class="nav-item{{if eq .Tab "usage"}} is-active{{end}}" href="/ui/usage" data-tab="usage" hx-get="/ui/tabs/usage" hx-target="#content" hx-push-url="/ui/usage" hx-swap="innerHTML settle:80ms">
+          <span class="nav-ico" aria-hidden="true">▦</span><span>Usage &amp; Analytics</span>
+        </a>
+        <a class="nav-item{{if eq .Tab "cli"}} is-active{{end}}" href="/ui/cli" data-tab="cli" hx-get="/ui/tabs/cli" hx-target="#content" hx-push-url="/ui/cli" hx-swap="innerHTML settle:80ms">
+          <span class="nav-ico" aria-hidden="true">&gt;_</span><span>CLI Tools</span>
+        </a>
+        <p class="nav-group">System</p>
+        <div class="nav-static">
+          <span class="nav-ico" aria-hidden="true">●</span>
+          <span>Status</span>
+          <em class="nav-badge ok">online</em>
+        </div>
+        <div class="nav-static muted">
+          <span class="nav-ico" aria-hidden="true">⌘</span>
+          <span>Port 8317</span>
+        </div>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="foot-stats">
+          <span><b>{{.Total}}</b> acct</span>
+          <span><b>{{.Enabled}}</b> on</span>
+          <span><b>{{.Exhausted}}</b> out</span>
+        </div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="page-head">
+        <div>
+          <p class="page-kicker">{{.TabTitle}}</p>
+          <h1 class="page-title">{{.TabHeading}}</h1>
+        </div>
+        <div class="page-actions" id="page-actions"></div>
+      </header>
+      <main id="content" class="page-body">{{template "tab" .}}</main>
+    </div>
+  </div>
+</body>
+</html>
+ 
+ 
+ 

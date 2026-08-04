@@ -1,0 +1,236 @@
+{{define "account"}}
+<article class="qcard{{if .QuotaExhausted}} is-empty{{else if not .Enabled}} is-off{{else}} is-ok{{end}}" data-provider="{{.Provider}}" data-account-id="{{.ID}}" data-enabled="{{if .Enabled}}1{{else}}0{{end}}" data-exhausted="{{if .QuotaExhausted}}1{{else}}0{{end}}" data-reset="{{if not .QuotaResetAt.IsZero}}{{.QuotaResetAt.Unix}}{{else}}0{{end}}">
+  <header class="qcard-head">
+    <div class="qcard-id">
+      <img class="qcard-icon" src="/ui/assets/providers/{{if eq .Provider "codex"}}codex{{else if eq .Provider "claude"}}claude{{else if or (eq .Provider "grok") (eq .Provider "xai")}}xai{{else if eq .Provider "antigravity"}}antigravity{{else}}openai{{end}}.png" alt="" width="28" height="28">
+      <div class="qcard-copy">
+        <div class="qcard-title-row">
+          <strong class="qcard-provider">{{if eq .Provider "codex"}}Codex{{else if eq .Provider "claude"}}Claude{{else if or (eq .Provider "grok") (eq .Provider "xai")}}xAI{{else}}{{.Provider}}{{end}}</strong>
+          {{if .Plan}}<span class="plan-chip plan-{{planClass .Plan}}">{{formatPlan .Plan}}</span>{{end}}
+        </div>
+        <div class="qcard-email" title="{{if .Label}}{{.Label}}{{else}}{{.ID}}{{end}}">{{if .Label}}{{.Label}}{{else}}{{.ID}}{{end}}</div>
+        {{/* Only when the gateway switched it off. A card the user disabled themselves needs
+             no explanation, and inventing one would be noise. */}}
+        {{if and (not .Enabled) .DisabledReason}}<div class="qcard-reason" title="{{.DisabledReason}}">⚠ {{.DisabledReason}}</div>{{end}}
+      </div>
+    </div>
+    <div class="qcard-actions">
+      {{if eq .Provider "codex"}}
+      <button type="button" class="icon-btn reset-credit{{if and .ResetCreditsKnown (le .ResetCredits 0)}} is-empty{{end}}"
+        {{if or (not .ResetCreditsKnown) (gt .ResetCredits 0)}}
+        hx-post="/ui/accounts/{{urlquery .ID}}/reset-credits"
+        hx-target="closest article"
+        hx-swap="outerHTML"
+        hx-confirm="Use 1 Codex reset credit to refresh session limits?"
+        {{else}}disabled{{end}}
+        title="{{if .ResetCreditsKnown}}Use one Codex reset credit. Available: {{.ResetCredits}}{{else}}Use one Codex reset credit{{end}}">
+        <span class="reset-ico" aria-hidden="true">↺</span>
+        <span class="reset-count">{{if .ResetCreditsKnown}}{{.ResetCredits}}{{else}}–{{end}}</span>
+      </button>
+      {{else}}
+      <span class="action-spacer" aria-hidden="true"></span>
+      {{end}}
+      <button type="button" class="icon-btn" hx-post="/ui/accounts/{{urlquery .ID}}/quota" hx-target="closest article" hx-swap="outerHTML" title="Refresh quota">↻</button>
+      {{/* The checkbox itself is what gets submitted — name and value on the control, not a
+           hidden "opposite of what I rendered" field. That older shape sent an absolute state
+           derived from render time, so any stale page (a cached copy, a second tab, an account
+           the gateway disabled while this one was open) made a click do the opposite of what
+           the switch showed. An unchecked checkbox submits nothing, which the handler reads as
+           disabled — so the value always matches the switch the user just set. */}}
+      <form class="toggle-form" hx-post="/ui/accounts/{{urlquery .ID}}" hx-target="closest article" hx-swap="outerHTML">
+        <input type="hidden" name="weight" value="{{.Weight}}">
+        <input type="hidden" name="view" value="quota">
+        <label class="switch" title="{{if .Enabled}}Disable{{else}}Enable{{end}}">
+          <input type="checkbox" name="enabled" value="true" {{if .Enabled}}checked{{end}}>
+          <span class="slider"></span>
+        </label>
+      </form>
+      <button type="button" class="icon-btn danger" hx-delete="/ui/accounts/{{urlquery .ID}}" hx-target="closest article" hx-swap="outerHTML" hx-confirm="Delete this account?" title="Delete">🗑</button>
+    </div>
+  </header>
+
+  <div class="qcard-body">
+    <div class="limit-stack">
+    {{if .Windows}}
+      {{range .Windows}}
+      <div class="limit-row{{if .Exhausted}} is-bad{{end}}">
+        <div class="limit-meta">
+          <span class="limit-name"><i class="dot{{if .Exhausted}} bad{{else}} ok{{end}}"></i><em>{{.Label}}</em>{{if .Stale}} <small title="Last quota update is older than 2 minutes">stale</small>{{end}}</span>
+          <span class="limit-mid">{{if gt .Total 0.0}}{{printf "%.0f" .Used}} / {{printf "%.0f" .Total}}{{else}}—{{end}}</span>
+          <span class="limit-pct{{if .Exhausted}} bad{{else if gt .RemainingPercent 49.0}} ok{{end}}">{{printf "%.0f" .RemainingPercent}}%</span>
+          <span class="limit-reset">{{if not .ResetAt.IsZero}}{{formatReset .ResetAt}}{{else}}—{{end}}</span>
+        </div>
+        <div class="limit-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{printf "%.0f" .RemainingPercent}}">
+          <span class="limit-fill q{{quotaBucket .RemainingPercent}}{{if .Exhausted}} is-bad{{end}}"></span>
+        </div>
+      </div>
+      {{end}}
+    {{else}}
+      <div class="limit-row">
+        <div class="limit-meta">
+          <span class="limit-name"><i class="dot ok"></i><em>Quota</em></span>
+          <span class="limit-mid">—</span>
+          <span class="limit-pct">{{printf "%.0f" .QuotaRemainingPercent}}%</span>
+          <span class="limit-reset">{{if not .QuotaResetAt.IsZero}}{{formatReset .QuotaResetAt}}{{else}}—{{end}}</span>
+        </div>
+        <div class="limit-bar"><span class="limit-fill q{{quotaBucket .QuotaRemainingPercent}}"></span></div>
+      </div>
+    {{end}}
+    </div>
+  </div>
+</article>
+{{end}}
+
+{{define "connection"}}
+<article class="conn-row{{if .QuotaExhausted}} is-exhausted{{else if .Enabled}} is-active{{else}} is-disabled{{end}}" id="conn-{{urlquery .ID}}">
+  <div class="conn-main">
+    <div class="conn-priority">
+      <form hx-post="/ui/accounts/{{urlquery .ID}}/priority" hx-target="#accounts" hx-swap="innerHTML">
+        <input type="hidden" name="dir" value="up">
+        <input type="hidden" name="provider" value="{{.Provider}}">
+        <button class="icon-btn" type="submit" title="Higher priority" aria-label="Higher priority">▴</button>
+      </form>
+      <form hx-post="/ui/accounts/{{urlquery .ID}}/priority" hx-target="#accounts" hx-swap="innerHTML">
+        <input type="hidden" name="dir" value="down">
+        <input type="hidden" name="provider" value="{{.Provider}}">
+        <button class="icon-btn" type="submit" title="Lower priority" aria-label="Lower priority">▾</button>
+      </form>
+    </div>
+    <div class="conn-avatar" aria-hidden="true">
+      <img src="/ui/assets/providers/{{if eq .Provider "codex"}}codex{{else if eq .Provider "claude"}}claude{{else if or (eq .Provider "grok") (eq .Provider "xai")}}xai{{else if eq .Provider "antigravity"}}antigravity{{else}}openai{{end}}.png" alt="" width="28" height="28">
+    </div>
+    <div class="conn-identity">
+      <div class="conn-title-row">
+        <strong class="conn-name" title="{{if .Label}}{{.Label}}{{else}}{{.ID}}{{end}}">{{if .Label}}{{.Label}}{{else}}{{.ID}}{{end}}</strong>
+        {{if .Plan}}<span class="plan-chip plan-{{planClass .Plan}}" title="Subscription plan">{{formatPlan .Plan}}</span>{{end}}
+      </div>
+      <div class="conn-badges">
+        {{if .QuotaExhausted}}<span class="pill danger"><i class="dot"></i>exhausted</span>
+        {{else if .Enabled}}<span class="pill ok"><i class="dot"></i>active</span>
+        {{else}}<span class="pill"{{if .DisabledReason}} title="{{.DisabledReason}}"{{end}}><i class="dot"></i>disabled</span>{{end}}
+        <span class="pill muted">OAuth</span>
+        <span class="pill muted">#{{.Weight}}</span>
+        {{if not .QuotaUpdatedAt.IsZero}}<span class="pill muted">{{printf "%.0f" .QuotaRemainingPercent}}%</span>{{end}}
+        {{if not .QuotaResetAt.IsZero}}<span class="pill muted">{{formatReset .QuotaResetAt}}</span>{{end}}
+      </div>
+      {{/* This layout is the one the connections page shows, so the reason has to appear here
+           too — putting it only on the card template left it invisible where users look. */}}
+      {{if and (not .Enabled) .DisabledReason}}<div class="conn-reason" title="{{.DisabledReason}}">⚠ {{.DisabledReason}}</div>{{end}}
+    </div>
+  </div>
+  <div class="conn-actions">
+    <button class="icon-btn" hx-post="/ui/accounts/{{urlquery .ID}}/quota" hx-target="#accounts" hx-swap="innerHTML" title="Ping / refresh quota">⚡</button>
+    <form hx-post="/ui/accounts/{{urlquery .ID}}" hx-target="#accounts" hx-swap="innerHTML" class="toggle-form">
+      <input type="hidden" name="weight" value="{{.Weight}}">
+      <input type="hidden" name="view" value="connections">
+      {{/* Submitted from the control itself, for the reason given on the card template. */}}
+      <label class="switch" title="{{if .Enabled}}Disable{{else}}Enable{{end}}">
+        <input type="checkbox" name="enabled" value="true" {{if .Enabled}}checked{{end}}>
+        <span class="slider"></span>
+      </label>
+    </form>
+    <button class="icon-btn danger" hx-delete="/ui/accounts/{{urlquery .ID}}" hx-target="closest article" hx-swap="outerHTML" hx-confirm="Delete this connection?" title="Delete">🗑</button>
+  </div>
+</article>
+{{end}}
+
+{{define "accounts"}}
+{{if eq .View "connections"}}
+  {{if .Accounts}}
+  <div class="conn-list">
+    {{range .Accounts}}{{template "connection" .}}{{end}}
+  </div>
+  {{else}}
+  <div class="empty-state">
+    <strong>No connections yet</strong>
+    <p>Connect this provider to add OAuth accounts to the pool.</p>
+  </div>
+  {{end}}
+{{else if eq .View "quota"}}
+  {{template "quota-board" .}}
+{{else}}
+  {{if .Accounts}}
+  <div class="account-grid">{{range .Accounts}}{{template "account" .}}{{end}}</div>
+  {{else}}
+  <div class="empty-state"><strong>No accounts</strong><p>Connect a provider first.</p></div>
+  {{end}}
+{{end}}
+{{end}}
+
+{{define "quota-board"}}
+<div class="quota-board" id="quota-board" data-auto-refresh="{{if .AutoRefresh}}1{{else}}0{{end}}">
+  <div class="quota-toolbar">
+    <div class="quota-filters">
+    <label class="qt-select">
+      <span class="qt-ico" aria-hidden="true">▦</span>
+      <select name="provider" data-quota-filter="provider" aria-label="Filter providers">
+        <option value="" {{if eq .FilterProvider ""}}selected{{end}}>All Providers</option>
+        <option value="codex" {{if eq .FilterProvider "codex"}}selected{{end}}>Codex</option>
+        <option value="claude" {{if eq .FilterProvider "claude"}}selected{{end}}>Claude</option>
+        <option value="xai" {{if eq .FilterProvider "xai"}}selected{{end}}>xAI (Grok)</option>
+        <option value="antigravity" {{if eq .FilterProvider "antigravity"}}selected{{end}}>Antigravity</option>
+      </select>
+    </label>
+    <label class="qt-select">
+      <span class="qt-ico" aria-hidden="true">☰</span>
+      <select name="status" data-quota-filter="status" aria-label="Filter accounts">
+        <option value="" {{if eq .FilterStatus ""}}selected{{end}}>All accounts</option>
+        <option value="available" {{if eq .FilterStatus "available"}}selected{{end}}>Available</option>
+        <option value="empty" {{if eq .FilterStatus "empty"}}selected{{end}}>Empty / exhausted</option>
+        <option value="disabled" {{if eq .FilterStatus "disabled"}}selected{{end}}>Disabled</option>
+      </select>
+    </label>
+    <label class="qt-select">
+      <span class="qt-ico" aria-hidden="true">⏳</span>
+      <select name="sort" data-quota-filter="sort" aria-label="Sort accounts">
+        <option value="expiring" {{if or (eq .Sort "expiring") (eq .Sort "")}}selected{{end}}>Expiring first</option>
+        <option value="remaining" {{if eq .Sort "remaining"}}selected{{end}}>Lowest remaining</option>
+        <option value="name" {{if eq .Sort "name"}}selected{{end}}>Name</option>
+        <option value="provider" {{if eq .Sort "provider"}}selected{{end}}>Provider</option>
+      </select>
+    </label>
+    </div>
+    <div class="quota-tools">
+      <details class="quota-bulk">
+        <summary class="qt-btn">Bulk actions</summary>
+        <div class="quota-bulk-menu">
+          <button type="button" class="qt-btn danger" data-quota-bulk="disable-empty" title="Disable exhausted accounts">⊘ Turn off Empty</button>
+          <button type="button" class="qt-btn ok" data-quota-bulk="enable-available" title="Enable non-exhausted accounts">✓ Turn on Available</button>
+        </div>
+      </details>
+      <button type="button" class="qt-btn {{if .AutoRefresh}}is-on{{end}}" data-quota-autorefresh title="Auto-refresh while this page is open">
+        <span class="qt-toggle"></span>
+        <span data-quota-countdown>Auto-refresh</span>
+      </button>
+      <button type="button" class="qt-btn icon" data-quota-refresh title="Refresh now">↻</button>
+    </div>
+  </div>
+
+  {{if .Accounts}}
+  <div class="quota-summary"><strong>{{.Total}}</strong> accounts <span>·</span> <b class="ok">{{.Enabled}} active</b>{{if .Exhausted}} <span>·</span> <b class="danger">{{.Exhausted}} need attention</b>{{end}}</div>
+  <div class="quota-groups">
+    {{range .QuotaGroups}}
+    <section class="quota-provider" data-quota-provider="{{.ID}}">
+      <button type="button" class="quota-provider-head" data-quota-group-toggle aria-expanded="true" aria-controls="quota-group-{{.ID}}">
+        <span class="quota-provider-identity">
+          <img src="/ui/assets/providers/{{if eq .ID "codex"}}codex{{else if eq .ID "claude"}}claude{{else if eq .ID "xai"}}xai{{else if eq .ID "antigravity"}}antigravity{{else}}openai{{end}}.png" alt="" width="28" height="28">
+          <span><strong>{{.Name}}</strong><small>{{.Total}} account{{if ne .Total 1}}s{{end}}</small></span>
+        </span>
+        <span class="quota-provider-stats"><b class="ok">{{.Enabled}} active</b>{{if .Exhausted}}<b class="danger">{{.Exhausted}} empty</b>{{end}}{{if .Disabled}}<b>{{.Disabled}} off</b>{{end}}<i aria-hidden="true">⌄</i></span>
+      </button>
+      <div class="quota-grid" id="quota-group-{{.ID}}">
+        {{range .Accounts}}{{template "account" .}}{{end}}
+      </div>
+    </section>
+    {{end}}
+  </div>
+  <div class="quota-foot">Showing {{len .Accounts}} account{{if ne (len .Accounts) 1}}s{{end}} across {{len .QuotaGroups}} provider{{if ne (len .QuotaGroups) 1}}s{{end}}</div>
+  {{else}}
+  <div class="empty-state">
+    <strong>No matching accounts</strong>
+    <p>Adjust filters or connect a provider.</p>
+  </div>
+  {{end}}
+</div>
+{{end}}
+

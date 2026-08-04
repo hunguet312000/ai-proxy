@@ -1,0 +1,74 @@
+server:
+  # LITEROUTER_SERVER_ADDR
+  addr: "127.0.0.1:8317"
+  # Go duration format. ENV names follow the field names below.
+  read_timeout: 10s       # LITEROUTER_SERVER_READ_TIMEOUT
+  write_timeout: 0s       # LITEROUTER_SERVER_WRITE_TIMEOUT; 0 permits long SSE streams
+  idle_timeout: 60s       # LITEROUTER_SERVER_IDLE_TIMEOUT
+  shutdown_timeout: 15s   # LITEROUTER_SERVER_SHUTDOWN_TIMEOUT
+
+storage:
+  # LITEROUTER_STORAGE_PATH
+  path: ./data/literouter.db
+  usage_retention: 2160h  # LITEROUTER_STORAGE_USAGE_RETENTION; 90 days, 0 disables cleanup
+
+oauth:
+  # Proactive token refresh scan. LITEROUTER_OAUTH_REFRESH_INTERVAL
+  refresh_interval: 1m
+
+router:
+  # round_robin, weighted, least_used, least_used_rpm, sticky, sticky_soft, failover, or smart.
+  # LITEROUTER_ROUTER_STRATEGY — sticky_soft binds a session then migrates under pressure.
+  strategy: sticky_soft
+  # Each alias lists concrete models in fallback order. Prefer empty for Claude CLI.
+  model_aliases: {}
+  # LITEROUTER_ROUTER_PLAN_MODEL — serves Claude Code turns taken while plan mode is
+  # active, whatever model the client sent. Point Claude Code at a cheap model and it
+  # plans here instead. Unlike the client's own opusplan setting, this is not disabled
+  # above 200k prompt tokens. Empty disables it. May be an alias from model_aliases.
+  plan_model: ""
+  # Cap the max_tokens forwarded upstream, per model. Keys match exactly or as a model
+  # prefix, like context.model_windows.
+  #
+  # Normally you do not need this. LiteRouter learns each model's cap from the first
+  # upstream rejection, retries that turn transparently with the cap applied, and
+  # persists it to catalog_models.max_output_tokens (shown as "out" next to the context
+  # window in the dashboard). When the upstream refuses on output budget without naming
+  # its limit, it steps down 8192 then 2048 instead. Set an entry here only to pin a
+  # value the gateway got wrong, or to skip the rejection on a model whose cap you
+  # already know — configuration always wins over learning.
+  max_output_tokens: {}          # e.g. cc/small: 8192
+
+cache:
+  response_ttl: 15m                 # LITEROUTER_CACHE_RESPONSE_TTL
+  response_max_entries: 0           # LITEROUTER_CACHE_RESPONSE_MAX_ENTRIES; 0 disables response cache
+  compression_mode: safe            # LITEROUTER_CACHE_COMPRESSION_MODE: safe or aggressive
+  prompt_cache_min_bytes: 0         # LITEROUTER_CACHE_PROMPT_MIN_BYTES; 0 disables injected prompt_cache_key
+  xai_prompt_cache_key: false       # LITEROUTER_CACHE_XAI_PROMPT_CACHE_KEY; enable only for verified compatible endpoints
+
+context:
+  enabled: false           # LITEROUTER_CONTEXT_ENABLED; false skips auto-compact + summarize
+  guard_enabled: true      # LITEROUTER_CONTEXT_GUARD_ENABLED; fail-fast at the model's DB context limit
+  default_window: 128000
+  soft_ratio: 0.78
+  summarize_ratio: 0.88
+  hard_ratio: 0.96
+  keep_recent_turns: 6
+  reserve_tokens: 2048
+  summarize_model: ""       # Empty uses the resolved request model.
+  summarize_max_tokens: 4000
+  summarize_timeout: 60s     # LITEROUTER_CONTEXT_SUMMARIZE_TIMEOUT; on timeout LiteRouter drops oldest turns instead of failing.
+  model_windows: {}          # Exact or prefix model names, e.g. gpt-4.1: 1000000.
+
+providers:
+  openai:
+    base_url: https://api.openai.com/v1  # LITEROUTER_OPENAI_BASE_URL
+  xai:
+    base_url: https://api.x.ai/v1        # LITEROUTER_XAI_BASE_URL
+
+log:
+  # debug, info, warn, or error. LITEROUTER_LOG_LEVEL
+  level: info
+
+# Required outside YAML: LITEROUTER_MASTER_KEY must be a base64-encoded 32-byte key.
+# Generate one with: openssl rand -base64 32

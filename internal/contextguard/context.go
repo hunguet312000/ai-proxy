@@ -1,0 +1,211 @@
+package contextguard
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"literouter/internal/provider"
+)
+
+var ErrBudgetExceeded = errors.New("context budget exceeded")
+
+type Policy struct {
+	SoftRatio       float64
+	SummarizeRatio  float64
+	HardRatio       float64
+	KeepRecentTurns int
+	ReserveTokens   int
+}
+
+type Limits struct {
+	Default int
+	Models  map[string]int
+}
+
+type CheckResult struct {
+	InputTokens      int
+	SafeLimit        int
+	Window           int
+	EstimatedOverage bool
+	Exceeded         bool
+}
+
+type Result struct {
+	Request      provider.Request
+	BeforeTokens int
+	AfterTokens  int
+	SavedTokens  int
+	Window       int
+	Compacted    bool
+	NeedsSummary bool
+}
+
+func DefaultPolicy() Policy {
+	return Policy{SoftRatio: 0.78, SummarizeRatio: 0.88, HardRatio: 0.96, KeepRecentTurns: 6, ReserveTokens: 2048}
+}
+
+func (limits Limits) Window(model string) int {
+	if window := limits.Models[model]; window > 0 {
+		return window
+	}
+	bestLength, bestWindow := 0, 0
+	for prefix, window := range limits.Models {
+		if window > 0 && modelPrefixMatch(model, prefix) && len(prefix) > bestLength {
+			bestLength, bestWindow = len(prefix), window
+		}
+	}
+	if bestWindow > 0 {
+		return bestWindow
+	}
+	return HybridWindow(model, limits.Default)
+}
+
+// HybridWindow is the conservative fallback for models without catalog metadata.
+// It avoids assuming oversized vendor windows and preserves quality by compacting later.
+func HybridWindow(model string, fallback int) int {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if fallback <= 0 {
+		fallback = 128_000
+	}
+	switch {
+	// Current Claude generations ship 1M windows. Assuming 200k here made LiteRouter
+	// summarize and reject long coding sessions the model could serve, so prefer the
+	// real window and let the upstream tokenizer make the authoritative rejection.
+	case modelPrefixMatch(model, "claude-opus-4"), modelPrefixMatch(model, "claude-opus-5"),
+		modelPrefixMatch(model, "claude-sonnet-4-6"), modelPrefixMatch(model, "claude-sonnet-5"),
+		modelPrefixMatch(model, "claude-fable"), modelPrefixMatch(model, "claude-mythos"):
+		return max(fallback, 1_000_000)
+	case modelPrefixMatch(model, "claude"):
+		return max(fallback, 200_000)
+	case modelPrefixMatch(model, "gemini"), modelPrefixMatch(model, "ag"), modelPrefixMatch(model, "antigravity"):
+		return max(fallback, 1_000_000)
+	case modelPrefixMatch(model, "gpt-4.1"):
+		return max(fallback, 1_000_000)
+	case modelPrefixMatch(model, "gpt-5"), modelPrefixMatch(model, "cx/gpt-5"), modelPrefixMatch(model, "o1"), modelPrefixMatch(model, "o3"), modelPrefixMatch(model, "o4"):
+		return max(fallback, 200_000)
+	case modelPrefixMatch(model, "grok-4"), modelPrefixMatch(model, "xai/grok-4"), modelPrefixMatch(model, "grok-code"), modelPrefixMatch(model, "xai/grok-code"):
+		return max(fallback, 256_000)
+	default:
+		return fallback
+	}
+}
+
+func modelPrefixMatch(model, prefix string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	if model == prefix {
+		return true
+	}
+	if prefix == "" || !strings.HasPrefix(model, prefix) {
+		return false
+	}
+	if strings.ContainsRune("-._/:@ (", rune(prefix[len(prefix)-1])) {
+		return true
+	}
+	return len(model) > len(prefix) && strings.ContainsRune("-._/:@ (", rune(model[len(prefix)]))
+}
+
+func (policy Policy) Validate() error {
+	if policy.SoftRatio <= 0 || policy.SoftRatio >= policy.SummarizeRatio || policy.SummarizeRatio >= policy.HardRatio || policy.HardRatio > 1 {
+		return fmt.Errorf("context ratios must satisfy 0 < soft < summarize < hard <= 1")
+	}
+	if policy.KeepRecentTurns < 1 || policy.ReserveTokens < 0 {
+		return fmt.Errorf("recent turns must be positive and reserve tokens cannot be negative")
+	}
+	return nil
+}
+
+func Check(request provider.Request, limits Limits, policy Policy) (CheckResult, error) {
+	if err := policy.Validate(); err != nil {
+		return CheckResult{}, err
+	}
+	window := limits.Window(request.Model)
+	inputTokens := EstimateRequest(request)
+	safeLimit := window - outputReserve(request, policy, window) - safetyReserve(window)
+	// EstimateRequest is intentionally conservative and is not tokenizer-authoritative.
+	// Crossing the policy threshold is telemetry only; upstream must make the hard
+	// rejection with its exact tokenizer and actual model context window.
+	estimatedOverage := safeLimit < 1 || float64(inputTokens) >= float64(safeLimit)*policy.HardRatio
+	return CheckResult{
+		InputTokens:      inputTokens,
+		SafeLimit:        safeLimit,
+		Window:           window,
+		EstimatedOverage: estimatedOverage,
+		Exceeded:         false,
+	}, nil
+}
+
+func Prepare(request provider.Request, limits Limits, policy Policy) (Result, error) {
+	if err := policy.Validate(); err != nil {
+		return Result{}, err
+	}
+	result := Result{Request: cloneRequest(request), Window: limits.Window(request.Model)}
+	result.BeforeTokens = EstimateRequest(result.Request)
+	result.AfterTokens = result.BeforeTokens
+	available := result.Window - outputReserve(request, policy, result.Window) - safetyReserve(result.Window)
+	if available < 1 {
+		return result, ErrBudgetExceeded
+	}
+	if float64(result.BeforeTokens) < float64(available)*policy.SoftRatio {
+		return result, nil
+	}
+	compact(&result.Request, policy, available)
+	result.AfterTokens = EstimateRequest(result.Request)
+	result.SavedTokens = max(result.BeforeTokens-result.AfterTokens, 0)
+	result.Compacted = result.SavedTokens > 0
+	result.NeedsSummary = float64(result.AfterTokens) >= float64(available)*policy.SummarizeRatio
+	if float64(result.AfterTokens) >= float64(available)*policy.HardRatio && !result.NeedsSummary {
+		return result, ErrBudgetExceeded
+	}
+	return result, nil
+}
+
+// HardBudget is the largest estimated input that still stays under the hard ratio.
+// Callers use it to trim deterministically instead of failing the request.
+func HardBudget(request provider.Request, limits Limits, policy Policy) int {
+	window := limits.Window(request.Model)
+	available := window - outputReserve(request, policy, window) - safetyReserve(window)
+	if available < 1 {
+		return 0
+	}
+	return max(int(float64(available)*policy.HardRatio)-1, 0)
+}
+
+func ExceedsHardLimit(result Result, policy Policy) bool {
+	available := result.Window - outputReserve(result.Request, policy, result.Window) - safetyReserve(result.Window)
+	return available < 1 || float64(result.AfterTokens) >= float64(available)*policy.HardRatio
+}
+
+// safetyReserve absorbs tokenizer-estimation error and provider envelope overhead.
+// Five percent scales with modern 200k–1M windows instead of becoming negligible.
+func safetyReserve(window int) int {
+	if window <= 0 {
+		return 0
+	}
+	return max(window/20, 64)
+}
+
+func outputReserve(request provider.Request, policy Policy, window int) int {
+	output := request.MaxTokens
+	if request.MaxCompletionTokens > output {
+		output = request.MaxCompletionTokens
+	}
+	if output == 0 {
+		// Small custom/test windows cannot reserve more output than input space.
+		output = min(8_192, max(window/10, 1))
+	}
+	return output + policy.ReserveTokens
+}
+
+func cloneRequest(request provider.Request) provider.Request {
+	result := request
+	result.System = append([]provider.Content(nil), request.System...)
+	result.Tools = append([]provider.Tool(nil), request.Tools...)
+	result.Messages = make([]provider.Message, len(request.Messages))
+	for index, message := range request.Messages {
+		result.Messages[index] = message
+		result.Messages[index].Content = append([]provider.Content(nil), message.Content...)
+	}
+	return result
+}

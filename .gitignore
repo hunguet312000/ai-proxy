@@ -1,0 +1,22 @@
+# Build output
+/literouter
+/bin/
+
+# Local configuration and secrets
+/config.yaml
+.env
+.env.*
+!.env.example
+
+# Runtime data
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/

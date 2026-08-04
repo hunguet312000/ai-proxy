@@ -1,0 +1,1169 @@
+package gateway
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"literouter/internal/cache"
+	"literouter/internal/contextguard"
+	"literouter/internal/provider"
+	"literouter/internal/translator"
+)
+
+var ErrProviderUnavailable = errors.New("provider is not configured")
+
+type JSONClient interface {
+	DoJSON(ctx context.Context, path string, requestBody, responseBody any) error
+}
+
+type OAuthInference interface {
+	DoJSON(ctx context.Context, request translator.OpenAIRequest, conversationID string) (translator.OpenAIResponse, error)
+	DoStream(ctx context.Context, request translator.OpenAIRequest, conversationID string) (io.ReadCloser, error)
+	// SupportsAnthropicPassthrough reports whether the model can be served by an
+	// Anthropic-native upstream, which lets the gateway skip translation entirely.
+	SupportsAnthropicPassthrough(model string) bool
+	DoAnthropicStream(ctx context.Context, payload []byte, model, conversationID, betas string) (io.ReadCloser, error)
+}
+
+type summaryClient struct{ service *Service }
+
+func (client summaryClient) Summarize(ctx context.Context, input contextguard.SummaryInput) (string, error) {
+	model := input.Model
+	if client.service.summaryModel != "" {
+		model = client.service.summaryModel
+	}
+	const instruction = `Compress the older conversation into a loss-minimizing continuation context.
+Preserve exactly: user intent, constraints, preferences, acceptance criteria, unresolved tasks, decisions and rationale, file paths, code symbols, APIs, commands, IDs, numbers, URLs, errors, failed attempts, test results, current state, next action, and tool findings.
+Never invent or claim unfinished work completed. Distinguish verified facts from assumptions. Use dense structured bullets and exact strings when later work depends on them.`
+	budget := client.service.summaryInputBudget(model, input.MaxTokens)
+	batches, err := contextguard.SummaryBatches(input.Messages, budget)
+	if err != nil {
+		return "", err
+	}
+	if len(batches) == 0 {
+		return "", fmt.Errorf("summarizer received no messages")
+	}
+	summaries := make([]string, 0, len(batches))
+	for _, batch := range batches {
+		text, err := client.summarizeBatch(ctx, model, instruction, batch, input.MaxTokens)
+		if err != nil {
+			return "", err
+		}
+		summaries = append(summaries, text)
+	}
+	for len(summaries) > 1 {
+		messages := make([]provider.Message, len(summaries))
+		for index, summary := range summaries {
+			messages[index] = provider.Message{Role: "user", Content: []provider.Content{{Type: "text", Text: summary}}}
+		}
+		next := make([]string, 0, len(summaries))
+		reductionBatches, err := contextguard.SummaryBatches(messages, budget)
+		if err != nil {
+			return "", err
+		}
+		for _, batch := range reductionBatches {
+			text, err := client.summarizeBatch(ctx, model, instruction+" Merge these partial summaries without dropping unique facts.", batch, input.MaxTokens)
+			if err != nil {
+				return "", err
+			}
+			next = append(next, text)
+		}
+		if len(next) >= len(summaries) {
+			return strings.Join(next, "\n"), nil
+		}
+		summaries = next
+	}
+	return summaries[0], nil
+}
+
+func (client summaryClient) summarizeBatch(ctx context.Context, model, instruction string, messages []provider.Message, maxTokens int) (string, error) {
+	temperature := 0.0
+	request := provider.Request{
+		Model: model, MaxTokens: maxTokens, Temperature: &temperature,
+		System: []provider.Content{{Type: "text", Text: instruction}}, Messages: messages,
+	}
+	upstreamRequest, err := translator.ToOpenAIRequest(request)
+	if err != nil {
+		return "", err
+	}
+	var lastErr error
+	for _, candidate := range client.service.modelChain(model) {
+		upstreamRequest.Model = candidate
+		var response translator.OpenAIResponse
+		if client.service.oauthInference != nil {
+			response, err = client.service.oauthInference.DoJSON(ctx, upstreamRequest, conversationID(ctx))
+			if err == nil {
+				return summaryResponseText(response)
+			}
+			lastErr = err
+		}
+		upstream := client.service.clientForModel(candidate)
+		if upstream == nil {
+			continue
+		}
+		upstreamRequest.Model = upstreamModel(candidate)
+		if err = upstream.DoJSON(ctx, "/chat/completions", upstreamRequest, &response); err != nil {
+			lastErr = err
+			if retryableProviderError(err) {
+				continue
+			}
+			return "", err
+		}
+		return summaryResponseText(response)
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", ErrProviderUnavailable
+}
+
+func summaryResponseText(response translator.OpenAIResponse) (string, error) {
+	if len(response.Choices) == 0 {
+		return "", fmt.Errorf("summarizer returned no choices")
+	}
+	switch content := response.Choices[0].Message.Content.(type) {
+	case string:
+		if strings.TrimSpace(content) != "" {
+			return content, nil
+		}
+	case []translator.OpenAIContentPart:
+		var text strings.Builder
+		for _, part := range content {
+			text.WriteString(part.Text)
+		}
+		if strings.TrimSpace(text.String()) != "" {
+			return text.String(), nil
+		}
+	}
+	return "", fmt.Errorf("summarizer returned empty content")
+}
+
+func (s *Service) summaryInputBudget(model string, maxTokens int) int {
+	window := s.resolveContextWindow(context.Background(), model)
+	if window <= 0 {
+		window = s.contextLimits.Window(model)
+	}
+	return max(window-max(maxTokens, 8_000)-max(window/20, 2_048), 1_024)
+}
+
+type Service struct {
+	openAI           JSONClient
+	xai              JSONClient
+	openAIStream     StreamClient
+	xaiStream        StreamClient
+	oauthInference   OAuthInference
+	responses        *cache.ResponseCache
+	compressionMode  cache.CompressionMode
+	promptMinBytes   int
+	xaiPromptCache   bool
+	models           []string
+	aliases          map[string][]string
+	planModel        atomic.Pointer[string]
+	longContext      longContextPointer
+	imageRoute       atomic.Pointer[imageRoute]
+	outputLimits     map[string]int
+	learnedLimits    map[string]int
+	learnedWindows   map[string]int
+	observedWindows  map[string]int
+	tokenScales      map[string]tokenScale
+	warnedInflated   map[string]bool
+	learnedMu        sync.RWMutex
+	onOutputLimit    func(model string, limit int)
+	onContextWindow  func(model string, window int)
+	contextEnabled   bool
+	contextGuard     bool
+	contextLimits    contextguard.Limits
+	customProviders  *CustomProviderRegistry
+	touchCustomKey   func(keyID string)
+	contextWindow    func(context.Context, string) (int, error)
+	contextPolicy    contextguard.Policy
+	summarizer       contextguard.Summarizer
+	summaryCache     *contextguard.SummaryCache
+	summaryModel     string
+	summaryMaxTokens int
+	summaryTimeout   time.Duration
+	onUsage          func(UsageEvent)
+}
+
+type Options struct {
+	OpenAI          JSONClient
+	XAI             JSONClient
+	OpenAIStream    StreamClient
+	XAIStream       StreamClient
+	OAuthInference  OAuthInference
+	ResponseCache   *cache.ResponseCache
+	CompressionMode cache.CompressionMode
+	PromptMinBytes  int
+	XAIPromptCache  bool
+	Models          []string
+	Aliases         map[string][]string
+	// PlanModel overrides the requested model on /v1/messages turns taken while
+	// Claude Code's plan mode is active. Empty disables the override entirely,
+	// including the transcript scan it needs.
+	PlanModel string
+	// LongContextModel serves a /v1/messages turn whose prompt is too large a share of
+	// the window belonging to the model that would otherwise take it. Empty disables it.
+	LongContextModel string
+	// LongContextPercent is that share, 1..99. Zero means defaultLongContextPercent.
+	LongContextPercent int
+	// ImageModel serves a turn carrying an image whose routed model was declared unable to
+	// read one. Empty makes such a turn a clear refusal instead.
+	ImageModel string
+	// TextOnlyModels names the models that cannot read images, by exact id or prefix. It
+	// has to be named because no vendor exposes it reliably and no model id carries it.
+	TextOnlyModels []string
+	// MaxOutputTokens caps max_tokens per model, keyed by exact id or model prefix.
+	// Explicit configuration: it wins over anything the gateway learns at runtime.
+	MaxOutputTokens map[string]int
+	// LearnedOutputTokens seeds the runtime cache from whatever previous runs observed,
+	// so a restart does not re-pay the one rejection it took to discover each cap.
+	LearnedOutputTokens map[string]int
+	// OnOutputLimit is called when a new cap is learned from an upstream rejection, so
+	// it can be persisted. It runs on the request path; keep it cheap and non-blocking.
+	OnOutputLimit func(model string, limit int)
+	// OnContextWindow is called when an upstream rejection reveals a model's real
+	// context window, so the catalog can be corrected. Same contract as OnOutputLimit:
+	// it runs on the request path and must not block.
+	//
+	// Learned windows need no seeding counterpart. They are persisted into the same
+	// catalog column ContextWindow already reads, so the next boot picks them up as
+	// ordinary catalog data.
+	OnContextWindow func(model string, window int)
+	ContextEnabled  bool
+	ContextGuard    bool
+	ContextLimits   contextguard.Limits
+	// CustomProviders resolves user-registered upstreams by model prefix.
+	CustomProviders *CustomProviderRegistry
+	// TouchCustomKey records that a key served a request, for the UI's last-used
+	// column. It is a callback so the gateway keeps no storage dependency.
+	TouchCustomKey   func(keyID string)
+	ContextWindow    func(context.Context, string) (int, error)
+	ContextPolicy    contextguard.Policy
+	Summarizer       contextguard.Summarizer
+	SummaryCache     *contextguard.SummaryCache
+	SummaryModel     string
+	SummaryMaxTokens int
+	SummaryTimeout   time.Duration
+	OnUsage          func(UsageEvent)
+}
+
+func New(options Options) *Service {
+	service := &Service{
+		openAI: options.OpenAI, xai: options.XAI, openAIStream: options.OpenAIStream, xaiStream: options.XAIStream,
+		oauthInference: options.OAuthInference, responses: options.ResponseCache,
+		compressionMode: options.CompressionMode, promptMinBytes: options.PromptMinBytes, xaiPromptCache: options.XAIPromptCache,
+		models: append([]string(nil), options.Models...), aliases: cloneAliases(options.Aliases),
+		outputLimits:    cloneOutputLimits(options.MaxOutputTokens),
+		learnedLimits:   cloneOutputLimits(options.LearnedOutputTokens),
+		onOutputLimit:   options.OnOutputLimit,
+		onContextWindow: options.OnContextWindow,
+		contextEnabled:  options.ContextEnabled, contextGuard: options.ContextGuard, contextLimits: options.ContextLimits, contextWindow: options.ContextWindow, contextPolicy: options.ContextPolicy,
+		customProviders: options.CustomProviders, touchCustomKey: options.TouchCustomKey,
+		summarizer: options.Summarizer, summaryCache: options.SummaryCache, summaryModel: options.SummaryModel,
+		summaryMaxTokens: options.SummaryMaxTokens, summaryTimeout: options.SummaryTimeout,
+		onUsage: options.OnUsage,
+	}
+	service.SetPlanModel(options.PlanModel)
+	service.SetLongContext(options.LongContextModel, options.LongContextPercent)
+	service.SetImageRoute(options.ImageModel, options.TextOnlyModels)
+	if service.contextEnabled {
+		if service.summarizer == nil {
+			service.summarizer = summaryClient{service: service}
+		}
+		if service.summaryCache == nil {
+			service.summaryCache = contextguard.NewSummaryCache(128)
+		}
+		if service.summaryMaxTokens <= 0 {
+			service.summaryMaxTokens = 1200
+		}
+		if service.summaryTimeout <= 0 {
+			// Summarization runs inline in the request path against a live upstream.
+			// 20s routinely expired on large coding contexts and turned every long
+			// session into a stall followed by a rejection.
+			service.summaryTimeout = 60 * time.Second
+		}
+	}
+	return service
+}
+
+func (s *Service) Chat(ctx context.Context, request translator.OpenAIRequest) (translator.OpenAIResponse, error) {
+	return s.chat(ctx, request, "/v1/chat/completions")
+}
+
+func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, endpoint string) (translator.OpenAIResponse, error) {
+	if request.Model == "" || len(request.Messages) == 0 {
+		return translator.OpenAIResponse{}, fmt.Errorf("model and messages are required")
+	}
+	if request.Stream {
+		return translator.OpenAIResponse{}, fmt.Errorf("streaming requires the streaming gateway")
+	}
+	ctx = withPromptCacheSeed(ctx, request)
+	cacheEligible := s.responses != nil && s.cacheableOpenAIRequest(request)
+	var response translator.OpenAIResponse
+	var lastErr error
+	chain := s.modelChain(request.Model)
+	// Indexed rather than ranged so an output-cap rejection can rewind onto the same
+	// candidate, exactly as the streaming and Anthropic paths do.
+	clampAttempts := map[string]int{}
+	for index := 0; index < len(chain); index++ {
+		model := chain[index]
+		client := s.clientForModel(model)
+		candidate := request
+		candidate.Model = model
+		// Per candidate, not once per request: an alias chain can mix models whose
+		// output caps differ, and the cap that matters is the one for whoever serves
+		// the turn.
+		s.clampOpenAIOutput(&candidate)
+		candidate, err := s.prepareOpenAIRequest(ctx, candidate)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		key := ""
+		if cacheEligible {
+			key, err = responseKey(candidate)
+			if err != nil {
+				return translator.OpenAIResponse{}, err
+			}
+			if encoded, ok := s.responses.Get(key); ok && json.Unmarshal(encoded, &response) == nil {
+				return response, nil
+			}
+		}
+		s.applyOpenAIPromptCache(ctx, &candidate)
+		err = nil
+		// A custom provider owns this model outright: neither the OAuth pool nor the
+		// built-in client may be tried, since sending a prefixed model to them would
+		// either report a bogus outage or hit the wrong upstream entirely.
+		custom, isCustom := s.resolveCustomProvider(model)
+		if isCustom {
+			path, pathErr := customUpstreamPath(custom.APIType)
+			if pathErr != nil {
+				return translator.OpenAIResponse{}, pathErr
+			}
+			logCustomTarget(custom, endpoint)
+			candidate.Model = custom.Model
+			response = translator.OpenAIResponse{}
+			if err = custom.Client.DoJSON(ctx, path, candidate, &response); err == nil {
+				s.touchCustomProviderKey(custom.KeyID)
+			}
+		} else if s.oauthInference != nil {
+			response, err = s.oauthInference.DoJSON(ctx, candidate, conversationID(ctx))
+		}
+		if !isCustom && (err != nil || s.oauthInference == nil) {
+			if client == nil {
+				if err != nil {
+					lastErr = err
+				} else {
+					lastErr = ErrProviderUnavailable
+				}
+				continue
+			}
+			candidate.Model = upstreamModel(model)
+			err = client.DoJSON(ctx, "/chat/completions", candidate, &response)
+		}
+		if err != nil {
+			lastErr = err
+			s.learnContextWindow(model, 0, err)
+			if s.learnOutputLimit(model, requestedOutputTokens(candidate), clampAttempts[model], err) {
+				clampAttempts[model]++
+				index--
+				continue
+			}
+			if !retryableProviderError(err) {
+				return translator.OpenAIResponse{}, err
+			}
+			continue
+		}
+		if cacheEligible && cacheableOpenAIResponse(response) {
+			if encoded, err := json.Marshal(response); err == nil {
+				s.responses.Put(key, encoded, false, false)
+			}
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		return translator.OpenAIResponse{}, lastErr
+	}
+	usage := response.Usage
+	promptEst, completionEst := false, false
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
+		if unified, err := translator.FromOpenAIRequest(request); err == nil {
+			usage.PromptTokens = contextguard.EstimateRequest(unified)
+			promptEst = true
+		}
+		if len(response.Choices) > 0 {
+			usage.CompletionTokens = contextguard.EstimateText(openAIMessageText(response.Choices[0].Message))
+			completionEst = true
+		}
+	}
+	s.recordUsage(UsageEvent{
+		Provider: s.providerNameFor(request.Model), Model: response.Model, RequestModel: request.Model, Endpoint: endpoint,
+		PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
+		CachedTokens:          usage.PromptTokensDetails.CachedTokens,
+		CachedTokensReported:  usage.PromptTokensDetails.CachedTokensReported,
+		PromptTokensEstimated: promptEst, CompletionTokensEstimated: completionEst,
+	})
+	return response, nil
+}
+
+// prepareStreamCandidate applies compression and the context guard to one
+// candidate. When the caller already holds the unified form — the Anthropic
+// endpoint always does — it is reused instead of translating the OpenAI request
+// back, which halves the number of full-history passes per turn.
+func (s *Service) prepareStreamCandidate(ctx context.Context, request translator.OpenAIRequest, unified *provider.Request) (translator.OpenAIRequest, error) {
+	if unified == nil {
+		return s.prepareOpenAIRequest(ctx, request)
+	}
+	if !s.contextEnabled && !s.contextGuard && s.compressionMode != cache.CompressionAggressive {
+		return request, nil
+	}
+	candidate := cloneProviderRequest(*unified)
+	candidate.Model = request.Model
+	candidate.Stream = request.Stream
+	if s.compressionMode == cache.CompressionAggressive {
+		compressToolResults(&candidate, s.compressionMode)
+	}
+	var err error
+	if s.contextEnabled {
+		candidate, err = s.prepareContext(ctx, candidate)
+		if err != nil {
+			return translator.OpenAIRequest{}, err
+		}
+	} else if s.contextGuard {
+		if err := s.guardContext(ctx, candidate); err != nil {
+			return translator.OpenAIRequest{}, err
+		}
+	}
+	result, err := translator.ToOpenAIRequest(candidate)
+	if err != nil {
+		return translator.OpenAIRequest{}, err
+	}
+	result.PromptCacheKey = request.PromptCacheKey
+	return result, nil
+}
+
+func (s *Service) prepareOpenAIRequest(ctx context.Context, request translator.OpenAIRequest) (translator.OpenAIRequest, error) {
+	if !s.contextEnabled && !s.contextGuard && s.compressionMode != cache.CompressionAggressive {
+		return request, nil
+	}
+	unified, err := translator.FromOpenAIRequest(request)
+	if err != nil {
+		return translator.OpenAIRequest{}, err
+	}
+	if s.compressionMode == cache.CompressionAggressive {
+		compressToolResults(&unified, s.compressionMode)
+	}
+	if s.contextEnabled {
+		unified, err = s.prepareContext(ctx, unified)
+		if err != nil {
+			return translator.OpenAIRequest{}, err
+		}
+	} else if s.contextGuard {
+		if err := s.guardContext(ctx, unified); err != nil {
+			return translator.OpenAIRequest{}, err
+		}
+	}
+	result, err := translator.ToOpenAIRequest(unified)
+	if err != nil {
+		return translator.OpenAIRequest{}, err
+	}
+	result.PromptCacheKey = request.PromptCacheKey
+	return result, nil
+}
+
+func (s *Service) Messages(ctx context.Context, request translator.AnthropicRequest) (translator.AnthropicResponse, error) {
+	unified, err := translator.FromAnthropicRequest(request)
+	if err != nil {
+		return translator.AnthropicResponse{}, err
+	}
+	response, err := s.complete(ctx, unified)
+	if err != nil {
+		return translator.AnthropicResponse{}, err
+	}
+	return translator.ToAnthropicResponse(response), nil
+}
+
+func (s *Service) Models() []string {
+	return append([]string(nil), s.models...)
+}
+
+func (s *Service) complete(ctx context.Context, request provider.Request) (provider.Response, error) {
+	if request.Stream {
+		return provider.Response{}, fmt.Errorf("streaming requires the streaming gateway")
+	}
+	ctx = withPromptCacheSeedValue(ctx, request.User, firstProviderUserMessage(request.Messages))
+	cacheEligible := s.responses != nil && s.cacheableProviderRequest(request)
+	var raw translator.OpenAIResponse
+	var response provider.Response
+	var lastErr error
+	chain := s.modelChain(request.Model)
+	// A response with no content is the non-streaming twin of the empty turn the
+	// streaming path retries. Returning it verbatim is what surfaces as an empty
+	// response — and on a /compact request that means the summary silently comes
+	// back blank — so the same retry-then-replay allowance applies here.
+	emptyReplays := 0
+	var emptyResponse provider.Response
+	var sawEmpty bool
+	clampAttempts := map[string]int{}
+	for index := 0; index < len(chain); index++ {
+		model := chain[index]
+		client := s.clientForModel(model)
+		candidate := cloneProviderRequest(request)
+		candidate.Model = model
+		s.clampProviderOutput(&candidate)
+		if s.compressionMode == cache.CompressionAggressive {
+			compressToolResults(&candidate, s.compressionMode)
+		}
+		prepared := candidate
+		var err error
+		if s.contextEnabled {
+			prepared, err = s.prepareContext(ctx, candidate)
+		} else if s.contextGuard {
+			err = s.guardContext(ctx, candidate)
+		}
+		if err != nil {
+			return provider.Response{}, err
+		}
+		upstream, err := translator.ToOpenAIRequest(prepared)
+		if err != nil {
+			return provider.Response{}, err
+		}
+		key := ""
+		if cacheEligible {
+			key, err = responseKey(upstream)
+			if err != nil {
+				return provider.Response{}, err
+			}
+			if encoded, ok := s.responses.Get(key); ok && json.Unmarshal(encoded, &response) == nil {
+				return response, nil
+			}
+		}
+		s.applyOpenAIPromptCache(ctx, &upstream)
+		err = nil
+		target, isCustom := s.resolveCustomProvider(model)
+		if isCustom {
+			path, pathErr := customUpstreamPath(target.APIType)
+			if pathErr != nil {
+				return provider.Response{}, pathErr
+			}
+			logCustomTarget(target, "/v1/messages")
+			upstream.Model = target.Model
+			raw = translator.OpenAIResponse{}
+			if err = target.Client.DoJSON(ctx, path, upstream, &raw); err == nil {
+				s.touchCustomProviderKey(target.KeyID)
+			}
+		} else if s.oauthInference != nil {
+			raw, err = s.oauthInference.DoJSON(ctx, upstream, conversationID(ctx))
+		}
+		if !isCustom && (err != nil || s.oauthInference == nil) {
+			if client == nil {
+				if err != nil {
+					lastErr = err
+				} else {
+					lastErr = ErrProviderUnavailable
+				}
+				continue
+			}
+			upstream.Model = upstreamModel(model)
+			err = client.DoJSON(ctx, "/chat/completions", upstream, &raw)
+		}
+		if err != nil {
+			lastErr = err
+			// A context rejection is banked rather than retried: the prompt cannot be made
+			// to fit by re-sending it, so what the upstream just revealed is only useful to
+			// later turns and to the window reported back to the client.
+			s.learnContextWindow(model, 0, err)
+			// An output-cap rejection is not retryable as sent, but it is retryable once
+			// the cap it just revealed is applied. Learn it and re-attempt this candidate
+			// so the caller never sees the 400.
+			if s.learnOutputLimit(model, requestedOutputTokens(upstream), clampAttempts[model], err) {
+				clampAttempts[model]++
+				index--
+				continue
+			}
+			if !retryableProviderError(err) {
+				return provider.Response{}, err
+			}
+			continue
+		}
+		response, err = translator.FromOpenAIResponse(raw)
+		if err != nil {
+			return provider.Response{}, err
+		}
+		if !providerResponseHasOutput(response, len(request.Tools) > 0) {
+			emptyResponse, sawEmpty = response, true
+			lastErr = errEmptyUpstreamResponse
+			slog.Warn("upstream returned a response with no content", "model", model,
+				"endpoint", "/v1/messages", "replay", emptyReplays)
+			if index == len(chain)-1 && emptyReplays < maxEmptyTurnReplays {
+				// Out of candidates: ask the same one again rather than handing back a
+				// blank answer. Bounded, and only reachable in this dead end.
+				emptyReplays++
+				index--
+			}
+			continue
+		}
+		if cacheEligible && cacheableProviderResponse(response) {
+			if encoded, err := json.Marshal(response); err == nil {
+				s.responses.Put(key, encoded, false, false)
+			}
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		// Every attempt came back blank. The caller still needs a well-formed
+		// response, and reporting an error here would break the legitimate case of a
+		// model that genuinely has nothing left to say.
+		if errors.Is(lastErr, errEmptyUpstreamResponse) && sawEmpty {
+			return emptyResponse, nil
+		}
+		return provider.Response{}, lastErr
+	}
+	usage := raw.Usage
+	promptEst, completionEst := false, false
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
+		usage.PromptTokens = contextguard.EstimateRequest(request)
+		promptEst = true
+		if len(response.Content) > 0 {
+			var out strings.Builder
+			for _, block := range response.Content {
+				if block.Type == "text" || block.Type == "thinking" {
+					out.WriteString(block.Text)
+				}
+			}
+			usage.CompletionTokens = contextguard.EstimateText(out.String())
+			completionEst = true
+		}
+	}
+	// Attribution keys on the requested model, not the echoed one: the upstream
+	// returns its own name with the routing prefix already stripped, so resolving
+	// that would report a custom provider's traffic as the built-in fallback.
+	s.recordUsage(UsageEvent{
+		Provider: s.providerNameFor(request.Model), Model: raw.Model, Endpoint: "/v1/messages",
+		PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
+		CachedTokens:          usage.PromptTokensDetails.CachedTokens,
+		CachedTokensReported:  usage.PromptTokensDetails.CachedTokensReported,
+		PromptTokensEstimated: promptEst, CompletionTokensEstimated: completionEst,
+	})
+	return response, nil
+}
+
+func cloneProviderRequest(request provider.Request) provider.Request {
+	result := request
+	result.System = append([]provider.Content(nil), request.System...)
+	result.Tools = append([]provider.Tool(nil), request.Tools...)
+	result.Messages = make([]provider.Message, len(request.Messages))
+	for index, message := range request.Messages {
+		result.Messages[index] = message
+		result.Messages[index].Content = append([]provider.Content(nil), message.Content...)
+	}
+	return result
+}
+
+func (s *Service) guardContext(ctx context.Context, request provider.Request) error {
+	limits := s.contextLimits
+	window, err := s.resolveContextWindowErr(ctx, request.Model)
+	if err != nil {
+		return fmt.Errorf("resolve context window for %q: %w", request.Model, err)
+	}
+	if window > 0 {
+		limits = contextguard.Limits{Default: window, Models: map[string]int{request.Model: window}}
+	}
+	result, err := contextguard.Check(request, limits, s.contextPolicy)
+	if err != nil {
+		return err
+	}
+	if result.EstimatedOverage {
+		slog.Warn("context estimate exceeds policy threshold; deferring to upstream tokenizer",
+			"model", request.Model, "estimated_input_tokens", result.InputTokens,
+			"safe_limit", result.SafeLimit, "context_window", result.Window)
+	}
+	return nil
+}
+
+func (s *Service) prepareContext(ctx context.Context, request provider.Request) (provider.Request, error) {
+	if !s.contextEnabled {
+		return request, nil
+	}
+	limits := s.contextLimits
+	if window := s.resolveContextWindow(ctx, request.Model); window > 0 {
+		limits = contextguard.Limits{Default: window, Models: map[string]int{request.Model: window}}
+	}
+	prepared, err := contextguard.Prepare(request, limits, s.contextPolicy)
+	if err != nil {
+		if errors.Is(err, contextguard.ErrBudgetExceeded) {
+			return s.trimToBudget(request, limits)
+		}
+		return provider.Request{}, err
+	}
+	if !prepared.NeedsSummary {
+		return prepared.Request, nil
+	}
+	keepRecentTurns := s.summaryRecentTurns(prepared.Request, limits)
+	older := contextguard.SummaryMessages(prepared.Request.Messages, keepRecentTurns)
+	if len(older) == 0 || s.summarizer == nil {
+		if contextguard.ExceedsHardLimit(prepared, s.contextPolicy) {
+			return s.trimToBudget(prepared.Request, limits)
+		}
+		return prepared.Request, nil
+	}
+	model := prepared.Request.Model
+	if s.summaryModel != "" {
+		model = s.summaryModel
+	}
+	// Summarizing means sending the backlog to a model, so the summary call is
+	// itself bound by the context window. Once the backlog alone overflows, the
+	// call cannot succeed — it just burns the whole summary timeout before the
+	// deterministic trim runs anyway, which showed up as a flat 60s added to
+	// time-to-first-token on every oversized turn.
+	if !s.summaryInputFits(older, model, limits) {
+		if contextguard.ExceedsHardLimit(prepared, s.contextPolicy) {
+			slog.Warn("summary backlog exceeds the context window; trimming oldest turns without summarizing",
+				"model", prepared.Request.Model, "summary_model", model, "backlog_messages", len(older))
+			return s.trimToBudget(prepared.Request, limits)
+		}
+		return prepared.Request, nil
+	}
+	key, keyErr := contextguard.SummaryKey(model, s.summaryMaxTokens, older)
+	summaryContext, cancel := context.WithTimeout(ctx, s.summaryTimeout)
+	summarize := func() (string, error) {
+		return s.summarizer.Summarize(summaryContext, contextguard.SummaryInput{
+			Model: model, Messages: older, MaxTokens: s.summaryMaxTokens,
+		})
+	}
+	var summary string
+	if keyErr != nil {
+		summary, err = summarize()
+	} else {
+		summary, err = s.summaryCache.Do(summaryContext, key, summarize)
+	}
+	cancel()
+	if err != nil || strings.TrimSpace(summary) == "" {
+		if contextguard.ExceedsHardLimit(prepared, s.contextPolicy) {
+			slog.Warn("summarization unavailable; trimming oldest turns", "model", prepared.Request.Model, "error", err)
+			return s.trimToBudget(prepared.Request, limits)
+		}
+		return prepared.Request, nil
+	}
+	summarized := contextguard.ApplySummary(prepared.Request, summary, keepRecentTurns)
+	verified, verifyErr := contextguard.Prepare(summarized, limits, s.contextPolicy)
+	if verifyErr != nil || contextguard.ExceedsHardLimit(verified, s.contextPolicy) {
+		return s.trimToBudget(summarized, limits)
+	}
+	return verified.Request, nil
+}
+
+// summaryInputFits reports whether the backlog plus the summary's own output
+// still fits the window the summarization request would be sent under.
+func (s *Service) summaryInputFits(older []provider.Message, model string, limits contextguard.Limits) bool {
+	window := limits.Window(model)
+	if window <= 0 {
+		return true
+	}
+	tokens := contextguard.EstimateRequest(provider.Request{Model: model, Messages: older})
+	return tokens+s.summaryMaxTokens+s.contextPolicy.ReserveTokens <= window
+}
+
+// trimToBudget is the deterministic last resort before rejecting a request.
+// Dropping whole older turns is lossy, but it keeps the session alive; a hard
+// rejection ends the turn and leaves the caller with nothing to continue from.
+func (s *Service) trimToBudget(request provider.Request, limits contextguard.Limits) (provider.Request, error) {
+	budget := contextguard.HardBudget(request, limits, s.contextPolicy)
+	trimmed, ok := contextguard.TrimOldestTurns(request, budget)
+	if !ok {
+		return provider.Request{}, contextguard.ErrBudgetExceeded
+	}
+	slog.Warn("trimmed oldest turns to fit context window", "model", request.Model, "budget_tokens", budget,
+		"before_messages", len(request.Messages), "after_messages", len(trimmed.Messages))
+	return trimmed, nil
+}
+
+func (s *Service) summaryRecentTurns(request provider.Request, limits contextguard.Limits) int {
+	keep := s.contextPolicy.KeepRecentTurns
+	for keep > 1 {
+		probe := contextguard.ApplySummary(request, strings.Repeat("s", max(s.summaryMaxTokens, 1)*4), keep)
+		prepared, err := contextguard.Prepare(probe, limits, s.contextPolicy)
+		if err == nil && !contextguard.ExceedsHardLimit(prepared, s.contextPolicy) {
+			break
+		}
+		keep--
+	}
+	return keep
+}
+
+func (s *Service) applyOpenAIPromptCache(ctx context.Context, request *translator.OpenAIRequest) {
+	// xAI only accepts prompt_cache_key when explicitly opted in.
+	if isXAIModel(request.Model) && !s.xaiPromptCache {
+		request.PromptCacheKey = ""
+		return
+	}
+	if request.PromptCacheKey != "" {
+		return
+	}
+	// promptMinBytes <= 0 disables injection (pass-through only). Claude CLI stability
+	// prefers no synthetic keys that can break provider caching contracts.
+	if s.promptMinBytes <= 0 {
+		return
+	}
+	encoded, err := json.Marshal(request.Messages)
+	if err != nil || len(encoded) < s.promptMinBytes {
+		return
+	}
+	firstUser := promptCacheSeed(ctx)
+	if firstUser == "" {
+		firstUser = firstUserMessage(request.Messages)
+	}
+	request.PromptCacheKey = cache.StickyPromptCacheKey(request.Model, conversationID(ctx), request.User, firstUser)
+}
+
+func firstProviderUserMessage(messages []provider.Message) string {
+	for _, message := range messages {
+		if message.Role != "user" {
+			continue
+		}
+		for _, block := range message.Content {
+			if block.Type == "text" && block.Text != "" {
+				return block.Text
+			}
+		}
+	}
+	return ""
+}
+
+func openAIMessageText(message translator.OpenAIMessage) string {
+	switch content := message.Content.(type) {
+	case string:
+		return content
+	case []translator.OpenAIContentPart:
+		var b strings.Builder
+		for _, part := range content {
+			b.WriteString(part.Text)
+		}
+		return b.String()
+	default:
+		return ""
+	}
+}
+
+func firstUserMessage(messages []translator.OpenAIMessage) string {
+	for _, message := range messages {
+		if message.Role != "user" {
+			continue
+		}
+		switch content := message.Content.(type) {
+		case string:
+			if content != "" {
+				return content
+			}
+		case []translator.OpenAIContentPart:
+			for _, part := range content {
+				if (part.Type == "text" || part.Type == "input_text") && part.Text != "" {
+					return part.Text
+				}
+			}
+		case []any:
+			encoded, err := json.Marshal(content)
+			if err != nil {
+				continue
+			}
+			var parts []translator.OpenAIContentPart
+			if json.Unmarshal(encoded, &parts) == nil {
+				for _, part := range parts {
+					if (part.Type == "text" || part.Type == "input_text") && part.Text != "" {
+						return part.Text
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (s *Service) cacheableOpenAIRequest(request translator.OpenAIRequest) bool {
+	return request.Temperature != nil && *request.Temperature == 0 && len(request.Tools) == 0 && request.ToolChoice == nil && len(s.aliases[request.Model]) == 0
+}
+
+func (s *Service) cacheableProviderRequest(request provider.Request) bool {
+	return request.Temperature != nil && *request.Temperature == 0 && len(request.Tools) == 0 && request.ToolChoice.Type == "" && len(s.aliases[request.Model]) == 0
+}
+
+func cacheableOpenAIResponse(response translator.OpenAIResponse) bool {
+	if len(response.Choices) == 0 {
+		return false
+	}
+	for _, choice := range response.Choices {
+		if choice.FinishReason != "stop" || len(choice.Message.ToolCalls) > 0 || !openAIContentPresent(choice.Message.Content) {
+			return false
+		}
+	}
+	return true
+}
+
+func openAIContentPresent(content any) bool {
+	switch value := content.(type) {
+	case string:
+		return strings.TrimSpace(value) != ""
+	case []translator.OpenAIContentPart:
+		return len(value) > 0
+	case []any:
+		return len(value) > 0
+	default:
+		return content != nil
+	}
+}
+
+func cacheableProviderResponse(response provider.Response) bool {
+	return response.StopReason == "end_turn" && len(response.Content) > 0 && !hasToolCalls(response)
+}
+
+func (s *Service) modelChain(model string) []string {
+	if chain := s.aliases[model]; len(chain) > 0 {
+		return append([]string(nil), chain...)
+	}
+	return []string{model}
+}
+
+// errEmptyUpstreamResponse marks a non-streaming reply that carried no content and
+// no tool call.
+var errEmptyUpstreamResponse = errors.New("upstream returned a response with no content")
+
+// providerResponseHasOutput reports whether a response carries anything the caller
+// can use. Whitespace-only text counts as nothing: it is what an upstream emits
+// when it has produced no real output at all.
+func providerResponseHasOutput(response provider.Response, toolsAllowed bool) bool {
+	for _, block := range response.Content {
+		switch block.Type {
+		case "tool_use":
+			// A tool call is only output if the caller can act on it. Offered no tools,
+			// the client has no schema for the call and sees a turn with no answer.
+			if toolsAllowed {
+				return true
+			}
+		default:
+			if strings.TrimSpace(block.Text) != "" || strings.TrimSpace(block.Thinking) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func retryableProviderError(err error) bool {
+	if errors.Is(err, ErrProviderUnavailable) {
+		return true
+	}
+	var providerError *provider.ProviderError
+	return errors.As(err, &providerError) && (providerError.StatusCode == 429 || providerError.StatusCode >= 500)
+}
+
+func cloneAliases(aliases map[string][]string) map[string][]string {
+	result := make(map[string][]string, len(aliases))
+	for alias, chain := range aliases {
+		result[alias] = append([]string(nil), chain...)
+	}
+	return result
+}
+
+func isXAIModel(model string) bool {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(lower, "grok") || strings.HasPrefix(lower, "xai/") || lower == "xai"
+}
+
+func upstreamModel(model string) string {
+	model = strings.TrimSpace(model)
+	if strings.HasPrefix(strings.ToLower(model), "xai/") {
+		return model[len("xai/"):]
+	}
+	return model
+}
+
+// resolveCustomProvider reports the custom upstream for a model, if one claims it.
+func (s *Service) resolveCustomProvider(model string) (CustomTarget, bool) {
+	if s.customProviders == nil {
+		return CustomTarget{}, false
+	}
+	return s.customProviders.Resolve(model)
+}
+
+func (s *Service) touchCustomProviderKey(keyID string) {
+	if s.touchCustomKey != nil && keyID != "" {
+		s.touchCustomKey(keyID)
+	}
+}
+
+func (s *Service) clientForModel(model string) JSONClient {
+	if isXAIModel(model) {
+		return s.xai
+	}
+	return s.openAI
+}
+
+func responseKey(request translator.OpenAIRequest) (string, error) {
+	marshal := func(value any) (json.RawMessage, error) {
+		encoded, err := json.Marshal(value)
+		return encoded, err
+	}
+	messages, err := marshal(request.Messages)
+	if err != nil {
+		return "", err
+	}
+	tools, err := marshal(request.Tools)
+	if err != nil {
+		return "", err
+	}
+	toolChoice, err := marshal(request.ToolChoice)
+	if err != nil {
+		return "", err
+	}
+	temperature, _ := marshal(request.Temperature)
+	topP, _ := marshal(request.TopP)
+	seed, _ := marshal(request.Seed)
+	stop, _ := marshal(request.Stop)
+	presencePenalty, _ := marshal(request.PresencePenalty)
+	frequencyPenalty, _ := marshal(request.FrequencyPenalty)
+	return cache.BuildResponseKey(cache.ResponseKey{
+		Model: request.Model, Temperature: temperature, TopP: topP, Seed: seed, Stop: stop,
+		ResponseFormat: request.ResponseFormat, N: request.N,
+		PresencePenalty: presencePenalty, FrequencyPenalty: frequencyPenalty,
+		MaxTokens: request.MaxTokens, MaxCompletionTokens: request.MaxCompletionTokens,
+		Messages: messages, Tools: tools, ToolChoice: toolChoice,
+	})
+}
+
+func promptMessages(request provider.Request) []cache.PromptMessage {
+	messages := make([]cache.PromptMessage, 0, len(request.System)+len(request.Messages))
+	for _, block := range request.System {
+		if block.Type == "text" {
+			messages = append(messages, cache.PromptMessage{Role: "system", Content: block.Text})
+		}
+	}
+	for _, message := range request.Messages {
+		for _, block := range message.Content {
+			if block.Type == "text" || block.Type == "tool_result" {
+				messages = append(messages, cache.PromptMessage{Role: message.Role, Content: block.Text})
+			}
+		}
+	}
+	return messages
+}
+
+func compressToolResults(request *provider.Request, mode cache.CompressionMode) {
+	names := make(map[string]string)
+	for messageIndex := range request.Messages {
+		message := &request.Messages[messageIndex]
+		for contentIndex := range message.Content {
+			block := &message.Content[contentIndex]
+			if block.Type == "tool_use" {
+				names[block.ToolUseID] = block.Name
+				continue
+			}
+			if block.Type != "tool_result" {
+				continue
+			}
+			result := cache.CompressToolResultMode(names[block.ToolUseID], block.Text, mode)
+			block.Text = result.Compressed
+		}
+	}
+}
+
+func hasToolCalls(response provider.Response) bool {
+	for _, block := range response.Content {
+		if block.Type == "tool_use" {
+			return true
+		}
+	}
+	return false
+}
+
+// UsageEvent is a lightweight gateway request metric (no prompt bodies).
+type UsageEvent struct {
+	Provider                  string
+	Model                     string
+	Endpoint                  string
+	Status                    string
+	PromptTokens              int
+	CompletionTokens          int
+	CachedTokens              int
+	PromptTokensEstimated     bool
+	CompletionTokensEstimated bool
+	CachedTokensReported      bool
+	// RequestModel is the id the client asked for, when it differs from Model.
+	//
+	// Model carries what the upstream reported, which is right for usage attribution but
+	// wrong for keying anything the gateway later looks up by requested id: an upstream
+	// answering "gpt-5.6-sol" for a request routed as "cx/gpt-5.6-sol" would file the
+	// lesson under a name no later lookup can reach, because prefix matching only
+	// extends a requested id, never strips from it. Optional — Model is used when empty.
+	RequestModel string
+}
+
+func (s *Service) recordUsage(ev UsageEvent) {
+	if s == nil {
+		return
+	}
+	if ev.Status == "" {
+		ev.Status = "ok"
+	}
+	// Every path funnels through here on the way out, which makes it the one place
+	// that sees a served prompt together with the count the upstream put on it — the
+	// lower bound on that model's window, for free. Estimated counts are skipped:
+	// only the upstream's own arithmetic proves what it accepted.
+	if ev.Status == "ok" && !ev.PromptTokensEstimated {
+		model := ev.RequestModel
+		if model == "" {
+			model = ev.Model
+		}
+		s.observeContextWindow(model, ev.PromptTokens)
+	}
+	if s.onUsage == nil {
+		return
+	}
+	// The callback only enqueues into a bounded writer, so the request path stays non-blocking.
+	s.onUsage(ev)
+}
+
+func (s *Service) SetOnUsage(fn func(UsageEvent)) {
+	if s != nil {
+		s.onUsage = fn
+	}
+}
+
+// providerNameFor attributes usage to the provider that actually served the model.
+// A custom provider is reported under its own prefix; without this it fell through
+// to the built-in switch and every custom request was recorded as "openai", which
+// made the usage table and the routing map wrong.
+func (s *Service) providerNameFor(model string) string {
+	// PrefixFor, not Resolve: naming the provider must not consume a rotation slot.
+	if s.customProviders != nil {
+		if prefix, ok := s.customProviders.PrefixFor(model); ok {
+			return "custom:" + prefix
+		}
+	}
+	return providerNameForModel(model)
+}
+
+func providerNameForModel(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.HasPrefix(m, "ag/"), strings.HasPrefix(m, "antigravity/"), strings.HasPrefix(m, "gemini-"), strings.HasPrefix(m, "gemini/"):
+		return "antigravity"
+	case strings.HasPrefix(m, "claude"), strings.HasPrefix(m, "anthropic"):
+		return "claude"
+	case strings.HasPrefix(m, "grok"), strings.HasPrefix(m, "xai/"):
+		return "xai"
+	case strings.HasPrefix(m, "cx/"), strings.Contains(m, "codex"), strings.HasPrefix(m, "gpt-"), strings.HasPrefix(m, "o1"), strings.HasPrefix(m, "o3"), strings.HasPrefix(m, "o4"):
+		return "codex"
+	default:
+		return "openai"
+	}
+}

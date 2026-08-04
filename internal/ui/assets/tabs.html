@@ -1,0 +1,936 @@
+{{define "tab"}}
+{{if eq .Tab "endpoint"}}{{template "tab-endpoint" .}}
+{{else if eq .Tab "providers"}}{{template "tab-providers" .}}
+{{else if eq .Tab "provider-detail"}}{{template "tab-provider-detail" .}}
+{{else if eq .Tab "quota"}}{{template "tab-quota" .}}
+{{else if eq .Tab "usage"}}{{template "tab-usage" .}}
+{{else}}{{template "tab-cli" .}}{{end}}
+{{end}}
+
+{{define "tab-endpoint"}}
+<section class="page-stack">
+  <section class="block">
+    <div class="block-head">
+      <div>
+        <h2>Gateway endpoints</h2>
+        <p>Share these base URLs with local clients. Paths stay provider-shaped.</p>
+      </div>
+      <span class="status-dot">live</span>
+    </div>
+    <div class="endpoint-list">
+      <div class="endpoint-row">
+        <span class="endpoint-label">Local</span>
+        <code id="ep-local">{{.BaseURL}}</code>
+        <button type="button" class="btn ghost" data-copy="#ep-local">Copy</button>
+      </div>
+      <div class="endpoint-row">
+        <span class="endpoint-label">OpenAI</span>
+        <code id="ep-openai">{{.BaseURL}}/v1</code>
+        <button type="button" class="btn ghost" data-copy="#ep-openai">Copy</button>
+      </div>
+      <div class="endpoint-row">
+        <span class="endpoint-label">Anthropic</span>
+        <code id="ep-anthropic">{{.BaseURL}}/v1/messages</code>
+        <button type="button" class="btn ghost" data-copy="#ep-anthropic">Copy</button>
+      </div>
+      <div class="endpoint-row">
+        <span class="endpoint-label">Responses</span>
+        <code id="ep-responses">{{.BaseURL}}/v1/responses</code>
+        <button type="button" class="btn ghost" data-copy="#ep-responses">Copy</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="block-head">
+      <div>
+        <h2>API keys</h2>
+        <p>Create managed keys for clients. Bootstrap env token still works. Secrets are hashed at rest and shown once on create.</p>
+      </div>
+    </div>
+    <div id="api-keys">{{template "api-keys" .}}</div>
+  </section>
+
+
+  <section class="block">
+    <div class="block-head">
+      <div>
+        <h2>Pool snapshot</h2>
+        <p>Quick counts from the in-memory account pool.</p>
+      </div>
+    </div>
+    <div class="metric-row">
+      <article class="metric"><span>Accounts</span><strong>{{.Total}}</strong></article>
+      <article class="metric"><span>Enabled</span><strong>{{.Enabled}}</strong></article>
+      <article class="metric"><span>Exhausted</span><strong>{{.Exhausted}}</strong></article>
+    </div>
+  </section>
+</section>
+{{end}}
+
+{{define "api-keys"}}
+<form class="inline-form" hx-post="/ui/keys" hx-target="#api-keys" hx-swap="innerHTML">
+  <input class="field grow" name="name" placeholder="Key name (e.g. claude-code)" maxlength="64" required>
+  <button class="btn primary" type="submit">Create key</button>
+</form>
+{{if .CreatedKey}}
+<div class="created-key">
+  <strong>Save this key now — it won’t be shown again.</strong>
+  <div class="endpoint-row">
+    <span class="endpoint-label">Secret</span>
+    <code id="created-key-token">{{.CreatedKey.Token}}</code>
+    <button type="button" class="btn ghost" data-copy="#created-key-token">Copy</button>
+  </div>
+  <p class="hint">Name: {{.CreatedKey.Name}} · Prefix: {{.CreatedKey.Prefix}}</p>
+</div>
+{{end}}
+{{if .APIKeys}}
+<div class="key-list">
+  {{range .APIKeys}}
+  <article class="key-row">
+    <div>
+      <strong>{{.Name}}</strong>
+      <code>{{.Prefix}}…</code>
+      <small>{{if .Enabled}}active{{else}}paused{{end}} · created {{.CreatedAt.Format "2006-01-02 15:04"}}</small>
+    </div>
+    <div class="btn-row">
+      <form hx-post="/ui/keys/{{urlquery .ID}}/toggle" hx-target="#api-keys" hx-swap="innerHTML">
+        <input type="hidden" name="enabled" value="{{if .Enabled}}false{{else}}true{{end}}">
+        <button class="btn secondary sm" type="submit">{{if .Enabled}}Pause{{else}}Resume{{end}}</button>
+      </form>
+      <button class="btn danger sm" hx-delete="/ui/keys/{{urlquery .ID}}" hx-target="#api-keys" hx-swap="innerHTML" hx-confirm="Delete this API key?">Delete</button>
+    </div>
+  </article>
+  {{end}}
+</div>
+{{else}}
+<div class="empty-state"><strong>No managed keys yet</strong><p>Create one to issue client credentials without sharing the bootstrap env token.</p></div>
+{{end}}
+{{end}}
+
+{{define "tab-providers"}}
+<section class="page-stack">
+  <section class="block">
+    <div class="block-head">
+      <div>
+        <h2>Providers</h2>
+        <p>Open a provider to manage connectors, account status, and OAuth.</p>
+      </div>
+    </div>
+    <div class="provider-grid">
+      {{range .Providers}}
+      <a class="provider-card link-card" href="/ui/providers/{{.ID}}" hx-get="/ui/tabs/providers/{{.ID}}" hx-target="#content" hx-push-url="/ui/providers/{{.ID}}" hx-swap="innerHTML settle:80ms">
+        <header>
+          <img src="/ui/assets/providers/{{.Icon}}.png" alt="" width="28" height="28">
+          <div>
+            <b>{{.Name}}</b>
+            <small>{{.Description}}</small>
+          </div>
+          <span class="tag{{if gt .Exhausted 0}} danger{{else if gt .Enabled 0}} ok{{end}}">
+            {{if gt .Enabled 0}}connected{{else}}ready{{end}}
+          </span>
+        </header>
+        <div class="provider-metrics">
+          <div class="provider-metric">
+            <strong>{{.Total}}</strong>
+            <span>Accounts</span>
+          </div>
+          <div class="provider-metric">
+            <strong>{{.Enabled}}</strong>
+            <span>Enabled</span>
+          </div>
+          <div class="provider-metric">
+            <strong>{{.Exhausted}}</strong>
+            <span>Exhausted</span>
+          </div>
+        </div>
+        <div class="provider-cta"><span>Open provider</span><span aria-hidden="true">→</span></div>
+      </a>
+      {{end}}
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="block-head">
+      <div>
+        <h2>Custom providers</h2>
+        <p>Point LiteRouter at any OpenAI- or Anthropic-compatible endpoint. Models are addressed as <code>prefix/model</code>; keys are encrypted at rest and rotated per request.</p>
+      </div>
+    </div>
+    <div id="custom-providers">{{template "custom-providers" .}}</div>
+  </section>
+</section>
+{{end}}
+
+{{define "custom-provider-keys"}}
+{{if .CustomError}}
+<p class="hint danger" role="alert">{{.CustomError}}</p>
+{{end}}
+{{with .CustomProvider}}
+<p class="hint">Base URL <code>{{.BaseURL}}</code> · {{if eq .Kind "anthropic"}}Anthropic · Messages{{else if eq .APIType "responses"}}OpenAI · Responses{{else}}OpenAI · Chat{{end}} · {{if .Enabled}}active{{else}}paused{{end}}</p>
+{{if .Keys}}
+<div class="custom-key-list">
+  {{range .Keys}}
+  <span class="custom-key">
+    <code>{{if .Label}}{{.Label}}{{else}}{{.ID}}{{end}}</code>
+    <em>{{if .Enabled}}on{{else}}off{{end}}</em>
+    <form hx-post="/ui/providers/custom/keys/{{urlquery .ID}}/toggle?view=detail" hx-target="#custom-providers" hx-swap="innerHTML">
+      <input type="hidden" name="enabled" value="{{if .Enabled}}false{{else}}true{{end}}">
+      <button class="btn ghost sm" type="submit">{{if .Enabled}}Pause{{else}}Resume{{end}}</button>
+    </form>
+    <button class="btn ghost sm" hx-delete="/ui/providers/custom/keys/{{urlquery .ID}}?view=detail" hx-target="#custom-providers" hx-swap="innerHTML" hx-confirm="Delete this key?">✕</button>
+  </span>
+  {{end}}
+</div>
+{{else}}
+<div class="empty-state"><strong>No keys yet</strong><p>Add an API key so this provider can serve requests.</p></div>
+{{end}}
+<form class="inline-form" hx-post="/ui/providers/custom/{{urlquery .ID}}/keys?view=detail" hx-target="#custom-providers" hx-swap="innerHTML">
+  <input class="field sm" name="label" placeholder="label (optional)" maxlength="64">
+  <input class="field grow" name="api_key" type="password" placeholder="API key" autocomplete="off" required>
+  <button class="btn primary" type="submit">+ Add key</button>
+</form>
+{{end}}
+{{end}}
+
+{{define "custom-providers"}}
+{{if .CustomError}}
+<p class="hint danger" role="alert">{{.CustomError}}</p>
+{{end}}
+<form class="inline-form custom-provider-form" hx-post="/ui/providers/custom" hx-target="#custom-providers" hx-swap="innerHTML">
+  <input class="field" name="name" placeholder="Name (e.g. AI Telegram)" maxlength="64">
+  <input class="field" name="prefix" placeholder="prefix (e.g. ai-tele)" maxlength="32" required>
+  <select class="field" name="kind" aria-label="Provider kind">
+    <option value="openai">OpenAI compatible</option>
+    <option value="anthropic">Anthropic compatible</option>
+  </select>
+  <select class="field" name="api_type" aria-label="API type">
+    <option value="chat">Chat Completions</option>
+    <option value="responses">Responses API</option>
+  </select>
+  <input class="field grow" name="base_url" placeholder="https://api.example.com/v1" required>
+  <input class="field grow" name="api_key" type="password" placeholder="API key" autocomplete="off" required>
+  <button class="btn primary" type="submit">Add provider</button>
+</form>
+{{$models := .CustomProviderModels}}
+{{if .CustomProviders}}
+<div class="key-list">
+  {{range .CustomProviders}}
+  <article class="key-row custom-provider-row">
+    <div>
+      <strong>{{if .Name}}{{.Name}}{{else}}{{.Prefix}}{{end}}</strong>
+      <code>{{.Prefix}}/…</code>
+      <small>
+        {{if eq .Kind "anthropic"}}Anthropic · Messages{{else if eq .APIType "responses"}}OpenAI · Responses{{else}}OpenAI · Chat{{end}}
+        · {{.BaseURL}}
+        · {{if .Enabled}}active{{else}}paused{{end}}
+        · {{len .Keys}} key{{if ne (len .Keys) 1}}s{{end}}
+      </small>
+      {{if ne .APIType "chat"}}
+      <small class="hint">Stored, but the gateway currently forwards only Chat Completions.</small>
+      {{end}}
+      {{if .Keys}}
+      <div class="custom-key-list">
+        {{range .Keys}}
+        <span class="custom-key">
+          <code>{{if .Label}}{{.Label}}{{else}}{{.ID}}{{end}}</code>
+          <em>{{if .Enabled}}on{{else}}off{{end}}</em>
+          <form hx-post="/ui/providers/custom/keys/{{urlquery .ID}}/toggle" hx-target="#custom-providers" hx-swap="innerHTML">
+            <input type="hidden" name="enabled" value="{{if .Enabled}}false{{else}}true{{end}}">
+            <button class="btn ghost sm" type="submit">{{if .Enabled}}Pause{{else}}Resume{{end}}</button>
+          </form>
+          <button class="btn ghost sm" hx-delete="/ui/providers/custom/keys/{{urlquery .ID}}" hx-target="#custom-providers" hx-swap="innerHTML" hx-confirm="Delete this key?">✕</button>
+        </span>
+        {{end}}
+      </div>
+      {{end}}
+
+      <details class="custom-models">
+        <summary>Models ({{len (index $models .Prefix)}})</summary>
+        <div class="custom-model-list">
+          {{range index $models .Prefix}}
+          <span class="custom-key">
+            <code>{{.ID}}</code>
+            {{if gt .ContextWindow 0}}<em>{{formatContextWindow .ContextWindow}}</em>{{end}}
+            <button class="btn ghost sm" hx-delete="/ui/models/{{urlquery .ID}}?provider={{urlquery .Provider}}&amp;target=custom" hx-target="#custom-providers" hx-swap="innerHTML" hx-confirm="Remove this model?">✕</button>
+          </span>
+          {{else}}
+          <span class="hint">No models registered. Add one so it shows up in the CLI picker and gets a context window.</span>
+          {{end}}
+        </div>
+        <form class="inline-form" hx-post="/ui/models" hx-target="#custom-providers" hx-swap="innerHTML">
+          <input type="hidden" name="provider" value="{{.Prefix}}">
+          <input type="hidden" name="target" value="custom">
+          <input class="field sm" name="id" placeholder="model name (no prefix)" maxlength="160" required>
+          <input class="field sm" name="label" placeholder="label (optional)" maxlength="64">
+          <input class="field sm" name="context_window" type="number" min="1000" max="10000000" placeholder="context">
+          <button class="btn secondary sm" type="submit">Add model</button>
+        </form>
+        <p class="hint">Type the upstream model name only — <code>{{.Prefix}}/</code> is added automatically, so it is called as <code>{{.Prefix}}/&lt;name&gt;</code>.</p>
+      </details>
+    </div>
+    <div class="btn-row">
+      <form class="inline-form" hx-post="/ui/providers/custom/{{urlquery .ID}}/keys" hx-target="#custom-providers" hx-swap="innerHTML">
+        <input class="field sm" name="label" placeholder="label" maxlength="64">
+        <input class="field sm" name="api_key" type="password" placeholder="add key" autocomplete="off" required>
+        <button class="btn secondary sm" type="submit">Add key</button>
+      </form>
+      <form hx-post="/ui/providers/custom/{{urlquery .ID}}" hx-target="#custom-providers" hx-swap="innerHTML">
+        <input type="hidden" name="name" value="{{.Name}}">
+        <input type="hidden" name="prefix" value="{{.Prefix}}">
+        <input type="hidden" name="kind" value="{{.Kind}}">
+        <input type="hidden" name="api_type" value="{{.APIType}}">
+        <input type="hidden" name="base_url" value="{{.BaseURL}}">
+        <input type="hidden" name="enabled" value="{{if .Enabled}}false{{else}}true{{end}}">
+        <button class="btn secondary sm" type="submit">{{if .Enabled}}Pause{{else}}Resume{{end}}</button>
+      </form>
+      <button class="btn danger sm" hx-delete="/ui/providers/custom/{{urlquery .ID}}" hx-target="#custom-providers" hx-swap="innerHTML" hx-confirm="Delete this provider and its keys?">Delete</button>
+    </div>
+  </article>
+  {{end}}
+</div>
+{{else}}
+<div class="empty-state"><strong>No custom providers</strong><p>Add one to route <code>prefix/model</code> at your own endpoint, alongside the built-in pools.</p></div>
+{{end}}
+{{end}}
+
+{{define "tab-provider-detail"}}
+<section class="page-stack provider-detail" data-provider="{{if .Provider}}{{.Provider.ID}}{{end}}" data-auto-refresh="connections">
+  <a class="back-link" href="/ui/providers" hx-get="/ui/tabs/providers" hx-target="#content" hx-push-url="/ui/providers" hx-swap="innerHTML settle:80ms">← Back to Providers</a>
+
+  <header class="provider-hero">
+    {{if .Provider}}
+    <img class="provider-hero-icon" src="/ui/assets/providers/{{.Provider.Icon}}.png" alt="" width="44" height="44">
+    <div class="provider-hero-copy">
+      <div class="provider-hero-title">
+        <h1>{{.Provider.Name}}</h1>
+        <span class="tag{{if gt .Enabled 0}} ok{{end}}">{{.Total}} {{if .CustomProvider}}key{{else}}connection{{end}}{{if ne .Total 1}}s{{end}}</span>
+      </div>
+      <p>{{.Provider.Description}}</p>
+    </div>
+    {{end}}
+  </header>
+
+  {{if not .CustomProvider}}
+  <div class="risk-banner">
+    <strong>Risk notice</strong>
+    <span>This provider uses a subscription/OAuth session not officially licensed for proxy/router use. Accounts may be restricted or banned. Use at your own risk.</span>
+  </div>
+  {{end}}
+
+  {{if .CustomProvider}}
+  <section class="block connections-block">
+    <div class="block-head connections-head">
+      <div>
+        <h2>API keys</h2>
+        <p>{{len .CustomProvider.Keys}} key{{if ne (len .CustomProvider.Keys) 1}}s{{end}} · rotated per request · encrypted at rest</p>
+      </div>
+    </div>
+    <div id="custom-providers">{{template "custom-provider-keys" .}}</div>
+  </section>
+  {{else}}
+  <section class="block connections-block">
+    <div class="block-head connections-head">
+      <div>
+        <h2>Connections</h2>
+        <p>{{.Enabled}} active · {{.Exhausted}} exhausted · auto-health every 1m</p>
+      </div>
+      <div class="connections-toolbar">
+        <button class="btn secondary sm" hx-get="/ui/accounts?provider={{if .Provider}}{{.Provider.ID}}{{end}}&view=connections" hx-target="#accounts" hx-swap="innerHTML">
+          ↻ Refresh now
+        </button>
+        <form class="strategy-form">
+          <label class="strategy-label">
+            <span>Algorithm</span>
+            <select class="field sm" name="strategy" hx-post="/ui/strategy" hx-trigger="change" hx-target="#strategy-status" hx-swap="innerHTML" hx-disabled-elt="this">
+              <option value="smart" {{if eq .Strategy "smart"}}selected{{end}}>Smart</option>
+              <option value="round_robin" {{if eq .Strategy "round_robin"}}selected{{end}}>Round Robin</option>
+              <option value="weighted" {{if eq .Strategy "weighted"}}selected{{end}}>Weighted</option>
+              <option value="least_used" {{if eq .Strategy "least_used"}}selected{{end}}>Least Used</option>
+              <option value="least_used_rpm" {{if eq .Strategy "least_used_rpm"}}selected{{end}}>Least Used RPM</option>
+              <option value="sticky" {{if eq .Strategy "sticky"}}selected{{end}}>Sticky</option>
+              <option value="sticky_soft" {{if eq .Strategy "sticky_soft"}}selected{{end}}>Sticky Soft</option>
+              <option value="failover" {{if eq .Strategy "failover"}}selected{{end}}>Failover</option>
+            </select>
+          </label>
+        </form>
+        <div id="strategy-status" class="strategy-status" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <div id="accounts">{{template "accounts" .}}</div>
+
+    <div class="conn-add-row">
+      {{if .Provider}}
+      <form hx-post="/ui/oauth/start" hx-target="#oauth-result" hx-swap="innerHTML">
+        <input type="hidden" name="provider" value="{{.Provider.OAuthValue}}">
+        <button class="btn primary" type="submit">+ Add {{if eq .Provider.ID "xai"}}xAI OAuth{{else}}{{.Provider.Name}} OAuth{{end}}</button>
+      </form>
+      {{end}}
+      <div id="oauth-result" class="flash" aria-live="polite"></div>
+    </div>
+  </section>
+  {{end}}
+
+  <section class="block">
+    <div class="block-head">
+      <div>
+        <h2>Models</h2>
+        <p>Models for {{if .Provider}}{{.Provider.Name}}{{else}}this provider{{end}}. Used by CLI setup and routing aliases.</p>
+      </div>
+    </div>
+    <div id="model-catalog">{{template "model-catalog" .}}</div>
+  </section>
+</section>
+{{end}}
+
+{{define "tab-quota"}}
+<section class="page-stack quota-page">
+  <div id="quota-accounts">{{template "accounts" .}}</div>
+</section>
+{{end}}
+
+{{define "tab-cli"}}
+<section class="page-stack">
+  <section class="block">
+    <div class="block-head">
+      <div>
+        <h2>CLI tools</h2>
+        <p>Browse models or type any id. Apply writes host CLI config immediately (Claude ~/.claude, Codex ~/.codex).</p>
+      </div>
+    </div>
+    <datalist id="model-options">{{range .Models}}<option value="{{.}}">{{end}}</datalist>
+    <div id="model-picker-source" hidden>
+      {{range .ModelGroups}}
+      <section class="pick-group" data-provider="{{.Provider.ID}}">
+        <header class="pick-group-head">
+          <img src="/ui/assets/providers/{{.Provider.Icon}}.png" alt="" width="16" height="16">
+          <strong>{{.Provider.Name}}</strong>
+          <span class="pick-group-count">{{len .Models}}</span>
+        </header>
+        <div class="pick-group-chips">
+          {{range .Models}}
+          <button type="button" class="pick-chip" data-model-id="{{.ID}}" data-model-label="{{if .Label}}{{.Label}}{{else}}{{.ID}}{{end}}" data-provider="{{.Provider}}">
+            <span class="pick-chip-id">{{.ID}}</span>
+            <span class="pick-chip-label">{{if .Label}}{{.Label}}{{else}}{{.ID}}{{end}}</span>
+          </button>
+          {{end}}
+        </div>
+      </section>
+      {{else}}{{range .Models}}
+      <button type="button" class="pick-chip" data-model-id="{{.}}" data-model-label="{{.}}">
+        <span class="pick-chip-id">{{.}}</span>
+        <span class="pick-chip-label">{{.}}</span>
+      </button>
+      {{end}}{{end}}
+    </div>
+
+    <div class="cli-grid">
+      <article class="cli-card">
+        <header>
+          <img src="/ui/assets/providers/claude.png" alt="" width="28" height="28">
+          <div>
+            <b>Claude Code</b>
+            <small>Anthropic Messages · no /v1 on base</small>
+          </div>
+          {{if .ClaudeApplied}}<span class="tag ok">active</span>{{else}}<span class="tag">saved · not applied</span>{{end}}
+        </header>
+        <form class="form-grid" method="post" data-cli-setup-form>
+          <label><span class="field-hint" title="ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN. Apply writes these into ~/.claude/settings.json — restart Claude Code for them to take effect.">Endpoint</span><input class="field" name="base_url" value="{{.BaseURL}}" required></label>
+          <label class="model-field-label"><span class="field-hint" title="ANTHROPIC_MODEL — the resting model for every turn. Put a cheap model here and let Plan handle the thinking. Overrides whatever Claude Code&#39;s own /model is set to.">Default</span>
+            <div class="model-field">
+              <input class="field grow" name="model" value="{{if .ClaudeSetup.Model}}{{.ClaudeSetup.Model}}{{else if .Models}}{{index .Models 0}}{{end}}" list="model-options" placeholder="cheap · serves every turn" required data-model-input="model">
+              <button class="btn secondary sm" type="button" data-open-model-picker="model" data-picker-title="Select model for Default">Browse</button>
+            </div>
+          </label>
+          <div class="form-grid two">
+            <label class="model-field-label"><span class="field-hint" title="Used when /model picks Fable. Empty sends Anthropic&#39;s own model id, which only routes if a Claude account is connected.">Fable</span>
+              <div class="model-field">
+                <input class="field grow" name="fable_model" value="{{.ClaudeSetup.FableModel}}" list="model-options" placeholder="strong · optional" data-model-input="fable_model">
+                <button class="btn secondary sm" type="button" data-open-model-picker="fable_model" data-picker-title="Select model for Fable">Browse</button>
+              </div>
+            </label>
+            <label class="model-field-label"><span class="field-hint" title="Used when /model picks Opus, and by opusplan for plan mode — but that upgrade is disabled above 200k prompt tokens, so prefer the Plan field.">Opus</span>
+              <div class="model-field">
+                <input class="field grow" name="opus_model" value="{{.ClaudeSetup.OpusModel}}" list="model-options" placeholder="strong · optional" data-model-input="opus_model">
+                <button class="btn secondary sm" type="button" data-open-model-picker="opus_model" data-picker-title="Select model for Opus">Browse</button>
+              </div>
+            </label>
+            <label class="model-field-label"><span class="field-hint" title="Used when /model picks Sonnet, and as the resting model under opusplan.">Sonnet</span>
+              <div class="model-field">
+                <input class="field grow" name="sonnet_model" value="{{.ClaudeSetup.SonnetModel}}" list="model-options" placeholder="mid · optional" data-model-input="sonnet_model">
+                <button class="btn secondary sm" type="button" data-open-model-picker="sonnet_model" data-picker-title="Select model for Sonnet">Browse</button>
+              </div>
+            </label>
+            <label class="model-field-label"><span class="field-hint" title="Worth filling. Background work — titles, classifiers — runs here. Left empty it falls back to Default, so cheap chores get billed at Default&#39;s rate.">Haiku</span>
+              <div class="model-field">
+                <input class="field grow" name="haiku_model" value="{{.ClaudeSetup.HaikuModel}}" list="model-options" placeholder="cheapest · fill this" data-model-input="haiku_model">
+                <button class="btn secondary sm" type="button" data-open-model-picker="haiku_model" data-picker-title="Select model for Haiku">Browse</button>
+              </div>
+            </label>
+            <label class="model-field-label"><span class="field-hint" title="CLAUDE_CODE_SUBAGENT_MODEL — every Task/Agent run. Highest priority in Claude Code: it overrides each agent&#39;s own model: frontmatter. Leave empty for per-agent control; subagents then inherit Default.">Subagent</span>
+              <div class="model-field">
+                <input class="field grow" name="subagent_model" value="{{.ClaudeSetup.SubagentModel}}" list="model-options" placeholder="mid · optional" data-model-input="claude_subagent_model">
+                <button class="btn secondary sm" type="button" data-open-model-picker="claude_subagent_model" data-picker-title="Select model for Subagent">Browse</button>
+              </div>
+            </label>
+            <label class="model-field-label"><span class="field-hint" title="Claude Code&#39;s effortLevel setting — the same value /effort writes, so /effort can still change it afterwards. Leave on &#39;keep current&#39; to not manage it. Reset does not revert it: effort is a preference, not routing. Reaches the model on cx/* (sent as reasoning.effort); dropped on ag/* and custom-provider upstreams.">Effort</span>
+              <select class="field" name="effort">
+                <option value=""{{if not .ClaudeSetup.Effort}} selected{{end}}>keep current</option>
+                <option value="low"{{if eq .ClaudeSetup.Effort "low"}} selected{{end}}>low</option>
+                <option value="medium"{{if eq .ClaudeSetup.Effort "medium"}} selected{{end}}>medium</option>
+                <option value="high"{{if eq .ClaudeSetup.Effort "high"}} selected{{end}}>high</option>
+                <option value="xhigh"{{if eq .ClaudeSetup.Effort "xhigh"}} selected{{end}}>xhigh</option>
+              </select>
+            </label>
+            <label class="model-field-label"><span class="field-hint" title="The real context window of the models above, in tokens. Without it Claude Code assumes 200k — or 1M if /model picked a [1m] variant, a client-side marker LiteRouter never sees — so it compacts far too late and the compaction itself overflows. auto uses the smallest window LiteRouter knows for the models above, including any it learned from an upstream rejection. Written as CLAUDE_CODE_MAX_CONTEXT_TOKENS, plus an auto-compact percentage so compaction starts while it still fits. Ignored by Claude Code for claude-* model ids.">Max context</span>
+              <input class="field" name="max_context" value="{{.ClaudeSetup.MaxContext}}" list="max-context-options" placeholder="auto · recommended">
+              <datalist id="max-context-options">
+                <option value="auto"></option>
+                <option value="200000"></option>
+                <option value="400000"></option>
+                <option value="1000000"></option>
+              </datalist>
+            </label>
+          </div>
+          <div class="btn-row">
+            <button class="btn primary" type="submit" formaction="/ui/setup/claude/apply">Apply</button>
+            <button class="btn secondary" type="submit" formaction="/ui/setup/claude/reset" formnovalidate title="Returns Claude Code to its stock configuration: LiteRouter&#39;s keys are removed from ~/.claude/settings.json, restoring whatever was there before. The selection above is kept here, so Apply puts it all back.">Reset</button>
+            <button class="btn ghost" type="button" data-manual-toggle="claude-manual">Manual</button>
+            <button class="btn ghost sm" type="submit" formaction="/ui/setup/claude/apply" data-download="1" title="Download shell script instead">Download .sh</button>
+          </div>
+          <div class="cli-setup-result" aria-live="polite"></div>
+        </form>
+        <!-- A sibling form, not a field of the one above: everything there writes the
+             host client's settings.json, while this is LiteRouter's own routing and
+             takes effect on the running gateway. Nesting forms is also invalid HTML. -->
+        <form class="form-grid" hx-post="/ui/routing" hx-target="find .cli-plan-result" hx-swap="innerHTML">
+          <label class="model-field-label"><span class="field-hint" title="Routed by LiteRouter, not written to Claude Code. Serves any turn taken while plan mode is active, whatever model the client asked for — detected from the transcript, so unlike opusplan it still works above 200k prompt tokens. Applies immediately, no restart. Empty turns it off.">Plan</span>
+            <div class="model-field">
+              <input class="field grow" name="plan_model" value="{{.PlanModel}}" list="model-options" placeholder="strong · plan mode only" data-model-input="plan_model">
+              <button class="btn secondary sm" type="button" data-open-model-picker="plan_model" data-picker-title="Select model for plan mode">Browse</button>
+            </div>
+          </label>
+          <label class="model-field-label"><span class="field-hint" title="Takes over when a turn grows past the threshold below, measured against the window of the model that would otherwise serve it. Routing costs nothing — the alternatives are the client compacting or LiteRouter trimming, and both throw away conversation. Set this and Max context &#39;auto&#39; reports this model&#39;s window, so the session is allowed the room it actually has. Plan mode still wins, unless the plan model cannot hold the turn either.">Long context</span>
+            <div class="model-field">
+              <input class="field grow" name="long_context_model" value="{{.LongContextModel}}" list="model-options" placeholder="big window · optional" data-model-input="long_context_model">
+              <button class="btn secondary sm" type="button" data-open-model-picker="long_context_model" data-picker-title="Select model for long context">Browse</button>
+            </div>
+          </label>
+          <label class="model-field-label"><span class="field-hint" title="Share of the serving model&#39;s window that hands the turn over — a share, not a token count, because one number cannot be right for two models at once: 60k is most of a 128k window and a quarter of a 400k one. Blank uses 60%, which is deliberately early: the size is a byte estimate and it was measured running anywhere from 0.55x to 1.3x of the upstream&#39;s own count.">Threshold %</span>
+            <input class="field" name="long_context_percent" type="number" min="1" max="99" value="{{if .LongContextPercent}}{{.LongContextPercent}}{{end}}" placeholder="60">
+          </label>
+          <label class="model-field-label"><span class="field-hint" title="Models that cannot read images, comma separated. Prefixes work, so one entry covers a provider. This has to be named because no vendor exposes vision support reliably and no model id carries it — and guessing would either break working image turns or silently downgrade a good model. Leave empty and nothing changes.">Text-only models</span>
+            <div class="model-field">
+              <input class="field grow" name="text_only_models" value="{{.TextOnlyModels}}" placeholder="fpt-ai, some/text-model" data-model-input="text_only_models" data-model-list>
+              <button class="btn secondary sm" type="button" data-open-model-picker="text_only_models" data-picker-title="Pick the models that cannot read images">Browse</button>
+            </div>
+          </label>
+          <label class="model-field-label"><span class="field-hint" title="Takes any turn carrying an image whose routed model was declared text-only above. Only fires for that pair — an image alone never reroutes, so a screenshot during plan mode stays on the plan model when that model reads images. Only the newest turn counts: once an image is history it is replaced with a placeholder and the session returns to the cheap model, instead of following the picture onto the vision model for every remaining turn and paying for its base64 each time. Left empty the two cases split: an image you attached is refused with a message naming the cause, while an image a tool returned (Read on a PNG, an MCP screenshot) is replaced with a placeholder so the turn survives — a subagent should not die over one incidental file.">Image</span>
+            <div class="model-field">
+              <input class="field grow" name="image_model" value="{{.ImageModel}}" list="model-options" placeholder="vision · only if needed" data-model-input="image_model">
+              <button class="btn secondary sm" type="button" data-open-model-picker="image_model" data-picker-title="Select model for image turns">Browse</button>
+            </div>
+          </label>
+          <div class="btn-row">
+            <button class="btn primary sm" type="submit">Save routing</button>
+          </div>
+          <div class="cli-plan-result" aria-live="polite"></div>
+        </form>
+        <pre id="claude-manual" class="code-block" hidden>ANTHROPIC_BASE_URL={{.BaseURL}}
+ANTHROPIC_AUTH_TOKEN=$LITEROUTER_API_TOKEN</pre>
+      </article>
+
+      <article class="cli-card">
+        <header>
+          <img src="/ui/assets/providers/codex.png" alt="" width="28" height="28">
+          <div>
+            <b>Codex</b>
+            <small>Responses API · provider literouter</small>
+          </div>
+          <span class="tag ok">ready</span>
+        </header>
+        <form class="form-grid" method="post" data-cli-setup-form>
+          <label>Endpoint<input class="field" name="base_url" value="{{.BaseURL}}" required></label>
+          <label class="model-field-label">Model
+            <div class="model-field">
+              <input class="field grow" name="model" value="{{if .Models}}{{index .Models 0}}{{end}}" list="model-options" placeholder="type model id or browse" required data-model-input="codex_model">
+              <button class="btn secondary sm" type="button" data-open-model-picker="codex_model" data-picker-title="Select model for Codex">Browse</button>
+            </div>
+          </label>
+          <label class="model-field-label">Subagent
+            <div class="model-field">
+              <input class="field grow" name="subagent_model" value="" list="model-options" placeholder="optional · defaults to model" data-model-input="subagent_model">
+              <button class="btn secondary sm" type="button" data-open-model-picker="subagent_model" data-picker-title="Select model for Subagent">Browse</button>
+            </div>
+          </label>
+          <div class="btn-row">
+            <button class="btn primary" type="submit" formaction="/ui/setup/codex/apply">Apply</button>
+            <button class="btn secondary" type="submit" formaction="/ui/setup/codex/reset" formnovalidate>Reset</button>
+            <button class="btn ghost" type="button" data-manual-toggle="codex-manual">Manual</button>
+            <button class="btn ghost sm" type="submit" formaction="/ui/setup/codex/apply" data-download="1" title="Download shell script instead">Download .sh</button>
+          </div>
+          <div class="cli-setup-result" aria-live="polite"></div>
+        </form>
+        <pre id="codex-manual" class="code-block" hidden>model_provider = "literouter"
+[model_providers.literouter]
+base_url = "{{.BaseURL}}/v1"
+wire_api = "responses"</pre>
+      </article>
+    </div>
+  </section>
+</section>
+
+<dialog id="model-picker" class="model-picker">
+  <form method="dialog" class="model-picker-shell">
+    <header class="model-picker-head">
+      <div>
+        <strong id="model-picker-title">Select model</strong>
+        <p id="model-picker-hint">Click a chip to fill the field. You can still type any free-text id.</p>
+      </div>
+      <button class="icon-btn" value="cancel" aria-label="Close">✕</button>
+    </header>
+    <input class="field" id="model-picker-search" type="search" placeholder="Search models…" autocomplete="off">
+    <div id="model-picker-list" class="model-picker-list"></div>
+    <footer class="model-picker-foot">
+      <input class="field grow" id="model-picker-custom" placeholder="Or type a custom model id">
+      <button class="btn primary" id="model-picker-use-custom" type="button">Use custom</button>
+    </footer>
+  </form>
+</dialog>
+{{end}}
+
+{{define "model-catalog"}}
+<div class="model-chip-grid">
+  {{range .CatalogModels}}
+  <article class="model-chip" data-model-id="{{.ID}}" data-provider="{{.Provider}}">
+    <div class="model-chip-top">
+      <span class="model-ico" aria-hidden="true">
+        <svg viewBox="0 0 20 20" width="16" height="16" fill="none">
+          <rect x="3.5" y="5" width="13" height="10" rx="3.5" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="7.5" cy="10" r="1.2" fill="currentColor"/>
+          <circle cx="12.5" cy="10" r="1.2" fill="currentColor"/>
+          <path d="M8.2 12.4c.7.6 2.9.6 3.6 0" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          <path d="M7 5V3.8M13 5V3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </span>
+      <div class="model-chip-copy">
+        <code class="model-chip-id" id="model-id-{{urlquery .Provider}}-{{urlquery .ID}}" title="{{.ID}}">{{.ID}}</code>
+        <div class="model-chip-sub" title="{{if .Label}}{{.Label}}{{else}}{{.ID}}{{end}}">{{if .Label}}{{.Label}}{{else}}{{.ID}}{{end}}</div>
+      </div>
+      <div class="model-chip-actions">
+        <button type="button" class="icon-btn" data-test-model="{{.ID}}" title="Test model" aria-label="Test model">
+          <svg viewBox="0 0 20 20" width="14" height="14" fill="none" aria-hidden="true">
+            <path d="M6.5 3.5h7l-2.2 5.2a3.3 3.3 0 1 1-2.6 0L6.5 3.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            <path d="M8.2 12.8h3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button type="button" class="icon-btn" data-copy="#model-id-{{urlquery .Provider}}-{{urlquery .ID}}" title="Copy" aria-label="Copy">
+          <svg viewBox="0 0 20 20" width="14" height="14" fill="none" aria-hidden="true">
+            <rect x="7" y="7" width="9" height="9" rx="2" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M13 7V5.5A1.5 1.5 0 0 0 11.5 4h-7A1.5 1.5 0 0 0 3 5.5v7A1.5 1.5 0 0 0 4.5 14H6" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+        </button>
+        <button type="button" class="icon-btn danger" hx-delete="/ui/models/{{urlquery .ID}}?provider={{urlquery .Provider}}" hx-target="#model-catalog" hx-swap="innerHTML" hx-confirm="Remove this model?" title="Remove" aria-label="Remove">
+          <svg viewBox="0 0 20 20" width="14" height="14" fill="none" aria-hidden="true">
+            <path d="M5 5l10 10M15 5 5 15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <details class="model-context-editor">
+      <summary title="Configure context window">
+        <span>Context</span>
+        <strong>{{formatContextWindow .ContextWindow}}</strong>
+        {{if gt .MaxOutputTokens 0}}<span title="Output cap learned from an upstream rejection">· out {{formatContextWindow .MaxOutputTokens}}</span>{{end}}
+      </summary>
+      <form class="model-context-form" hx-post="/ui/models/{{urlquery .ID}}/context" hx-target="#model-catalog" hx-swap="innerHTML">
+        <input type="hidden" name="provider" value="{{.Provider}}">
+        <label>
+          <span>Context window (tokens)</span>
+          <input class="field" type="number" name="context_window" min="1000" max="10000000" step="1000" value="{{.ContextWindow}}" required>
+        </label>
+        <button class="btn primary sm" type="submit">Save</button>
+      </form>
+    </details>
+    <div class="model-test-status" hidden></div>
+  </article>
+  {{end}}
+  <button type="button" class="model-chip add-chip" data-open-add-model>
+    <span class="add-chip-plus" aria-hidden="true">+</span>
+    <span>Add Model</span>
+  </button>
+</div>
+<form id="add-model-form" class="add-model-form" hidden hx-post="/ui/models" hx-target="#model-catalog" hx-swap="innerHTML">
+  <input type="hidden" name="provider" value="{{if .Provider}}{{.Provider.ID}}{{end}}">
+  <div class="add-model-row">
+    <label class="add-model-field grow">
+      <span>Model ID</span>
+      <input class="field grow" name="id" placeholder="{{if .Provider}}{{modelIDExample .Provider.ID}}{{else}}{{modelIDExample ""}}{{end}}" maxlength="160" required>
+    </label>
+    <label class="add-model-field">
+      <span>Label</span>
+      <input class="field" name="label" placeholder="optional" maxlength="128">
+    </label>
+    <label class="add-model-field context-field">
+      <span>Context window</span>
+      <input class="field" name="context_window" type="number" min="1000" max="10000000" step="1000" placeholder="auto / e.g. 256000">
+    </label>
+    <button class="btn secondary" type="button" data-test-add-model title="Test model before saving">
+      <svg viewBox="0 0 20 20" width="14" height="14" fill="none" aria-hidden="true">
+        <path d="M6.5 3.5h7l-2.2 5.2a3.3 3.3 0 1 1-2.6 0L6.5 3.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+        <path d="M8.2 12.8h3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      Test
+    </button>
+  </div>
+  <div id="add-model-test-status" class="model-test-status" hidden></div>
+  <div class="btn-row">
+    <button class="btn primary" type="submit">Save</button>
+    <button class="btn ghost" type="button" data-close-add-model>Cancel</button>
+  </div>
+</form>
+{{if not .CatalogModels}}
+<div class="empty-state" style="margin-top:10px"><strong>No models yet</strong><p>Add free-text model ids for this provider.</p></div>
+{{end}}
+{{end}}
+
+{{define "tab-usage"}}
+<section class="page-stack usage-page" id="usage-page" data-usage-page data-range="{{.UsageRange}}" data-auto-refresh="1">
+  <section class="block usage-hero">
+    <div class="block-head usage-head">
+      <div>
+        <h2>Overview</h2>
+        <p>Proxy traffic in the selected calendar range (UTC+7). Cost is estimated, not provider billing.</p>
+      </div>
+      <div class="usage-head-actions">
+        <span class="usage-refresh-chip" data-usage-countdown>Auto 30s</span>
+        <div class="range-pills" role="tablist" aria-label="Time range">
+          <a class="range-pill{{if eq .UsageRange "24h"}} is-active{{end}}" href="/ui/usage?range=24h" hx-get="/ui/tabs/usage?range=24h" hx-target="#content" hx-push-url="/ui/usage?range=24h" hx-swap="innerHTML settle:120ms">24h</a>
+          <a class="range-pill{{if eq .UsageRange "7d"}} is-active{{end}}" href="/ui/usage?range=7d" hx-get="/ui/tabs/usage?range=7d" hx-target="#content" hx-push-url="/ui/usage?range=7d" hx-swap="innerHTML settle:120ms">7d</a>
+          <a class="range-pill{{if eq .UsageRange "30d"}} is-active{{end}}" href="/ui/usage?range=30d" hx-get="/ui/tabs/usage?range=30d" hx-target="#content" hx-push-url="/ui/usage?range=30d" hx-swap="innerHTML settle:120ms">30d</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="kpi-row">
+      <article class="kpi kpi-primary">
+        <span class="kpi-label">Requests</span>
+        <strong class="kpi-value">{{.Usage.Requests}}</strong>
+        <span class="kpi-sub">completed calls</span>
+      </article>
+      <article class="kpi">
+        <span class="kpi-label">Input</span>
+        <strong class="kpi-value">{{formatTokens .Usage.PromptTokens}}</strong>
+        <span class="kpi-sub">{{formatInt .Usage.PromptTokens}} tokens</span>
+      </article>
+      <article class="kpi">
+        <span class="kpi-label">Output</span>
+        <strong class="kpi-value">{{formatTokens .Usage.CompletionTokens}}</strong>
+        <span class="kpi-sub">{{formatInt .Usage.CompletionTokens}} tokens</span>
+      </article>
+      <article class="kpi">
+        <span class="kpi-label">Cached</span>
+        <strong class="kpi-value">{{formatTokens .Usage.CachedTokens}}</strong>
+        <span class="kpi-sub">{{if gt .Usage.PromptTokens 0}}{{pct64 .Usage.CachedTokens .Usage.PromptTokens}}% of input{{else}}no cache hits{{end}}</span>
+      </article>
+      <article class="kpi kpi-cost">
+        <span class="kpi-label">Est. cost</span>
+        <strong class="kpi-value">{{formatUSD .Usage.CostUSD}}</strong>
+        <span class="kpi-sub">rough OpenAI-style rates</span>
+      </article>
+    </div>
+  </section>
+
+  <section class="block usage-map-block">
+    <div class="block-head">
+      <div>
+        <h2>Routing map</h2>
+        <p>How local clients reach upstream providers through LiteRouter.</p>
+      </div>
+      <span class="map-legend">
+        <i class="lg-hot"></i> calling
+        <i class="lg-used"></i> used
+        <i class="lg-idle"></i> unused
+        {{if .UsageLive.Any}}
+        <em class="map-live-tag">live</em>
+        {{else if .UsageLive.UsedAny}}
+        <em class="map-live-tag muted">history</em>
+        {{else}}
+        <em class="map-live-tag muted">idle</em>
+        {{end}}
+      </span>
+    </div>
+
+    <div class="usage-map" aria-label="Provider topology">
+      <div class="map-grid" aria-hidden="true"></div>
+
+      <div class="map-stage{{if not .UsageMap}} is-empty{{end}}">
+        <div class="map-col providers">
+          {{if .UsageMap}}
+          {{range .UsageMap}}
+          <div class="map-provider-row">
+            <div class="map-node{{if .Calling}} is-live is-calling{{else if .Used}} is-used{{else}} is-unused{{end}}" data-p="{{.ID}}">
+              <span class="map-ico {{.ID}}" aria-hidden="true">
+                <img src="/ui/assets/providers/{{.Icon}}.png" alt="" width="18" height="18">
+              </span>
+              <div class="map-copy">
+                <strong>{{.Name}}</strong>
+                <small>{{if gt .Requests 0}}{{.Requests}} req · {{formatTokens .Tokens}} tok{{end}}</small>
+              </div>
+              <em class="map-dot"></em>
+            </div>
+            <span class="map-rail{{if .Calling}} is-hot{{else if .Used}} is-used{{end}}" aria-hidden="true"></span>
+          </div>
+          {{end}}
+          {{else}}
+          <div class="map-empty">
+            <strong>No providers configured</strong>
+            <p>Connect Codex, Claude, or xAI under Providers to populate this map.</p>
+          </div>
+          {{end}}
+        </div>
+
+        <div class="map-col hub-col">
+          <div class="map-hub{{if .UsageLive.Any}} is-live is-calling{{else if .UsageLive.UsedAny}} is-used{{else}} is-unused{{end}}">
+            <span class="map-hub-badge"><img src="/ui/assets/logo.svg?v=20260722fav2" alt="LiteRouter" width="36" height="36"></span>
+            <strong>LiteRouter</strong>
+            <small>{{.Usage.Requests}} req · {{formatUSD .Usage.CostUSD}}</small>
+            <div class="map-hub-ring" aria-hidden="true"></div>
+          </div>
+        </div>
+
+        <div class="map-col clients">
+          <div class="map-provider-row reverse">
+            <span class="map-rail{{if .UsageLive.Any}} is-hot{{else if or .UsageLive.UsedAny .UsageMap}} is-used{{end}}" aria-hidden="true"></span>
+            <div class="map-node clients-node{{if .UsageLive.Any}} is-live is-calling{{else if or .UsageLive.UsedAny .UsageMap}} is-used{{else}} is-unused{{end}}">
+              <span class="map-ico clients" aria-hidden="true">
+                <img src="/ui/assets/providers/opencode.png" alt="" width="18" height="18">
+              </span>
+              <div class="map-copy">
+                <strong>Local clients</strong>
+                <small>CLI · IDE · API keys</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="usage-grid">
+    <section class="block">
+      <div class="block-head">
+        <div>
+          <h2>By provider</h2>
+          <p>Share of requests in this window.</p>
+        </div>
+      </div>
+      {{if .Usage.ByProvider}}
+      <div class="share-list">
+        {{range .Usage.ByProvider}}
+        <article class="share-row">
+          <div class="share-top">
+            <div class="share-id">
+              <span class="share-logo">
+                <img src="/ui/assets/providers/{{if or (eq .Provider "xai") (eq .Provider "grok")}}xai{{else if or (eq .Provider "claude") (eq .Provider "anthropic")}}claude{{else if or (eq .Provider "codex") (eq .Provider "openai") (eq .Provider "cx")}}codex{{else}}openai{{end}}.png" alt="" width="16" height="16">
+              </span>
+              <div>
+                <strong>{{providerLabel .Provider}}</strong>
+                <span>{{.Requests}} req · {{formatTokens .Tokens}} tok</span>
+              </div>
+            </div>
+            <div class="share-meta">
+              <em>{{formatUSD .CostUSD}}</em>
+              <b>{{pct .Requests $.Usage.Requests}}%</b>
+            </div>
+          </div>
+          <div class="share-bar" aria-hidden="true"><i style="width:{{pct .Requests $.Usage.Requests}}%"></i></div>
+        </article>
+        {{end}}
+      </div>
+      {{else}}
+      <div class="empty-state compact"><strong>No provider traffic</strong><p>Run a model test or send a chat request through the gateway.</p></div>
+      {{end}}
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <div>
+          <h2>By model</h2>
+          <p>Top models by request count.</p>
+        </div>
+      </div>
+      {{if .Usage.ByModel}}
+      <div class="share-list">
+        {{range .Usage.ByModel}}
+        <article class="share-row">
+          <div class="share-top">
+            <div class="share-id">
+              <div>
+                <strong title="{{.Model}}">{{prettyModel .Model}}</strong>
+                <span>{{.Requests}} req · in {{formatTokens .InTokens}} · out {{formatTokens .OutTokens}}</span>
+              </div>
+            </div>
+            <div class="share-meta">
+              <em>{{formatUSD .CostUSD}}</em>
+              <b>{{pct .Requests $.Usage.Requests}}%</b>
+            </div>
+          </div>
+          <div class="share-bar model" aria-hidden="true"><i style="width:{{pct .Requests $.Usage.Requests}}%"></i></div>
+        </article>
+        {{end}}
+      </div>
+      {{else}}
+      <div class="empty-state compact"><strong>No model traffic</strong><p>Models appear after the first successful completion.</p></div>
+      {{end}}
+    </section>
+  </div>
+
+  <section class="block">
+    <div class="block-head">
+      <div>
+        <h2>Recent activity</h2>
+        <p>Latest gateway completions. Prompt bodies are never stored.</p>
+      </div>
+      {{if .Usage.Recent}}<span class="soft-count">{{len .Usage.Recent}} shown</span>{{end}}
+    </div>
+    {{if .Usage.Recent}}
+    <div class="table-wrap usage-table-wrap">
+      <table class="data-table usage-table">
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Provider</th>
+            <th>Model</th>
+            <th>Kind</th>
+            <th class="num">In</th>
+            <th class="num">Out</th>
+            <th class="num">Cached</th>
+            <th class="num">Cost</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Usage.Recent}}
+          <tr>
+            <td class="mono when">{{formatDayTime .Timestamp}}</td>
+            <td><span class="prov-chip {{.Provider}}">{{providerLabel .Provider}}</span></td>
+            <td class="model-cell" title="{{.Model}}">{{prettyModel .Model}}</td>
+            <td><span class="kind-chip">{{endpointLabel .Endpoint}}</span></td>
+            <td class="num" title="{{formatUsageInt .PromptTokens}} input tokens · {{if .PromptTokensEstimated}}estimated{{else}}reported by upstream{{end}}">{{if .PromptTokensEstimated}}<span class="usage-est">~</span>{{end}}{{formatUsageInt .PromptTokens}}</td>
+            <td class="num" title="{{formatUsageInt .CompletionTokens}} output tokens · {{if .CompletionTokensEstimated}}estimated{{else}}reported by upstream{{end}}">{{if .CompletionTokensEstimated}}<span class="usage-est">~</span>{{end}}{{formatUsageInt .CompletionTokens}}</td>
+            <td class="num" title="{{if .CachedTokensReported}}{{formatUsageInt .CachedTokens}} cached input tokens reported by upstream{{else}}Upstream did not report cached tokens{{end}}">{{if .CachedTokensReported}}{{formatUsageInt .CachedTokens}}{{else}}<span class="usage-unknown">—</span>{{end}}</td>
+            <td class="num cost" title="Estimated API-equivalent cost{{if or .PromptTokensEstimated .CompletionTokensEstimated (eq .CachedTokensReported false)}} · incomplete usage metadata{{end}}">{{formatUSD .CostUSD}}{{if or .PromptTokensEstimated .CompletionTokensEstimated (eq .CachedTokensReported false)}} <span class="usage-est-badge">est.</span>{{end}}</td>
+            <td><span class="status-pill{{if eq .Status "ok"}} ok{{else}} bad{{end}}">{{.Status}}</span></td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state"><strong>No requests yet</strong><p>Usage events are recorded when the gateway finishes a chat/messages call or a model test.</p></div>
+    {{end}}
+  </section>
+</section>
+{{end}}
