@@ -235,6 +235,13 @@ func (s *Store) Migrate(ctx context.Context) error {
 			}
 		}
 	}
+	// Empty means "send whatever the client asked for". A default here would quietly
+	// override every request the moment the column appeared.
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE catalog_models ADD COLUMN effort TEXT NOT NULL DEFAULT ''`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("migrate catalog_models.effort: %w", err)
+		}
+	}
 	if err := s.loadAPIKeyCache(ctx); err != nil {
 		return err
 	}

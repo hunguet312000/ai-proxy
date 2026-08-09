@@ -41,6 +41,11 @@ import (
 
 const healthcheckTimeout = 2 * time.Second
 
+// usageAdviceWindow is how far back the compaction advisor looks. Long enough to
+// accumulate large-prompt evidence, short enough that a model's recent behaviour is
+// what drives the recommendation.
+const usageAdviceWindow = 30 * 24 * time.Hour
+
 func main() {
 	os.Exit(run())
 }
@@ -263,19 +268,29 @@ func run() int {
 			logger.Warn("seed catalog models", "provider", provider, "error", err)
 		}
 	}
-	if windows, err := store.CatalogContextWindows(context.Background()); err != nil {
-		logger.Error("load context windows", "error", err)
-		return 1
-	} else {
-		windowResolver.ReplaceCatalog(windows)
-	}
 	refreshContextWindows := func(ctx context.Context) error {
 		windows, err := store.CatalogContextWindows(ctx)
 		if err != nil {
 			return err
 		}
 		windowResolver.ReplaceCatalog(windows)
+		// Effort overrides live in the same table and change on the same edits, so they
+		// are refreshed together rather than through a second path that could drift.
+		efforts, err := store.CatalogEfforts(ctx)
+		if err != nil {
+			return err
+		}
+		if gatewayService != nil {
+			gatewayService.ReplaceModelEfforts(efforts)
+		}
 		return nil
+	}
+	// Load once at boot: the refresh otherwise runs only on a catalog edit, so a
+	// restart would serve every request with the overrides missing until someone
+	// happened to touch a model.
+	if err := refreshContextWindows(context.Background()); err != nil {
+		logger.Error("load catalog context windows", "error", err)
+		return 1
 	}
 	apiToken := os.Getenv("LITEROUTER_API_TOKEN")
 	if apiToken == "" {
@@ -334,6 +349,12 @@ func run() int {
 				err = refreshContextWindows(ctx)
 			}
 			return model, err
+		},
+		SetEffort: func(ctx context.Context, providerName, id, effort string) error {
+			if err := store.SetCatalogEffort(ctx, providerName, id, effort); err != nil {
+				return err
+			}
+			return refreshContextWindows(ctx)
 		},
 		SetContextWindow: func(ctx context.Context, providerName, id string, window int) error {
 			if err := store.SetCatalogContextWindow(ctx, providerName, id, window); err != nil {
@@ -543,11 +564,32 @@ func run() int {
 		ContextCeiling: gatewayService.ClientContextCeiling,
 	}, ui.UsageHooks{
 		Summary: usageService.UsageSummary,
+		Compaction: func(ctx context.Context) ([]usage.CompactionAdvice, error) {
+			// Windows come from the catalog so a recommendation is compared against what
+			// the gateway actually advertises, not against a default.
+			windows := map[string]int{}
+			models, err := store.ListCatalogModels(ctx, "")
+			if err != nil {
+				return nil, err
+			}
+			for _, model := range models {
+				windows[model.ID] = model.ContextWindow
+			}
+			return usage.NewAdvisor(store).Advise(ctx, time.Now().Add(-usageAdviceWindow), windows)
+		},
 	}, gatewayService.Models()...)
 	if err != nil {
 		logger.Error("initialize UI", "error", err)
 		return 1
 	}
+	uiService.SetDetectCursor(func(ctx context.Context) (string, error) {
+		_, path, err := oauthManager.DetectAndImportCursorAccount(ctx)
+		return path, err
+	})
+	uiService.SetImportCursor(func(ctx context.Context, accessToken, machineID string) error {
+		_, err := oauthManager.ImportCursorAccount(ctx, accessToken, machineID)
+		return err
+	})
 	uiService.SetCustomProviderHooks(ui.CustomProviderHooks{
 		List:      store.ListCustomProviders,
 		Create:    store.CreateCustomProvider,

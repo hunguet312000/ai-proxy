@@ -155,26 +155,29 @@ func (s *Service) summaryInputBudget(model string, maxTokens int) int {
 }
 
 type Service struct {
-	openAI           JSONClient
-	xai              JSONClient
-	openAIStream     StreamClient
-	xaiStream        StreamClient
-	oauthInference   OAuthInference
-	responses        *cache.ResponseCache
-	compressionMode  cache.CompressionMode
-	promptMinBytes   int
-	xaiPromptCache   bool
-	models           []string
-	aliases          map[string][]string
-	planModel        atomic.Pointer[string]
-	longContext      longContextPointer
-	imageRoute       atomic.Pointer[imageRoute]
-	outputLimits     map[string]int
-	learnedLimits    map[string]int
-	learnedWindows   map[string]int
-	observedWindows  map[string]int
-	tokenScales      map[string]tokenScale
-	warnedInflated   map[string]bool
+	openAI          JSONClient
+	xai             JSONClient
+	openAIStream    StreamClient
+	xaiStream       StreamClient
+	oauthInference  OAuthInference
+	responses       *cache.ResponseCache
+	compressionMode cache.CompressionMode
+	promptMinBytes  int
+	xaiPromptCache  bool
+	models          []string
+	aliases         map[string][]string
+	planModel       atomic.Pointer[string]
+	longContext     longContextPointer
+	imageRoute      atomic.Pointer[imageRoute]
+	outputLimits    map[string]int
+	learnedLimits   map[string]int
+	learnedWindows  map[string]int
+	observedWindows map[string]int
+	tokenScales     map[string]tokenScale
+	warnedInflated  map[string]bool
+	// modelEfforts overrides the reasoning effort per model. Held as a pointer so a
+	// catalog edit is visible to in-flight requests without locking the hot path.
+	modelEfforts     atomic.Pointer[map[string]string]
 	learnedMu        sync.RWMutex
 	onOutputLimit    func(model string, limit int)
 	onContextWindow  func(model string, window int)
@@ -298,6 +301,28 @@ func (s *Service) Chat(ctx context.Context, request translator.OpenAIRequest) (t
 	return s.chat(ctx, request, "/v1/chat/completions")
 }
 
+// ReplaceModelEfforts installs the per-model effort overrides from the catalog.
+func (s *Service) ReplaceModelEfforts(efforts map[string]string) {
+	clone := make(map[string]string, len(efforts))
+	for model, effort := range efforts {
+		clone[model] = effort
+	}
+	s.modelEfforts.Store(&clone)
+}
+
+// effortFor returns the override for a model, or empty to leave the request alone.
+//
+// The lookup is on the model actually being called, not the one the client asked for:
+// a fallback candidate is a different model with its own cost, and inheriting the
+// original's effort would spend a reasoning budget the operator set for something else.
+func (s *Service) effortFor(model string) string {
+	efforts := s.modelEfforts.Load()
+	if efforts == nil {
+		return ""
+	}
+	return (*efforts)[model]
+}
+
 func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, endpoint string) (translator.OpenAIResponse, error) {
 	if request.Model == "" || len(request.Messages) == 0 {
 		return translator.OpenAIResponse{}, fmt.Errorf("model and messages are required")
@@ -318,6 +343,9 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 		client := s.clientForModel(model)
 		candidate := request
 		candidate.Model = model
+		if effort := s.effortFor(model); effort != "" {
+			candidate.Effort = effort
+		}
 		// Per candidate, not once per request: an alias chain can mix models whose
 		// output caps differ, and the cap that matters is the one for whoever serves
 		// the turn.
@@ -394,17 +422,22 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 		return translator.OpenAIResponse{}, lastErr
 	}
 	usage := response.Usage
-	promptEst, completionEst := false, false
-	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
+	// Each side is estimated on its own. Requiring both to be missing meant a provider
+	// that reports only one — Cursor reports completion tokens and no prompt count —
+	// recorded a hard zero for the other, which reads as "this request cost nothing"
+	// rather than "this was not reported".
+	if usage.PromptTokens == 0 {
 		if unified, err := translator.FromOpenAIRequest(request); err == nil {
 			usage.PromptTokens = contextguard.EstimateRequest(unified)
-			promptEst = true
-		}
-		if len(response.Choices) > 0 {
-			usage.CompletionTokens = contextguard.EstimateText(openAIMessageText(response.Choices[0].Message))
-			completionEst = true
 		}
 	}
+	if usage.CompletionTokens == 0 && len(response.Choices) > 0 {
+		usage.CompletionTokens = contextguard.EstimateText(openAIMessageText(response.Choices[0].Message))
+	}
+	// "Estimated" means the upstream did not report the figure — whoever filled it in.
+	// Deriving it from "the value is zero" instead would mark a provider's own estimate
+	// as an authoritative count.
+	promptEst, completionEst := !usage.PromptTokensReported, !usage.CompletionTokensReported
 	s.recordUsage(UsageEvent{
 		Provider: s.providerNameFor(request.Model), Model: response.Model, RequestModel: request.Model, Endpoint: endpoint,
 		PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
@@ -519,6 +552,9 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		client := s.clientForModel(model)
 		candidate := cloneProviderRequest(request)
 		candidate.Model = model
+		if effort := s.effortFor(model); effort != "" {
+			candidate.Effort = effort
+		}
 		s.clampProviderOutput(&candidate)
 		if s.compressionMode == cache.CompressionAggressive {
 			compressToolResults(&candidate, s.compressionMode)
@@ -630,21 +666,21 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		return provider.Response{}, lastErr
 	}
 	usage := raw.Usage
-	promptEst, completionEst := false, false
-	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
+	// As above: estimate each side independently so a partially reporting provider
+	// does not record a zero that is indistinguishable from a free request.
+	if usage.PromptTokens == 0 {
 		usage.PromptTokens = contextguard.EstimateRequest(request)
-		promptEst = true
-		if len(response.Content) > 0 {
-			var out strings.Builder
-			for _, block := range response.Content {
-				if block.Type == "text" || block.Type == "thinking" {
-					out.WriteString(block.Text)
-				}
-			}
-			usage.CompletionTokens = contextguard.EstimateText(out.String())
-			completionEst = true
-		}
 	}
+	if usage.CompletionTokens == 0 && len(response.Content) > 0 {
+		var out strings.Builder
+		for _, block := range response.Content {
+			if block.Type == "text" || block.Type == "thinking" {
+				out.WriteString(block.Text)
+			}
+		}
+		usage.CompletionTokens = contextguard.EstimateText(out.String())
+	}
+	promptEst, completionEst := !usage.PromptTokensReported, !usage.CompletionTokensReported
 	// Attribution keys on the requested model, not the echoed one: the upstream
 	// returns its own name with the routing prefix already stripped, so resolving
 	// that would report a custom provider's traffic as the built-in fallback.
@@ -1159,6 +1195,8 @@ func providerNameForModel(model string) string {
 		return "antigravity"
 	case strings.HasPrefix(m, "claude"), strings.HasPrefix(m, "anthropic"):
 		return "claude"
+	case strings.HasPrefix(m, "cursor/"), strings.HasPrefix(m, "cu/"):
+		return "cursor"
 	case strings.HasPrefix(m, "grok"), strings.HasPrefix(m, "xai/"):
 		return "xai"
 	case strings.HasPrefix(m, "cx/"), strings.Contains(m, "codex"), strings.HasPrefix(m, "gpt-"), strings.HasPrefix(m, "o1"), strings.HasPrefix(m, "o3"), strings.HasPrefix(m, "o4"):

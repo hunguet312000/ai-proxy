@@ -55,6 +55,9 @@ func (inference *Inference) DoStream(ctx context.Context, request translator.Ope
 	if providerName == "codex" {
 		return codexSSEToChatStream(body, request.Model), nil
 	}
+	if providerName == "cursor" {
+		return cursorAgentToChatStream(body, request.Model), nil
+	}
 	if providerName == "antigravity" {
 		// Pass the derived session key, not the raw header: it is what the signature
 		// cache is keyed on, and it stays stable across the turns of one session.
@@ -113,6 +116,8 @@ func (inference *Inference) complete(ctx context.Context, request translator.Ope
 			response, err = codexSSEToOpenAI(body, request.Model)
 		case "antigravity":
 			response, err = antigravitySSEToOpenAI(body, request.Model, antigravitySessionKey(request, conversationID))
+		case "cursor":
+			response, err = cursorAgentToOpenAI(body, request.Model)
 		default:
 			response, err = openAISSEToResponse(body, request.Model)
 		}
@@ -218,7 +223,7 @@ func (inference *Inference) openWithExcluded(ctx context.Context, request transl
 		if selected.Account.Provider == "antigravity" {
 			upstreamAccountID = token.ProjectID
 		}
-		body, err := inference.call(ctx, selected.Account.Provider, token.AccessToken, upstreamAccountID, selected.ResolvedModel, conversationID, request, reservationID)
+		body, err := inference.call(ctx, selected.Account.Provider, token, upstreamAccountID, selected.ResolvedModel, conversationID, request, reservationID)
 		if err == nil {
 			return body, selected.Account.ID, providerName, nil
 		}
@@ -315,8 +320,9 @@ func logOAuthFailure(model string, wave, accounts int, err error) {
 	slog.Warn("OAuth inference failed", "provider", oauthProviderForModel(model), "model", model, "waves", wave, "accounts_tried", accounts, "error", err)
 }
 
-func (inference *Inference) call(ctx context.Context, providerName, accessToken, accountID, model, conversationID string, request translator.OpenAIRequest, reservationID uint64) (io.ReadCloser, error) {
+func (inference *Inference) call(ctx context.Context, providerName string, credentials TokenSet, accountID, model, conversationID string, request translator.OpenAIRequest, reservationID uint64) (io.ReadCloser, error) {
 	defer inference.selector.CancelRequest(reservationID)
+	accessToken := credentials.AccessToken
 	if accessToken == "" {
 		return nil, fmt.Errorf("OAuth account has no access token")
 	}
@@ -324,6 +330,11 @@ func (inference *Inference) call(ctx context.Context, providerName, accessToken,
 	model = resolveUpstreamModel(providerName, model)
 	var endpoint string
 	var payload any
+	// rawBody is set by providers whose wire format is not JSON.
+	var rawBody []byte
+	// cursorSession is set only by the Cursor path, whose request body must stay open
+	// for the whole turn so the service can read its conversation state back.
+	var cursorSession *cursorRunSession
 	headers := map[string]string{}
 	switch providerName {
 	case "codex":
@@ -358,14 +369,69 @@ func (inference *Inference) call(ctx context.Context, providerName, accessToken,
 		headers["x-request-source"] = "local"
 		headers["X-Client-Name"] = "antigravity"
 		headers["X-Client-Version"] = "1.23.2"
+	case "cursor":
+		// Cursor speaks Connect+protobuf against its IDE endpoint, so nothing the JSON
+		// providers do applies: the body is binary and the headers are derived from the
+		// imported session rather than being a bearer token alone.
+		endpoint = cursorAgentBaseURL + cursorAgentRunPath
+		cacheKey := oauthSessionKey(request, conversationID, "cursor_")
+		conversation, pending := cursorConversations.lookup(cacheKey, request)
+		encodedBody, upstreamConversation, sentTokens, buildErr := cursorAgentRequestBody(request, model, conversation, pending)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		if conversation != nil {
+			slog.Debug("cursor conversation continued", "model", model,
+				"replayed_messages", len(request.Messages)-len(pending), "sent_messages", len(pending))
+		} else if len(request.Messages) > 2 {
+			// A multi-turn request that could not be continued means the client's
+			// transcript is not append-only, which is worth knowing: it decides whether
+			// this cache can ever engage for real traffic.
+			slog.Debug("cursor conversation restarted", "model", model, "messages", len(request.Messages))
+		}
+		cursorSession = newCursorRunSession(cacheKey, conversation, nil)
+		cursorSession.conversationID = upstreamConversation
+		cursorSession.pendingHistory = requestFingerprints(request)
+		cursorSession.sentPromptTokens = sentTokens
+		signed, headerErr := cursorHeaders(CursorCredentials{
+			AccessToken:   credentials.AccessToken,
+			MachineID:     credentials.MachineID,
+			ClientVersion: credentials.ClientVersion,
+			ClientCommit:  credentials.ClientCommit,
+		}, true)
+		if headerErr != nil {
+			return nil, headerErr
+		}
+		for key, value := range signed {
+			headers[key] = value
+		}
+		rawBody = encodedBody
 	case "claude":
 		return nil, fmt.Errorf("Claude OAuth inference is not configured for OpenAI-compatible gateway traffic")
 	default:
 		return nil, fmt.Errorf("unsupported OAuth provider %q", providerName)
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
+	var encoded []byte
+	if rawBody != nil {
+		// A provider that does not speak JSON supplies its own bytes; marshalling here
+		// would wrap a protobuf body in quotes and produce a request nothing can read.
+		encoded = rawBody
+	} else {
+		marshalled, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+		encoded = marshalled
+	}
+	// Repeated tool output is the last large saving available on providers with no
+	// server-side conversation state. Report it rather than act on it: collapsing it
+	// rewrites what the model reads, and that is not a change to make on a hunch.
+	if duplication := translator.MeasurePromptDuplication(request); duplication.DuplicateToolBytes > 0 {
+		slog.Info("prompt carries repeated tool output", "provider", providerName, "model", model,
+			"duplicate_results", duplication.DuplicateResults,
+			"duplicate_bytes", duplication.DuplicateToolBytes,
+			"tool_bytes", duplication.ToolBytes,
+			"share_of_prompt", int(duplication.Ratio()*100))
 	}
 	// The account is what decides whether the upstream prompt cache can hit: each
 	// one has its own cache, so a conversation that hops accounts re-pays for the
@@ -375,12 +441,26 @@ func (inference *Inference) call(ctx context.Context, providerName, accessToken,
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		slog.Debug("oauth upstream payload", "provider", providerName, "model", model, "bytes", len(encoded), "payload", string(encoded))
 	}
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(encoded))
+	var body io.Reader = bytes.NewReader(encoded)
+	if cursorSession != nil {
+		// A pipe, not a byte reader: the service asks for blobs mid-turn and a closed
+		// request stream cannot answer, which silently costs the conversation history.
+		pipeReader, pipeWriter := io.Pipe()
+		cursorSession.writer = pipeWriter
+		go func() { _, _ = pipeWriter.Write(encoded) }()
+		body = pipeReader
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
+	if cursorSession != nil {
+		httpRequest.ContentLength = -1
+	}
 	httpRequest.Header.Set("Authorization", "Bearer "+accessToken)
 	httpRequest.Header.Set("Content-Type", "application/json")
+	// Provider headers are applied last so a non-JSON provider can replace the
+	// defaults above rather than fight them.
 	for key, value := range headers {
 		httpRequest.Header.Set(key, value)
 	}
@@ -391,7 +471,14 @@ func (inference *Inference) call(ctx context.Context, providerName, accessToken,
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		defer response.Body.Close()
+		if cursorSession != nil {
+			_ = cursorSession.writer.Close()
+		}
 		return nil, decodeOAuthInferenceError(providerName, response)
+	}
+	if cursorSession != nil {
+		cursorSession.ReadCloser = response.Body
+		return cursorSession, nil
 	}
 	return response.Body, nil
 }
@@ -540,6 +627,10 @@ func oauthProviderForModel(model string) string {
 		return "antigravity"
 	}
 	switch {
+	// Checked before the claude prefix: Cursor serves Claude models under its own
+	// subscription, so "cursor/claude-4.5-sonnet" belongs to Cursor, not Anthropic.
+	case strings.HasPrefix(model, "cursor/"), strings.HasPrefix(model, "cu/"):
+		return "cursor"
 	case strings.HasPrefix(model, "xai/"), strings.HasPrefix(model, "grok"):
 		return "grok"
 	case strings.HasPrefix(model, "claude"), strings.HasPrefix(model, "anthropic"):
@@ -569,5 +660,10 @@ func resolveAntigravityModel(model string) string {
 }
 
 func decodeOAuthInferenceError(providerName string, response *http.Response) error {
+	if providerName == "cursor" {
+		// Cursor answers with a Connect error envelope, not the OpenAI shape the generic
+		// decoder expects, so its message would otherwise arrive as raw JSON.
+		return decodeCursorHTTPError(response)
+	}
 	return provider.DecodeProviderError(providerName+" OAuth", response, io.LimitReader(response.Body, 1<<20))
 }

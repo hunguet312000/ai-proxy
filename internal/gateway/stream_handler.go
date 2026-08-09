@@ -912,6 +912,9 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 		client := s.streamClientForModel(model)
 		candidate := o.request
 		candidate.Model = model
+		if effort := s.effortFor(model); effort != "" {
+			candidate.Effort = effort
+		}
 		candidate, err := s.prepareStreamCandidate(ctx, candidate, o.unified)
 		if err != nil {
 			o.lastErr = err

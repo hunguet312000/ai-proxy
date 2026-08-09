@@ -4,6 +4,14 @@ LiteRouter is a lightweight AI proxy written in Go. It provides an authenticated
 
 LiteRouter là AI proxy nhẹ viết bằng Go. Hệ thống cung cấp gateway tương thích OpenAI/Anthropic có xác thực, fallback alias OpenAI/xAI, OAuth mã hóa và quota tracker, compact context, summarize gần giới hạn, cache, SSE streaming và dashboard embed.
 
+## Cursor
+
+Cursor is reached over the private protocol its IDE uses — hand-encoded protobuf
+against an unpublished schema. When an IDE update breaks it, follow
+[docs/cursor-protocol.md](docs/cursor-protocol.md): it records every field number,
+how to recover the schema from the IDE bundle (`tools/cursor-schema.py`), and which
+explanations have already been measured and ruled out.
+
 ## Run with Docker / Chạy bằng Docker
 
 ```sh

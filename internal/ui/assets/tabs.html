@@ -362,10 +362,30 @@
 
     <div class="conn-add-row">
       {{if .Provider}}
+      {{if eq .Provider.ID "cursor"}}
+      <form class="cursor-import" hx-post="/ui/oauth/cursor/detect" hx-target="#oauth-result" hx-swap="innerHTML">
+        <p class="hint">Cursor has no sign-in flow to run. LiteRouter can read the session straight out of the installed IDE — it expires and has no refresh token, so this has to be repeated when it does.</p>
+        <button class="btn primary" type="submit">Detect local Cursor session</button>
+      </form>
+      <form class="cursor-import" hx-post="/ui/oauth/cursor/import" hx-target="#oauth-result" hx-swap="innerHTML">
+        <p class="hint">Or paste it by hand, for a Cursor installed somewhere this server cannot read.</p>
+        <details>
+          <summary>Where to find these</summary>
+          <pre><code>sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
+  "SELECT value FROM itemTable WHERE key='cursorAuth/accessToken'"
+sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
+  "SELECT value FROM itemTable WHERE key='storage.serviceMachineId'"</code></pre>
+        </details>
+        <textarea class="field grow" name="access_token" rows="3" placeholder="cursorAuth/accessToken" autocomplete="off" required></textarea>
+        <input class="field grow" name="machine_id" placeholder="storage.serviceMachineId (UUID)" autocomplete="off" required>
+        <button class="btn secondary" type="submit">Import pasted session</button>
+      </form>
+      {{else}}
       <form hx-post="/ui/oauth/start" hx-target="#oauth-result" hx-swap="innerHTML">
         <input type="hidden" name="provider" value="{{.Provider.OAuthValue}}">
         <button class="btn primary" type="submit">+ Add {{if eq .Provider.ID "xai"}}xAI OAuth{{else}}{{.Provider.Name}} OAuth{{end}}</button>
       </form>
+      {{end}}
       {{end}}
       <div id="oauth-result" class="flash" aria-live="polite"></div>
     </div>
@@ -443,38 +463,44 @@
               <button class="btn secondary sm" type="button" data-open-model-picker="model" data-picker-title="Select model for Default">Browse</button>
             </div>
           </label>
+          <details class="form-section"{{if or .ClaudeSetup.FableModel .ClaudeSetup.OpusModel .ClaudeSetup.SonnetModel .ClaudeSetup.HaikuModel .ClaudeSetup.SubagentModel}} open{{end}}>
+            <summary><span>Role overrides</span><em>Fable · Opus · Sonnet · Haiku · Subagent</em></summary>
+            <div class="form-grid two">
+              <label class="model-field-label"><span class="field-hint" title="Used when /model picks Fable. Empty sends Anthropic&#39;s own model id, which only routes if a Claude account is connected.">Fable</span>
+                <div class="model-field">
+                  <input class="field grow" name="fable_model" value="{{.ClaudeSetup.FableModel}}" list="model-options" placeholder="strong · optional" data-model-input="fable_model">
+                  <button class="btn secondary sm" type="button" data-open-model-picker="fable_model" data-picker-title="Select model for Fable">Browse</button>
+                </div>
+              </label>
+              <label class="model-field-label"><span class="field-hint" title="Used when /model picks Opus, and by opusplan for plan mode — but that upgrade is disabled above 200k prompt tokens, so prefer the Plan field.">Opus</span>
+                <div class="model-field">
+                  <input class="field grow" name="opus_model" value="{{.ClaudeSetup.OpusModel}}" list="model-options" placeholder="strong · optional" data-model-input="opus_model">
+                  <button class="btn secondary sm" type="button" data-open-model-picker="opus_model" data-picker-title="Select model for Opus">Browse</button>
+                </div>
+              </label>
+              <label class="model-field-label"><span class="field-hint" title="Used when /model picks Sonnet, and as the resting model under opusplan.">Sonnet</span>
+                <div class="model-field">
+                  <input class="field grow" name="sonnet_model" value="{{.ClaudeSetup.SonnetModel}}" list="model-options" placeholder="mid · optional" data-model-input="sonnet_model">
+                  <button class="btn secondary sm" type="button" data-open-model-picker="sonnet_model" data-picker-title="Select model for Sonnet">Browse</button>
+                </div>
+              </label>
+              <label class="model-field-label"><span class="field-hint" title="Worth filling. Background work — titles, classifiers — runs here. Left empty it falls back to Default, so cheap chores get billed at Default&#39;s rate.">Haiku</span>
+                <div class="model-field">
+                  <input class="field grow" name="haiku_model" value="{{.ClaudeSetup.HaikuModel}}" list="model-options" placeholder="cheapest · fill this" data-model-input="haiku_model">
+                  <button class="btn secondary sm" type="button" data-open-model-picker="haiku_model" data-picker-title="Select model for Haiku">Browse</button>
+                </div>
+              </label>
+              <label class="model-field-label"><span class="field-hint" title="CLAUDE_CODE_SUBAGENT_MODEL — every Task/Agent run. Highest priority in Claude Code: it overrides each agent&#39;s own model: frontmatter. Leave empty for per-agent control; subagents then inherit Default.">Subagent</span>
+                <div class="model-field">
+                  <input class="field grow" name="subagent_model" value="{{.ClaudeSetup.SubagentModel}}" list="model-options" placeholder="mid · optional" data-model-input="claude_subagent_model">
+                  <button class="btn secondary sm" type="button" data-open-model-picker="claude_subagent_model" data-picker-title="Select model for Subagent">Browse</button>
+                </div>
+              </label>
+            </div>
+          </details>
+          <div class="form-section-head">Session <em>applies to every model Claude Code calls</em></div>
           <div class="form-grid two">
-            <label class="model-field-label"><span class="field-hint" title="Used when /model picks Fable. Empty sends Anthropic&#39;s own model id, which only routes if a Claude account is connected.">Fable</span>
-              <div class="model-field">
-                <input class="field grow" name="fable_model" value="{{.ClaudeSetup.FableModel}}" list="model-options" placeholder="strong · optional" data-model-input="fable_model">
-                <button class="btn secondary sm" type="button" data-open-model-picker="fable_model" data-picker-title="Select model for Fable">Browse</button>
-              </div>
-            </label>
-            <label class="model-field-label"><span class="field-hint" title="Used when /model picks Opus, and by opusplan for plan mode — but that upgrade is disabled above 200k prompt tokens, so prefer the Plan field.">Opus</span>
-              <div class="model-field">
-                <input class="field grow" name="opus_model" value="{{.ClaudeSetup.OpusModel}}" list="model-options" placeholder="strong · optional" data-model-input="opus_model">
-                <button class="btn secondary sm" type="button" data-open-model-picker="opus_model" data-picker-title="Select model for Opus">Browse</button>
-              </div>
-            </label>
-            <label class="model-field-label"><span class="field-hint" title="Used when /model picks Sonnet, and as the resting model under opusplan.">Sonnet</span>
-              <div class="model-field">
-                <input class="field grow" name="sonnet_model" value="{{.ClaudeSetup.SonnetModel}}" list="model-options" placeholder="mid · optional" data-model-input="sonnet_model">
-                <button class="btn secondary sm" type="button" data-open-model-picker="sonnet_model" data-picker-title="Select model for Sonnet">Browse</button>
-              </div>
-            </label>
-            <label class="model-field-label"><span class="field-hint" title="Worth filling. Background work — titles, classifiers — runs here. Left empty it falls back to Default, so cheap chores get billed at Default&#39;s rate.">Haiku</span>
-              <div class="model-field">
-                <input class="field grow" name="haiku_model" value="{{.ClaudeSetup.HaikuModel}}" list="model-options" placeholder="cheapest · fill this" data-model-input="haiku_model">
-                <button class="btn secondary sm" type="button" data-open-model-picker="haiku_model" data-picker-title="Select model for Haiku">Browse</button>
-              </div>
-            </label>
-            <label class="model-field-label"><span class="field-hint" title="CLAUDE_CODE_SUBAGENT_MODEL — every Task/Agent run. Highest priority in Claude Code: it overrides each agent&#39;s own model: frontmatter. Leave empty for per-agent control; subagents then inherit Default.">Subagent</span>
-              <div class="model-field">
-                <input class="field grow" name="subagent_model" value="{{.ClaudeSetup.SubagentModel}}" list="model-options" placeholder="mid · optional" data-model-input="claude_subagent_model">
-                <button class="btn secondary sm" type="button" data-open-model-picker="claude_subagent_model" data-picker-title="Select model for Subagent">Browse</button>
-              </div>
-            </label>
-            <label class="model-field-label"><span class="field-hint" title="Claude Code&#39;s effortLevel setting — the same value /effort writes, so /effort can still change it afterwards. Leave on &#39;keep current&#39; to not manage it. Reset does not revert it: effort is a preference, not routing. Reaches the model on cx/* (sent as reasoning.effort); dropped on ag/* and custom-provider upstreams.">Effort</span>
+            <label class="model-field-label"><span class="field-hint" title="Claude Code&#39;s effortLevel setting — the same value /effort writes, so /effort can still change it afterwards. Leave on &#39;keep current&#39; to not manage it. Reset does not revert it: effort is a preference, not routing. Reaches the model on cx/* (sent as reasoning.effort); dropped on ag/*, cursor and custom-provider upstreams. Claude Code holds one effort for the whole session — to force a level for a single model, use its Reasoning effort under Models.">Session effort</span>
               <select class="field" name="effort">
                 <option value=""{{if not .ClaudeSetup.Effort}} selected{{end}}>keep current</option>
                 <option value="low"{{if eq .ClaudeSetup.Effort "low"}} selected{{end}}>low</option>
@@ -511,27 +537,30 @@
               <button class="btn secondary sm" type="button" data-open-model-picker="plan_model" data-picker-title="Select model for plan mode">Browse</button>
             </div>
           </label>
-          <label class="model-field-label"><span class="field-hint" title="Takes over when a turn grows past the threshold below, measured against the window of the model that would otherwise serve it. Routing costs nothing — the alternatives are the client compacting or LiteRouter trimming, and both throw away conversation. Set this and Max context &#39;auto&#39; reports this model&#39;s window, so the session is allowed the room it actually has. Plan mode still wins, unless the plan model cannot hold the turn either.">Long context</span>
-            <div class="model-field">
-              <input class="field grow" name="long_context_model" value="{{.LongContextModel}}" list="model-options" placeholder="big window · optional" data-model-input="long_context_model">
-              <button class="btn secondary sm" type="button" data-open-model-picker="long_context_model" data-picker-title="Select model for long context">Browse</button>
-            </div>
-          </label>
-          <label class="model-field-label"><span class="field-hint" title="Share of the serving model&#39;s window that hands the turn over — a share, not a token count, because one number cannot be right for two models at once: 60k is most of a 128k window and a quarter of a 400k one. Blank uses 60%, which is deliberately early: the size is a byte estimate and it was measured running anywhere from 0.55x to 1.3x of the upstream&#39;s own count.">Threshold %</span>
-            <input class="field" name="long_context_percent" type="number" min="1" max="99" value="{{if .LongContextPercent}}{{.LongContextPercent}}{{end}}" placeholder="60">
-          </label>
-          <label class="model-field-label"><span class="field-hint" title="Models that cannot read images, comma separated. Prefixes work, so one entry covers a provider. This has to be named because no vendor exposes vision support reliably and no model id carries it — and guessing would either break working image turns or silently downgrade a good model. Leave empty and nothing changes.">Text-only models</span>
-            <div class="model-field">
-              <input class="field grow" name="text_only_models" value="{{.TextOnlyModels}}" placeholder="fpt-ai, some/text-model" data-model-input="text_only_models" data-model-list>
-              <button class="btn secondary sm" type="button" data-open-model-picker="text_only_models" data-picker-title="Pick the models that cannot read images">Browse</button>
-            </div>
-          </label>
-          <label class="model-field-label"><span class="field-hint" title="Takes any turn carrying an image whose routed model was declared text-only above. Only fires for that pair — an image alone never reroutes, so a screenshot during plan mode stays on the plan model when that model reads images. Only the newest turn counts: once an image is history it is replaced with a placeholder and the session returns to the cheap model, instead of following the picture onto the vision model for every remaining turn and paying for its base64 each time. Left empty the two cases split: an image you attached is refused with a message naming the cause, while an image a tool returned (Read on a PNG, an MCP screenshot) is replaced with a placeholder so the turn survives — a subagent should not die over one incidental file.">Image</span>
-            <div class="model-field">
-              <input class="field grow" name="image_model" value="{{.ImageModel}}" list="model-options" placeholder="vision · only if needed" data-model-input="image_model">
-              <button class="btn secondary sm" type="button" data-open-model-picker="image_model" data-picker-title="Select model for image turns">Browse</button>
-            </div>
-          </label>
+          <details class="form-section"{{if or .LongContextModel .ImageModel .TextOnlyModels}} open{{end}}>
+            <summary><span>Advanced routing</span><em>long context · threshold · text-only · image</em></summary>
+            <label class="model-field-label"><span class="field-hint" title="Takes over when a turn grows past the threshold below, measured against the window of the model that would otherwise serve it. Routing costs nothing — the alternatives are the client compacting or LiteRouter trimming, and both throw away conversation. Set this and Max context &#39;auto&#39; reports this model&#39;s window, so the session is allowed the room it actually has. Plan mode still wins, unless the plan model cannot hold the turn either.">Long context</span>
+              <div class="model-field">
+                <input class="field grow" name="long_context_model" value="{{.LongContextModel}}" list="model-options" placeholder="big window · optional" data-model-input="long_context_model">
+                <button class="btn secondary sm" type="button" data-open-model-picker="long_context_model" data-picker-title="Select model for long context">Browse</button>
+              </div>
+            </label>
+            <label class="model-field-label"><span class="field-hint" title="Share of the serving model&#39;s window that hands the turn over — a share, not a token count, because one number cannot be right for two models at once: 60k is most of a 128k window and a quarter of a 400k one. Blank uses 60%, which is deliberately early: the size is a byte estimate and it was measured running anywhere from 0.55x to 1.3x of the upstream&#39;s own count.">Threshold %</span>
+              <input class="field" name="long_context_percent" type="number" min="1" max="99" value="{{if .LongContextPercent}}{{.LongContextPercent}}{{end}}" placeholder="60">
+            </label>
+            <label class="model-field-label"><span class="field-hint" title="Models that cannot read images, comma separated. Prefixes work, so one entry covers a provider. This has to be named because no vendor exposes vision support reliably and no model id carries it — and guessing would either break working image turns or silently downgrade a good model. Leave empty and nothing changes.">Text-only models</span>
+              <div class="model-field">
+                <input class="field grow" name="text_only_models" value="{{.TextOnlyModels}}" placeholder="fpt-ai, some/text-model" data-model-input="text_only_models" data-model-list>
+                <button class="btn secondary sm" type="button" data-open-model-picker="text_only_models" data-picker-title="Pick the models that cannot read images">Browse</button>
+              </div>
+            </label>
+            <label class="model-field-label"><span class="field-hint" title="Takes any turn carrying an image whose routed model was declared text-only above. Only fires for that pair — an image alone never reroutes, so a screenshot during plan mode stays on the plan model when that model reads images. Only the newest turn counts: once an image is history it is replaced with a placeholder and the session returns to the cheap model, instead of following the picture onto the vision model for every remaining turn and paying for its base64 each time. Left empty the two cases split: an image you attached is refused with a message naming the cause, while an image a tool returned (Read on a PNG, an MCP screenshot) is replaced with a placeholder so the turn survives — a subagent should not die over one incidental file.">Image</span>
+              <div class="model-field">
+                <input class="field grow" name="image_model" value="{{.ImageModel}}" list="model-options" placeholder="vision · only if needed" data-model-input="image_model">
+                <button class="btn secondary sm" type="button" data-open-model-picker="image_model" data-picker-title="Select model for image turns">Browse</button>
+              </div>
+            </label>
+          </details>
           <div class="btn-row">
             <button class="btn primary sm" type="submit">Save routing</button>
           </div>
@@ -600,6 +629,87 @@ wire_api = "responses"</pre>
 </dialog>
 {{end}}
 
+{{define "compaction-advice"}}
+<div class="advice-panel">
+  {{if .AdviceNote}}<p class="advice-note">{{.AdviceNote}}</p>{{end}}
+  {{$actionable := false}}
+  {{range .Advice}}{{if gt .RecommendedWindow 0}}{{$actionable = true}}{{end}}{{end}}
+
+  {{if $actionable}}
+  <table class="advice-table">
+    <thead>
+      <tr>
+        <th>Model</th>
+        <th class="advice-num">Now</th>
+        <th class="advice-num">Recommended</th>
+        <th class="advice-num">Cache reuse</th>
+        <th class="advice-num">Saving</th>
+        <th class="advice-act"><span class="visually-hidden">Action</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Advice}}{{if gt .RecommendedWindow 0}}
+      <tr>
+        <td><code>{{.Model}}</code><span class="advice-evidence">{{.Provider}} · {{.LargeRequests}} large requests</span></td>
+        <td class="advice-num">{{if gt .CurrentWindow 0}}{{div .CurrentWindow 1000}}k{{else}}—{{end}}</td>
+        <td class="advice-num advice-target">{{div .RecommendedWindow 1000}}k</td>
+        <td class="advice-num">{{if .SavingIsUpperBound}}<span class="advice-unknown">not reported</span>{{else}}{{pctf .BestHitRate}}% → {{pctf .CliffHitRate}}%{{end}}</td>
+        <td class="advice-num advice-saving" title="{{if .SavingIsUpperBound}}Upper bound: this upstream reports no cache usage, so part of the trimmed input may already have been discounted{{else}}Measured against the cache reuse this model actually reported{{end}}">{{if .SavingIsUpperBound}}≤{{else}}~{{end}}{{pctf .EstimatedSaving}}%</td>
+        <td class="advice-act">
+          {{if gt .CurrentWindow 0}}
+          <form hx-post="/ui/models/advice/apply" hx-target="#compaction-advice" hx-swap="innerHTML">
+            <input type="hidden" name="provider" value="{{.Provider}}">
+            <input type="hidden" name="model" value="{{.Model}}">
+            <input type="hidden" name="window" value="{{.RecommendedWindow}}">
+            <button type="submit" class="btn primary sm">Apply</button>
+          </form>
+          {{else}}
+          <form hx-post="/ui/models/advice/register" hx-target="#compaction-advice" hx-swap="innerHTML">
+            <input type="hidden" name="provider" value="{{.Provider}}">
+            <input type="hidden" name="model" value="{{.Model}}">
+            <input type="hidden" name="window" value="{{.RecommendedWindow}}">
+            <button type="submit" class="btn secondary sm" title="This model has served traffic but has no catalog entry, so there is no window to set. This adds it under {{.Provider}} with the recommended window.">Add &amp; apply</button>
+          </form>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}{{end}}
+    </tbody>
+  </table>
+  <p class="advice-foot">Applying lowers the model's advertised context window, so the client compacts earlier. That trades context for cost — the saving is measured on traffic already seen, not predicted.</p>
+  {{else}}
+  <p class="advice-empty">No model has enough evidence for a recommendation yet.</p>
+  {{end}}
+
+  {{if .AdviceGroups}}
+  <details class="advice-rest">
+    <summary>Models without a recommendation ({{len .Advice}} seen)</summary>
+    <div class="advice-groups">
+      {{range .AdviceGroups}}
+      <section class="advice-group">
+        <h4>
+          <img src="/ui/assets/providers/{{.Logo}}.png" alt="" width="14" height="14">
+          {{.Label}}
+          <span class="advice-count">{{.Count}} model{{if ne .Count 1}}s{{end}}</span>
+        </h4>
+        {{if .Note}}<p class="advice-group-note">{{.Note}}</p>{{end}}
+        <ul class="advice-list">
+          {{range .Models}}
+          <li title="{{.Title}}">
+            <code>{{.Model}}</code>
+            {{if .Metric}}<b class="advice-metric">{{.Metric}}</b>{{end}}
+            {{if .Detail}}<span>{{.Detail}}</span>{{end}}
+          </li>
+          {{end}}
+        </ul>
+      </section>
+      {{end}}
+    </div>
+  </details>
+  {{end}}
+</div>
+{{end}}
+
 {{define "model-catalog"}}
 <div class="model-chip-grid">
   {{range .CatalogModels}}
@@ -639,10 +749,11 @@ wire_api = "responses"</pre>
       </div>
     </div>
     <details class="model-context-editor">
-      <summary title="Configure context window">
+      <summary title="Context window and reasoning effort">
         <span>Context</span>
         <strong>{{formatContextWindow .ContextWindow}}</strong>
         {{if gt .MaxOutputTokens 0}}<span title="Output cap learned from an upstream rejection">· out {{formatContextWindow .MaxOutputTokens}}</span>{{end}}
+        {{if and .Effort (honoursEffort .Provider)}}<em class="model-effort-chip" title="Reasoning effort is forced to {{.Effort}} for this model, whatever the client asks for">{{.Effort}}</em>{{end}}
       </summary>
       <form class="model-context-form" hx-post="/ui/models/{{urlquery .ID}}/context" hx-target="#model-catalog" hx-swap="innerHTML">
         <input type="hidden" name="provider" value="{{.Provider}}">
@@ -652,6 +763,22 @@ wire_api = "responses"</pre>
         </label>
         <button class="btn primary sm" type="submit">Save</button>
       </form>
+      {{if honoursEffort .Provider}}
+      <form class="model-context-form" hx-post="/ui/models/{{urlquery .ID}}/effort" hx-target="#model-catalog" hx-swap="innerHTML">
+        <input type="hidden" name="provider" value="{{.Provider}}">
+        <label>
+          <span>Reasoning effort</span>
+          {{$effort := .Effort}}
+          <select class="field" name="effort">
+            <option value=""{{if not $effort}} selected{{end}}>Follow the request</option>
+            {{range effortLevels}}<option value="{{.}}"{{if eq $effort .}} selected{{end}}>{{.}}</option>{{end}}
+          </select>
+        </label>
+        <button class="btn sm" type="submit">Save</button>
+      </form>
+      {{else}}
+      <p class="model-effort-note">This upstream carries no reasoning effort, so the setting would have no effect here.</p>
+      {{end}}
     </details>
     <div class="model-test-status" hidden></div>
   </article>
@@ -739,6 +866,18 @@ wire_api = "responses"</pre>
         <strong class="kpi-value">{{formatUSD .Usage.CostUSD}}</strong>
         <span class="kpi-sub">rough OpenAI-style rates</span>
       </article>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="block-head">
+      <div>
+        <h2>Compaction</h2>
+        <p>Where carrying more history stops paying for itself, measured from this proxy's own traffic. A saving marked <em>at most</em> comes from an upstream that reports no cache: the token cut is exact, how much of it turns into money is not.</p>
+      </div>
+    </div>
+    <div id="compaction-advice" hx-get="/ui/models/advice" hx-trigger="load" hx-swap="innerHTML">
+      <p class="advice-empty">Reading usage…</p>
     </div>
   </section>
 
@@ -833,7 +972,7 @@ wire_api = "responses"</pre>
           <div class="share-top">
             <div class="share-id">
               <span class="share-logo">
-                <img src="/ui/assets/providers/{{if or (eq .Provider "xai") (eq .Provider "grok")}}xai{{else if or (eq .Provider "claude") (eq .Provider "anthropic")}}claude{{else if or (eq .Provider "codex") (eq .Provider "openai") (eq .Provider "cx")}}codex{{else}}openai{{end}}.png" alt="" width="16" height="16">
+                <img src="/ui/assets/providers/{{providerLogo .Provider}}.png" alt="" width="16" height="16">
               </span>
               <div>
                 <strong>{{providerLabel .Provider}}</strong>

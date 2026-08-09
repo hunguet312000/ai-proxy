@@ -2,7 +2,7 @@
 <article class="qcard{{if .QuotaExhausted}} is-empty{{else if not .Enabled}} is-off{{else}} is-ok{{end}}" data-provider="{{.Provider}}" data-account-id="{{.ID}}" data-enabled="{{if .Enabled}}1{{else}}0{{end}}" data-exhausted="{{if .QuotaExhausted}}1{{else}}0{{end}}" data-reset="{{if not .QuotaResetAt.IsZero}}{{.QuotaResetAt.Unix}}{{else}}0{{end}}">
   <header class="qcard-head">
     <div class="qcard-id">
-      <img class="qcard-icon" src="/ui/assets/providers/{{if eq .Provider "codex"}}codex{{else if eq .Provider "claude"}}claude{{else if or (eq .Provider "grok") (eq .Provider "xai")}}xai{{else if eq .Provider "antigravity"}}antigravity{{else}}openai{{end}}.png" alt="" width="28" height="28">
+      <img class="qcard-icon" src="/ui/assets/providers/{{providerLogo .Provider}}.png" alt="" width="28" height="28">
       <div class="qcard-copy">
         <div class="qcard-title-row">
           <strong class="qcard-provider">{{if eq .Provider "codex"}}Codex{{else if eq .Provider "claude"}}Claude{{else if or (eq .Provider "grok") (eq .Provider "xai")}}xAI{{else}}{{.Provider}}{{end}}</strong>
@@ -97,7 +97,7 @@
       </form>
     </div>
     <div class="conn-avatar" aria-hidden="true">
-      <img src="/ui/assets/providers/{{if eq .Provider "codex"}}codex{{else if eq .Provider "claude"}}claude{{else if or (eq .Provider "grok") (eq .Provider "xai")}}xai{{else if eq .Provider "antigravity"}}antigravity{{else}}openai{{end}}.png" alt="" width="28" height="28">
+      <img src="/ui/assets/providers/{{providerLogo .Provider}}.png" alt="" width="28" height="28">
     </div>
     <div class="conn-identity">
       <div class="conn-title-row">

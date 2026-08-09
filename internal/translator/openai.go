@@ -109,9 +109,13 @@ type OpenAIUsage struct {
 func (usage *OpenAIUsage) UnmarshalJSON(data []byte) error {
 	type plain OpenAIUsage
 	var raw struct {
-		PromptTokens        *int `json:"prompt_tokens"`
-		CompletionTokens    *int `json:"completion_tokens"`
-		PromptTokensDetails *struct {
+		PromptTokens     *int `json:"prompt_tokens"`
+		CompletionTokens *int `json:"completion_tokens"`
+		// prompt_tokens_estimated marks a count the proxy produced itself because the
+		// upstream reports none. It stays out of the "reported" flags so the dashboard
+		// keeps showing it as an estimate rather than as the provider's own figure.
+		PromptTokensEstimated *bool `json:"prompt_tokens_estimated"`
+		PromptTokensDetails   *struct {
 			CachedTokens *int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
 	}
@@ -121,7 +125,7 @@ func (usage *OpenAIUsage) UnmarshalJSON(data []byte) error {
 	*usage = OpenAIUsage{}
 	if raw.PromptTokens != nil {
 		usage.PromptTokens = *raw.PromptTokens
-		usage.PromptTokensReported = true
+		usage.PromptTokensReported = raw.PromptTokensEstimated == nil || !*raw.PromptTokensEstimated
 	}
 	if raw.CompletionTokens != nil {
 		usage.CompletionTokens = *raw.CompletionTokens

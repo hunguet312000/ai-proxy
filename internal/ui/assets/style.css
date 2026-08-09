@@ -1930,3 +1930,146 @@ select.field { appearance: none; }
 .custom-models .inline-form { margin-top: 6px; }
 .custom-models .field.sm { width: auto; min-width: 104px; }
 .custom-models .hint { margin: 6px 0 0; font-size: 10.5px; }
+/* Cursor is imported rather than authorised, so its slot holds a form instead of a
+   single button and needs to stack. */
+.cursor-import { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 620px; }
+.cursor-import pre { overflow-x: auto; padding: 8px; border-radius: 8px; background: var(--soft); font-size: 10.5px; }
+.cursor-import summary { cursor: pointer; font-size: 11px; color: var(--muted); }
+.cursor-import textarea.field { min-height: 62px; font-family: ui-monospace, monospace; font-size: 11px; }
+.flash-ok { color: var(--brand-text); font-size: 12px; margin: 6px 0 0; }
+.flash-error { color: var(--danger); font-size: 12px; margin: 6px 0 0; }
+
+/* Compaction advice ------------------------------------------------------- */
+.advice-panel { display: flex; flex-direction: column; gap: 12px; }
+.advice-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.advice-table th {
+  text-align: left; font-weight: 500; opacity: .6; padding: 6px 10px;
+  border-bottom: 1px solid var(--line, rgba(128,128,128,.2));
+}
+.advice-table td { padding: 8px 10px; border-bottom: 1px solid var(--line, rgba(128,128,128,.12)); vertical-align: middle; }
+.advice-table code { font-size: 12.5px; }
+/* Numeric headings follow their values to the right edge: left-aligned headings over
+   right-aligned numbers read as two separate columns. */
+.advice-table th.advice-num, .advice-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.advice-table th.advice-act, .advice-table td.advice-act { text-align: right; width: 1%; }
+/* The action cell is the narrowest column, so a button that wraps turns into a blob.
+   Keep it on one line and let the column size to it. */
+.advice-table td.advice-act .btn { white-space: nowrap; }
+.advice-table td.advice-act form { display: inline-flex; }
+.advice-target { font-weight: 600; }
+.advice-saving { color: var(--ok, #2f9e5f); font-weight: 600; }
+.advice-evidence { display: block; font-size: 11.5px; opacity: .55; margin-top: 2px; }
+.advice-foot, .advice-empty, .advice-note { font-size: 12.5px; opacity: .7; margin: 0; }
+.advice-note { color: var(--accent, #c47f2a); }
+.advice-rest summary { cursor: pointer; font-size: 12.5px; opacity: .7; }
+.advice-list { list-style: none; padding: 8px 0 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.advice-list li { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; }
+.advice-list li span { opacity: .6; }
+/* The same model name can be recorded under two providers — antigravity and the older
+   openai attribution, for one — so the provider is what tells otherwise identical rows
+   apart. */
+.advice-provider { font-style: normal; font-size: 11px; opacity: .5; padding: 1px 5px;
+  border: 1px solid currentColor; border-radius: 4px; white-space: nowrap; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.advice-groups { display: flex; flex-direction: column; gap: 14px; padding-top: 10px; }
+.advice-group h4 {
+  display: flex; align-items: center; gap: 7px; margin: 0 0 4px;
+  font-size: 12.5px; font-weight: 600; letter-spacing: .01em;
+}
+.advice-group h4 img { border-radius: 3px; }
+.advice-count {
+  font-weight: 500; font-size: 11px; opacity: .55;
+  padding: 0 6px; border-radius: 999px; border: 1px solid currentColor;
+}
+.advice-group-note { margin: 0 0 6px; font-size: 12px; opacity: .6; }
+.advice-group .advice-list { padding-top: 0; padding-left: 21px; }
+.advice-group .advice-list code { opacity: .85; }
+
+/* Provider marks ---------------------------------------------------------------
+   The assets disagree by origin: some carry their own opaque badge with its own
+   rounded corners, others are bare glyphs on transparency. Rendered small inside a
+   chip with different rounding and a different background, that reads as ragged.
+
+   One rule for all of them: the image fills its chip and the chip owns the shape, so
+   an opaque badge is clipped to exactly the same silhouette as a transparent glyph
+   sitting on the chip's own backdrop. `cover` rather than `contain` is what removes
+   the second, mismatched margin inside the frame. */
+.share-logo img,
+.map-ico img,
+.qcard-icon,
+.provider-hero-icon,
+.provider-card > header > img,
+.cli-card > header > img,
+.advice-group h4 img {
+  object-fit: cover;
+  background: var(--panel-solid, #0b0f14);
+}
+.share-logo img, .map-ico img { width: 100%; height: 100%; }
+.qcard-icon { padding: 0; }
+.advice-group h4 img { width: 16px; height: 16px; border-radius: 4px; }
+.provider-card > header > img,
+.cli-card > header > img {
+  border-radius: 8px; border: 1px solid var(--line);
+}
+.advice-unknown { font-size: 11.5px; opacity: .5; white-space: nowrap; }
+
+/* Per-model reasoning effort ---------------------------------------------------
+   Shown as a chip on the collapsed row so an override is visible without opening
+   the editor: a setting that only appears once you go looking is a setting people
+   forget they made. */
+.model-effort-chip {
+  font-style: normal; font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+  padding: 1px 6px; border-radius: 999px; margin-left: 6px;
+  color: var(--accent, #8b8bf0); border: 1px solid currentColor;
+}
+.model-context-editor .model-context-form + .model-context-form {
+  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line);
+}
+.model-context-form select.field { width: 100%; }
+.model-effort-note {
+  margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--line);
+  font-size: 11.5px; opacity: .55;
+}
+
+/* Grouped setup form -----------------------------------------------------------
+   The card carried twelve fields in one flat column, so the two that most people
+   touch sat among ten they never do. Grouping folds the rest away — but a section
+   holding a value the operator set opens itself, because hiding configuration is
+   worse than showing too much of it. */
+.form-section {
+  grid-column: 1 / -1;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: color-mix(in srgb, var(--soft) 45%, transparent);
+  padding: 0 12px;
+}
+.form-section > summary {
+  display: flex; align-items: baseline; gap: 8px; cursor: pointer;
+  padding: 10px 0; font-size: 12px; font-weight: 600; letter-spacing: .01em;
+  list-style: none;
+}
+.form-section > summary::-webkit-details-marker { display: none; }
+.form-section > summary::before {
+  content: "›"; display: inline-block; transition: transform .15s ease;
+  opacity: .5; font-size: 14px; line-height: 1;
+}
+.form-section[open] > summary::before { transform: rotate(90deg); }
+.form-section > summary em {
+  font-style: normal; font-weight: 400; font-size: 11.5px; opacity: .5;
+}
+.form-section > .form-grid, .form-section > label { padding-bottom: 12px; }
+.form-section-head {
+  grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px;
+  margin-top: 4px; font-size: 12px; font-weight: 600; opacity: .8;
+}
+.form-section-head em { font-style: normal; font-weight: 400; font-size: 11.5px; opacity: .6; }
+.advice-list li { align-items: baseline; }
+.advice-list code { flex: 0 0 auto; }
+.advice-metric {
+  flex: 0 0 auto; font-size: 11px; font-weight: 600; opacity: .55;
+  font-variant-numeric: tabular-nums;
+}
+.advice-list li span { flex: 1 1 auto; min-width: 0; }

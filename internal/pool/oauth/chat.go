@@ -83,6 +83,10 @@ func resolveUpstreamModel(provider, model string) string {
 		model = strings.TrimPrefix(model, "cx/")
 	case strings.HasPrefix(model, "xai/"):
 		model = strings.TrimPrefix(model, "xai/")
+	case strings.HasPrefix(model, "cursor/"):
+		model = strings.TrimPrefix(model, "cursor/")
+	case strings.HasPrefix(model, "cu/"):
+		model = strings.TrimPrefix(model, "cu/")
 	}
 	// Preserve trailing effort markers like " (high)" if present.
 	suffix := ""

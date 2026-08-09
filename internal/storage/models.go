@@ -14,8 +14,33 @@ type CatalogModel struct {
 	Label         string `json:"label,omitempty"`
 	ContextWindow int    `json:"context_window,omitempty"`
 	// MaxOutputTokens is 0 until an upstream rejection reveals the model's cap.
-	MaxOutputTokens int       `json:"max_output_tokens,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+	// Effort overrides the reasoning effort the client asked for, per model. Empty
+	// leaves the request untouched, which is the only safe default: the client's own
+	// effort is a control the user drives with /effort, and taking it over silently
+	// would make that command appear broken.
+	Effort    string    `json:"effort,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// EffortLevels are the reasoning levels a model override may take. Empty is always
+// allowed and means "leave the request alone".
+var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
+
+// NormalizeEffort validates an override. It rejects rather than silently dropping an
+// unknown level, because a typo that becomes "no override" looks like the setting was
+// saved and ignored.
+func NormalizeEffort(effort string) (string, error) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" {
+		return "", nil
+	}
+	for _, level := range EffortLevels {
+		if effort == level {
+			return effort, nil
+		}
+	}
+	return "", fmt.Errorf("effort must be one of %s, or empty to follow the request", strings.Join(EffortLevels, ", "))
 }
 
 func normalizeCatalogProvider(provider string) string {
@@ -229,9 +254,9 @@ func (s *Store) ListCatalogModels(ctx context.Context, provider string) ([]Catal
 		args  []any
 	)
 	if provider == "" {
-		query = `SELECT provider, id, label, context_window, max_output_tokens, created_at FROM catalog_models ORDER BY provider COLLATE NOCASE, id COLLATE NOCASE`
+		query = `SELECT provider, id, label, context_window, max_output_tokens, effort, created_at FROM catalog_models ORDER BY provider COLLATE NOCASE, id COLLATE NOCASE`
 	} else {
-		query = `SELECT provider, id, label, context_window, max_output_tokens, created_at FROM catalog_models WHERE provider = ? ORDER BY id COLLATE NOCASE`
+		query = `SELECT provider, id, label, context_window, max_output_tokens, effort, created_at FROM catalog_models WHERE provider = ? ORDER BY id COLLATE NOCASE`
 		args = []any{provider}
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -243,7 +268,7 @@ func (s *Store) ListCatalogModels(ctx context.Context, provider string) ([]Catal
 	for rows.Next() {
 		var model CatalogModel
 		var created int64
-		if err := rows.Scan(&model.Provider, &model.ID, &model.Label, &model.ContextWindow, &model.MaxOutputTokens, &created); err != nil {
+		if err := rows.Scan(&model.Provider, &model.ID, &model.Label, &model.ContextWindow, &model.MaxOutputTokens, &model.Effort, &created); err != nil {
 			return nil, fmt.Errorf("scan catalog model: %w", err)
 		}
 		if model.Label == "" || model.Label == model.ID {
@@ -406,6 +431,47 @@ func normalizeContextModelID(id string) string {
 }
 
 // CatalogContextWindows returns id -> context_window for all catalog models (window>0 only).
+// CatalogEfforts maps model id to its effort override. Only models that carry one
+// appear, so the gateway can tell "no override" from "override to empty".
+func (s *Store) CatalogEfforts(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, effort FROM catalog_models WHERE effort <> ''`)
+	if err != nil {
+		return nil, fmt.Errorf("list catalog efforts: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, effort string
+		if err := rows.Scan(&id, &effort); err != nil {
+			return nil, err
+		}
+		out[id] = effort
+	}
+	return out, rows.Err()
+}
+
+// SetCatalogEffort records the override for one model.
+func (s *Store) SetCatalogEffort(ctx context.Context, provider, id, effort string) error {
+	provider = normalizeCatalogProvider(provider)
+	id = strings.TrimSpace(id)
+	if provider == "" || id == "" {
+		return fmt.Errorf("provider and model id are required")
+	}
+	normalized, err := NormalizeEffort(effort)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE catalog_models SET effort = ? WHERE provider = ? AND id = ?`, normalized, provider, id)
+	if err != nil {
+		return fmt.Errorf("set effort: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("model not found")
+	}
+	return nil
+}
+
 func (s *Store) CatalogContextWindows(ctx context.Context) (map[string]int, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, context_window FROM catalog_models`)
 	if err != nil {

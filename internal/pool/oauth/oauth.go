@@ -21,6 +21,14 @@ type TokenSet struct {
 	ExpiresAt     time.Time `json:"expires_at,omitempty"`
 	LastRefreshAt time.Time `json:"last_refresh_at,omitempty"`
 	ProjectID     string    `json:"project_id,omitempty"`
+	// MachineID identifies the desktop install a session was imported from. Cursor
+	// validates it alongside the token, so it is part of the credential, not metadata.
+	MachineID string `json:"machine_id,omitempty"`
+	// ClientVersion and ClientCommit record the IDE build the session was taken from.
+	// Cursor checks them as a pair, so they travel with the token rather than being
+	// global configuration that could drift away from it.
+	ClientVersion string `json:"client_version,omitempty"`
+	ClientCommit  string `json:"client_commit,omitempty"`
 }
 
 type AccountInfo struct {

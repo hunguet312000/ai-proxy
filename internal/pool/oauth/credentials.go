@@ -45,12 +45,26 @@ func (m *CredentialManager) LoadFresh(ctx context.Context, accountID string) (st
 		return storage.Account{}, TokenSet{}, AccountInfo{}, err
 	}
 	provider := m.providers[account.Provider]
-	if provider == nil {
-		return storage.Account{}, TokenSet{}, AccountInfo{}, fmt.Errorf("OAuth provider %q is not registered", account.Provider)
-	}
 	var token TokenSet
 	if err := json.Unmarshal(account.Credentials, &token); err != nil {
 		return storage.Account{}, TokenSet{}, AccountInfo{}, fmt.Errorf("decode account credentials: %w", err)
+	}
+	if provider == nil {
+		// Some providers have no authorization endpoint at all — a Cursor session is
+		// copied out of the IDE, and there is nothing to refresh or to ask for account
+		// info. Those accounts are served straight from what was imported. An expired
+		// one is reported here rather than sent upstream, where it would come back as
+		// an opaque auth failure with no hint that a re-import is what fixes it.
+		if !token.ExpiresAt.IsZero() && time.Now().After(token.ExpiresAt) {
+			reason := fmt.Sprintf("the imported %s session expired on %s; import a fresh one",
+				account.Provider, token.ExpiresAt.Format("2006-01-02"))
+			if updateErr := m.store.DisableAccountWithReason(ctx, account.ID, reason); updateErr != nil {
+				return storage.Account{}, TokenSet{}, AccountInfo{}, updateErr
+			}
+			m.pool.SetDisabled(account.ID, true, reason)
+			return storage.Account{}, TokenSet{}, AccountInfo{}, errors.New(reason)
+		}
+		return account, token, AccountInfo{ID: account.ID, Email: account.Label, Plan: account.Plan}, nil
 	}
 	if shouldRefresh(provider, &token, time.Now()) {
 		refreshed, err := provider.Refresh(ctx, token.RefreshToken)

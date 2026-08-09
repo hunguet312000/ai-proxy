@@ -42,6 +42,9 @@ services:
       - literouter-data:/data
       # Host home so CLI Apply/Reset can write ~/.claude and ~/.codex like 9router.
       - ${HOME}:/host-home
+      # Read-only, and only so Cursor's product.json can be read: its version and
+      # commit have to match the installed IDE or every Cursor request is refused.
+      - /Applications:/host-apps:ro
     healthcheck:
       test: ["CMD", "/literouter", "-healthcheck"]
       interval: 10s
