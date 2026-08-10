@@ -79,10 +79,7 @@ func validateOAuthToolCalls(response translator.OpenAIResponse, schemas toolvali
 
 func (inference *Inference) complete(ctx context.Context, request translator.OpenAIRequest, conversationID string) (translator.OpenAIResponse, error) {
 	request.Stream = true
-	schemas, err := toolvalidate.Compile(request.Tools)
-	if err != nil {
-		return translator.OpenAIResponse{}, err
-	}
+	schemas := toolvalidate.Compile(request.Tools)
 	toolRetry := false
 	excluded := make(map[string]struct{})
 	var lastErr error
@@ -374,7 +371,7 @@ func (inference *Inference) call(ctx context.Context, providerName string, crede
 		// providers do applies: the body is binary and the headers are derived from the
 		// imported session rather than being a bearer token alone.
 		endpoint = cursorAgentBaseURL + cursorAgentRunPath
-		cacheKey := oauthSessionKey(request, conversationID, "cursor_")
+		cacheKey := cursorCacheKey(oauthSessionKey(request, conversationID, "cursor_"), accountID, model)
 		conversation, pending := cursorConversations.lookup(cacheKey, request)
 		encodedBody, upstreamConversation, sentTokens, buildErr := cursorAgentRequestBody(request, model, conversation, pending)
 		if buildErr != nil {

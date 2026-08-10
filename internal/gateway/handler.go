@@ -99,6 +99,19 @@ func (s *Service) messagesHandler(c echo.Context) error {
 	// LiteRouter does not model, along with the prompt-cache breakpoints.
 	raw, err := decodeBodyRaw(c, &request)
 	if err != nil {
+		// A body over the cap is an oversized conversation, not a malformed one, and the
+		// difference decides whether the caller can do anything about it: reported as a bad
+		// body it resends the same payload and the turn is unrecoverable, where an overflow
+		// is what makes Claude Code compact and try again. Nothing downstream can shrink a
+		// payload this layer refused to read, so the phrasing is the only lever there is.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			slog.Warn("request body exceeded the cap; reporting it as an overflow so the client compacts",
+				"endpoint", "/v1/messages", "limit_bytes", maxRequestBody)
+			return anthropicError(c, http.StatusBadRequest,
+				fmt.Sprintf("prompt is too long: request body exceeds %d bytes", maxRequestBody),
+				"invalid_request_error", nil)
+		}
 		return anthropicError(c, http.StatusBadRequest, "invalid request body", "invalid_request_error", nil)
 	}
 	// raw is deliberately left carrying the caller's model. Only the passthrough

@@ -33,11 +33,7 @@ func editTool() []translator.OpenAITool {
 
 func compile(t *testing.T, tools []translator.OpenAITool) Schemas {
 	t.Helper()
-	schemas, err := Compile(tools)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
-	return schemas
+	return Compile(tools)
 }
 
 func categoryOf(t *testing.T, err error) Category {
@@ -135,18 +131,56 @@ func TestErrorMessageNamesToolCategoryAndSize(t *testing.T) {
 	}
 }
 
-func TestCompileRejectsAToolWhoseSchemaIsNotUsable(t *testing.T) {
-	// Failing here is what keeps a broken declaration from silently disabling
-	// validation for every tool in the request.
-	_, err := Compile([]translator.OpenAITool{{
-		Type:     "function",
-		Function: translator.OpenAIFunction{Name: "Broken", Parameters: json.RawMessage(`{"type": 12}`)},
-	}})
-	if err == nil {
-		t.Fatal("an invalid schema must be rejected at compile time")
+// This used to fail the whole request, on the reasoning that a broken declaration must
+// not silently disable validation for every tool. Skipping per tool serves that reasoning
+// better: the healthy tools keep their validation, and the broken one costs one
+// unvalidated call instead of the entire session — because the caller forwards a call that
+// fails validation rather than dropping it, refusing here bought nothing and broke turns.
+func TestCompileSkipsAToolWhoseSchemaIsNotUsable(t *testing.T) {
+	schemas := Compile([]translator.OpenAITool{
+		{Type: "function", Function: translator.OpenAIFunction{
+			Name: "Broken", Parameters: json.RawMessage(`{"type": 12}`)}},
+		{Type: "function", Function: translator.OpenAIFunction{
+			Name: "Healthy", Parameters: json.RawMessage(`{"type":"object","additionalProperties":false}`)}},
+	})
+	if _, ok := schemas["Broken"]; ok {
+		t.Fatal("an unusable schema must not be kept")
 	}
-	if !strings.Contains(err.Error(), "Broken") {
-		t.Errorf("error %q does not name the offending tool", err)
+	if _, ok := schemas["Healthy"]; !ok {
+		t.Fatal("a sibling tool must keep its validation")
+	}
+	if categoryOf(t, schemas.Validate("Broken", `{"a":1}`)) != UndeclaredTool {
+		t.Fatal("a skipped tool must be reported as undeclared, which the caller forwards with a warning")
+	}
+}
+
+// Every one of these is a schema a real MCP server can emit, and each one used to turn
+// every turn in the session into a 400.
+func TestCompileToleratesSchemaShapesRealClientsSend(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		schema json.RawMessage
+	}{
+		{"omitted entirely by a zero-argument tool", nil},
+		{"a $ref into another document", json.RawMessage(`{"$ref":"https://example.com/schema.json"}`)},
+		{"a $ref that does not resolve", json.RawMessage(`{"$ref":"#/definitions/missing"}`)},
+		{"draft 2020-12 keywords", json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","prefixItems":[]}`)},
+		{"truncated JSON", json.RawMessage(`{"type":`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			schemas := Compile([]translator.OpenAITool{
+				{Type: "function", Function: translator.OpenAIFunction{Name: "Odd", Parameters: test.schema}},
+				{Type: "function", Function: translator.OpenAIFunction{
+					Name: "Read", Parameters: json.RawMessage(`{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}`)}},
+			})
+			// Whatever happened to the odd tool, the turn survives and the rest still works.
+			if _, ok := schemas["Read"]; !ok {
+				t.Fatal("a well-formed sibling lost its validation")
+			}
+			if err := schemas.Validate("Read", `{"path":"/a.go"}`); err != nil {
+				t.Fatalf("valid arguments rejected: %v", err)
+			}
+		})
 	}
 }
 

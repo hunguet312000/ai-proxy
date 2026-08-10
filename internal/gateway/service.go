@@ -536,12 +536,17 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 // candidate. When the caller already holds the unified form — the Anthropic
 // endpoint always does — it is reused instead of translating the OpenAI request
 // back, which halves the number of full-history passes per turn.
-func (s *Service) prepareStreamCandidate(ctx context.Context, request translator.OpenAIRequest, unified *provider.Request) (translator.OpenAIRequest, error) {
+// The second return is the estimate of the payload this actually produced, or 0 when
+// the request was passed through untouched. Calibration rides on it: pairing the
+// caller's pre-pipeline estimate with the count the upstream reported for a compacted
+// payload taught the tokenizer ratio the compaction factor instead of the tokenizer.
+func (s *Service) prepareStreamCandidate(ctx context.Context, request translator.OpenAIRequest, unified *provider.Request) (translator.OpenAIRequest, int, error) {
 	if unified == nil {
-		return s.prepareOpenAIRequest(ctx, request)
+		prepared, err := s.prepareOpenAIRequest(ctx, request)
+		return prepared, 0, err
 	}
 	if !s.contextPrepEnabled() && !s.contextGuard && s.compressionMode != cache.CompressionAggressive {
-		return request, nil
+		return request, 0, nil
 	}
 	candidate := cloneProviderRequest(*unified)
 	candidate.Model = request.Model
@@ -560,19 +565,19 @@ func (s *Service) prepareStreamCandidate(ctx context.Context, request translator
 	if s.contextPrepEnabled() {
 		candidate, err = s.prepareContext(ctx, candidate)
 		if err != nil {
-			return translator.OpenAIRequest{}, err
+			return translator.OpenAIRequest{}, 0, err
 		}
 	} else if s.contextGuard {
 		if err := s.guardContext(ctx, candidate); err != nil {
-			return translator.OpenAIRequest{}, err
+			return translator.OpenAIRequest{}, 0, err
 		}
 	}
 	result, err := translator.ToOpenAIRequest(candidate)
 	if err != nil {
-		return translator.OpenAIRequest{}, err
+		return translator.OpenAIRequest{}, 0, err
 	}
 	result.PromptCacheKey = request.PromptCacheKey
-	return result, nil
+	return result, contextguard.EstimateRequest(candidate), nil
 }
 
 func (s *Service) prepareOpenAIRequest(ctx context.Context, request translator.OpenAIRequest) (translator.OpenAIRequest, error) {
@@ -639,6 +644,11 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 	var sawEmpty bool
 	clampAttempts := map[string]int{}
 	trims := 0
+	// sentRequest is the payload the winning attempt actually sent. Calibration below
+	// needs it rather than the caller's request: the two differ by whatever the context
+	// pipeline removed, and learning that difference as a tokenizer ratio is what
+	// inflated the scale.
+	sentRequest := request
 	for index := 0; index < len(chain); index++ {
 		model := chain[index]
 		client := s.clientForModel(model)
@@ -663,6 +673,7 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		if err != nil {
 			return provider.Response{}, err
 		}
+		sentRequest = prepared
 		upstream, err := translator.ToOpenAIRequest(prepared)
 		if err != nil {
 			return provider.Response{}, err
@@ -776,9 +787,10 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 	}
 	usage := raw.Usage
 	// A reported prompt count plus the estimate of the same payload is a free
-	// calibration sample; the streaming path was the only teacher before this.
+	// calibration sample; the streaming path was the only teacher before this. It has to
+	// be the payload that was sent, not the one that arrived — see sentRequest.
 	if usage.PromptTokensReported {
-		s.observeTokenScale(request.Model, 0, contextguard.EstimateRequest(request), usage.PromptTokens)
+		s.observeTokenScale(request.Model, 0, contextguard.EstimateRequest(sentRequest), usage.PromptTokens)
 	}
 	// As above: estimate each side independently so a partially reporting provider
 	// does not record a zero that is indistinguishable from a free request.
@@ -824,7 +836,13 @@ func (s *Service) guardContext(ctx context.Context, request provider.Request) er
 	limits := s.contextLimits
 	window, err := s.resolveContextWindowErr(ctx, request.Model)
 	if err != nil {
-		return fmt.Errorf("resolve context window for %q: %w", request.Model, err)
+		// This check cannot do anything but log — it defers every real decision to the
+		// upstream tokenizer — and the lookup hands back a serviceable window from
+		// configuration even when it failed. Returning the error surfaced as a 502 on
+		// every turn for the duration of a transient catalog read, which is the whole
+		// session, over a number this function was only ever going to warn about.
+		slog.Warn("context window lookup failed; guarding against the fallback window",
+			"model", request.Model, "fallback_window", window, "error", err)
 	}
 	if window > 0 {
 		limits = contextguard.Limits{Default: window, Models: map[string]int{request.Model: window}}
@@ -913,9 +931,21 @@ func (s *Service) prepareContextStages(ctx context.Context, request provider.Req
 	if !prepared.NeedsSummary {
 		return prepared.Request, outcome, nil
 	}
+	// summaryRecentTurns probes by rebuilding and re-estimating the whole request once
+	// per candidate keep value, which is milliseconds on a six-figure-token turn. Ask
+	// the cheap question first: keep=1 yields the largest backlog any keep value can,
+	// so an empty one there means no summary is possible at all. Every subagent lands
+	// here — its only non-tool_result user message is the opening task — and used to
+	// pay for five full probes before the same fallback ran anyway.
+	if s.summarizer == nil || len(contextguard.SummaryMessages(prepared.Request.Messages, 1, policy.BoundaryQuantum)) == 0 {
+		if contextguard.ExceedsHardLimit(prepared, policy) {
+			return s.trimStage(prepared.Request, limits, policy, outcome)
+		}
+		return prepared.Request, outcome, nil
+	}
 	keepRecentTurns := s.summaryRecentTurns(prepared.Request, limits, policy)
 	older := contextguard.SummaryMessages(prepared.Request.Messages, keepRecentTurns, policy.BoundaryQuantum)
-	if len(older) == 0 || s.summarizer == nil {
+	if len(older) == 0 {
 		if contextguard.ExceedsHardLimit(prepared, policy) {
 			return s.trimStage(prepared.Request, limits, policy, outcome)
 		}

@@ -445,8 +445,14 @@ func chatClaude(ctx context.Context, client *http.Client, accessToken, model str
 			b.WriteString(part.Text)
 		}
 	}
+	// Anthropic reports input_tokens exclusive of the cache counters, while everything
+	// downstream is canonical OpenAI-style — normalizeUsageEvent folds nothing in, and
+	// CanonicalizeUsage clamps cached down to prompt when it arrives larger. Handing the
+	// exclusive number over therefore understates the prompt and corrupts the cache figure
+	// with it. Summed the way the passthrough's promptTotal already does.
 	usage := ChatUsage{
-		PromptTokens:     parsed.Usage.InputTokens,
+		PromptTokens: parsed.Usage.InputTokens + parsed.Usage.CacheReadInputTokens +
+			parsed.Usage.CacheCreationInputTokens,
 		CompletionTokens: parsed.Usage.OutputTokens,
 		CachedTokens:     parsed.Usage.CacheReadInputTokens,
 	}

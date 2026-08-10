@@ -257,7 +257,17 @@ func outputReserve(request provider.Request, policy Policy, window int) int {
 		// Small custom/test windows cannot reserve more output than input space.
 		output = min(8_192, max(window/10, 1))
 	}
-	return output + policy.ReserveTokens
+	reserve := output + policy.ReserveTokens
+	if window <= 0 {
+		return reserve
+	}
+	// A caller's max_tokens is an ask, not a fact: the upstream caps output itself and
+	// LiteRouter learns that cap separately (router.max_output_tokens). Letting the ask
+	// consume the whole window left no input budget at all — available fell below 1, so
+	// HardBudget returned 0 and TrimOldestTurns declined on the budget before it ever
+	// looked at the history, hard-rejecting a request it could have fitted. Half the
+	// window always stays with the input.
+	return min(reserve, window/2)
 }
 
 func cloneRequest(request provider.Request) provider.Request {

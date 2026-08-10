@@ -298,7 +298,7 @@ func TestMergeToolArguments(t *testing.T) {
 }
 
 func TestValidateToolArguments(t *testing.T) {
-	schemas, err := toolvalidate.Compile([]translator.OpenAITool{{Type: "function", Function: translator.OpenAIFunction{
+	schemas := toolvalidate.Compile([]translator.OpenAITool{{Type: "function", Function: translator.OpenAIFunction{
 		Name: "Bash", Parameters: json.RawMessage(`{
 			"type":"object",
 			"properties":{"command":{"type":"string"},"options":{"type":"object","properties":{"timeout":{"type":"integer"}},"required":["timeout"]}},
@@ -306,9 +306,6 @@ func TestValidateToolArguments(t *testing.T) {
 			"additionalProperties":false
 		}`),
 	}}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, test := range []struct {
 		name       string
 		arguments  string
@@ -346,12 +343,25 @@ func TestValidateToolArguments(t *testing.T) {
 	}
 }
 
-func TestCompileToolSchemasRejectsInvalidSchema(t *testing.T) {
-	_, err := toolvalidate.Compile([]translator.OpenAITool{{Type: "function", Function: translator.OpenAIFunction{
-		Name: "Bash", Parameters: json.RawMessage(`{"type":"not-a-json-schema-type"}`),
-	}}})
-	if err == nil || !strings.Contains(err.Error(), `tool "Bash" has invalid input schema`) {
-		t.Fatalf("toolvalidate.Compile() error = %v", err)
+// An unusable schema must cost that one tool its validation, not the turn. Refusing the
+// request meant a single tool the model might never call took down every turn in the
+// session, and the tool list is whatever MCP servers the client has loaded.
+func TestCompileToolSchemasSkipsAnInvalidSchemaWithoutFailingTheTurn(t *testing.T) {
+	schemas := toolvalidate.Compile([]translator.OpenAITool{
+		{Type: "function", Function: translator.OpenAIFunction{
+			Name: "Bash", Parameters: json.RawMessage(`{"type":"not-a-json-schema-type"}`),
+		}},
+		{Type: "function", Function: translator.OpenAIFunction{
+			Name: "Read", Parameters: json.RawMessage(`{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}`),
+		}},
+	})
+	// The healthy sibling keeps its validation.
+	if err := schemas.Validate("Read", `{}`); err == nil {
+		t.Fatal("Read should still be validated against its schema")
+	}
+	// The unusable one is advisory only: the caller logs and forwards the call.
+	if err := schemas.Validate("Bash", `{"command":"ls"}`); err == nil {
+		t.Fatal("a skipped schema should report undeclared rather than pass silently")
 	}
 }
 

@@ -219,3 +219,62 @@ func TestCursorCacheAccountingStaysBalancedAcrossDropAndReplace(t *testing.T) {
 		t.Errorf("bytes = %d after dropping the only entry, want 0", cache.bytes)
 	}
 }
+
+// Two assistant turns that call different tools carry no text at all, which is the norm
+// in a coding transcript. Hashing text alone made them the same fingerprint, so isPrefix
+// — the only guard against continuing someone else's upstream conversation — could not
+// tell two diverged branches apart and would replay the wrong history.
+func TestCursorCacheFingerprintSeparatesDifferentToolCalls(t *testing.T) {
+	call := func(name, args string) translator.OpenAIMessage {
+		return translator.OpenAIMessage{Role: "assistant", ToolCalls: []translator.OpenAIToolCall{{
+			ID: "call_1", Type: "function",
+			Function: translator.OpenAIFunctionCall{Name: name, Arguments: args},
+		}}}
+	}
+	readA := call("Read", `{"file_path":"/a.go"}`)
+	readB := call("Read", `{"file_path":"/b.go"}`)
+	if messageFingerprint(readA) == messageFingerprint(readB) {
+		t.Fatal("two different tool calls must not share a fingerprint")
+	}
+	// And the guard has to act on it: a branch that called a different tool cannot reuse
+	// the stored conversation.
+	cache := newCacheForTest(t)
+	stored := requestOf(translator.OpenAIMessage{Role: "user", Content: "read a file"}, readA)
+	cache.store("k", &cursorConversation{id: "c", state: []byte{1}, history: requestFingerprints(stored)})
+
+	diverged := requestOf(
+		translator.OpenAIMessage{Role: "user", Content: "read a file"}, readB,
+		translator.OpenAIMessage{Role: "tool", ToolCallID: "call_1", Content: "package b"})
+	if conversation, _ := cache.lookup("k", diverged); conversation != nil {
+		t.Fatal("a branch with a different tool call must not continue the stored conversation")
+	}
+}
+
+func TestCursorCacheFingerprintSeparatesToolResultsByCallID(t *testing.T) {
+	first := translator.OpenAIMessage{Role: "tool", ToolCallID: "call_1", Content: "same text"}
+	second := translator.OpenAIMessage{Role: "tool", ToolCallID: "call_2", Content: "same text"}
+	if messageFingerprint(first) == messageFingerprint(second) {
+		t.Fatal("tool results answering different calls must not share a fingerprint")
+	}
+}
+
+// The stored conversation id and state belong to one account and one model. The session
+// key says nothing about either — without X-Conversation-ID it is derived from the first
+// user message — so the key has to carry them.
+func TestCursorCacheKeyScopesByAccountAndModel(t *testing.T) {
+	base := cursorCacheKey("session", "acct-1", "gpt-5.6-luna")
+	if base == cursorCacheKey("session", "acct-2", "gpt-5.6-luna") {
+		t.Fatal("two accounts must not share a conversation entry")
+	}
+	if base == cursorCacheKey("session", "acct-1", "gpt-5.6-sol") {
+		t.Fatal("two models must not share a conversation entry")
+	}
+	if base != cursorCacheKey("session", "acct-1", "gpt-5.6-luna") {
+		t.Fatal("the key must be stable for the same session, account and model")
+	}
+	// An empty session is the signal that disables the cache; scoping must not turn it
+	// into a usable key.
+	if cursorCacheKey("", "acct-1", "gpt-5.6-luna") != "" {
+		t.Fatal("an empty session must stay empty")
+	}
+}

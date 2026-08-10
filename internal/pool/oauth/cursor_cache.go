@@ -80,9 +80,39 @@ var cursorConversations = &cursorConversationCache{entries: map[string]*cursorCo
 
 // messageFingerprint identifies one client message. Content is hashed rather than kept
 // so a long transcript does not pin megabytes per conversation.
+//
+// Tool calls are part of the identity, not decoration. An assistant turn that only calls
+// a tool carries no text at all, and a coding transcript is mostly those — hashing text
+// alone made every one of them the same fingerprint, which left isPrefix unable to tell
+// two different branches apart. isPrefix is the only thing standing between a request
+// and someone else's upstream conversation, so it has to see what actually differs.
 func messageFingerprint(message translator.OpenAIMessage) string {
-	sum := sha256.Sum256([]byte(message.Role + "\x00" + openAIContentText(message.Content)))
-	return hex.EncodeToString(sum[:8])
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(message.Role + "\x00" + openAIContentText(message.Content)))
+	_, _ = hash.Write([]byte("\x00" + message.ToolCallID + "\x00" + message.Name))
+	for _, call := range message.ToolCalls {
+		_, _ = hash.Write([]byte("\x00" + call.ID + "\x00" + call.Type +
+			"\x00" + call.Function.Name + "\x00" + call.Function.Arguments))
+	}
+	return hex.EncodeToString(hash.Sum(nil)[:8])
+}
+
+// cursorCacheKey scopes a conversation to the account and model that own it.
+//
+// The upstream conversation id and its replayable state belong to one account and one
+// model, but the session key they were filed under is derived from the transcript alone
+// — and, absent an X-Conversation-ID header the client does not send, from the first user
+// message. That is enough for two sessions that open the same way to collide, and it says
+// nothing about who the conversation belongs to: sticky_soft migrates accounts mid-session,
+// so the next turn could have replayed one account's conversation through another's
+// credentials, or a conversation from a different model entirely.
+//
+// An empty session stays empty: that is the signal that disables the cache.
+func cursorCacheKey(session, accountID, model string) string {
+	if session == "" {
+		return ""
+	}
+	return session + "\x00" + accountID + "\x00" + model
 }
 
 func requestFingerprints(request translator.OpenAIRequest) []string {

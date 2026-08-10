@@ -154,10 +154,7 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-	toolSchemas, err := toolvalidate.Compile(upstream.Tools)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
+	toolSchemas := toolvalidate.Compile(upstream.Tools)
 	upstream.Stream = true
 	// Claude Code drives its own compaction off the input token count it sees on
 	// the wire. Reporting zero left it blind, so it kept growing the context until
@@ -274,8 +271,20 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 		// that arrived, what LiteRouter thought they were, and what the upstream says they
 		// were. Only useful when the last of those is real, which is why it is gated on the
 		// count having been reported rather than filled in above.
+		//
+		// "The same payload" is the whole point, and it used not to hold: promptTokens and
+		// raw describe what the client sent, while the reported count describes what the
+		// pipeline sent after compacting it. Every mutated turn taught the compaction ratio
+		// as if it were the tokenizer's, which inflated the scale, inflated the budget the
+		// guard believed it had, and kept spread too high for the measurement to ever be
+		// trusted. When the pipeline rewrote the payload, its own estimate is the only one
+		// that matches, and the ingress byte count no longer matches anything.
 		if !promptEstimated {
-			s.observeTokenScale(request.Model, len(raw), promptTokens, usage.PromptTokens)
+			estimate, ingressBytes := promptTokens, len(raw)
+			if opener.sentEstimate > 0 {
+				estimate, ingressBytes = opener.sentEstimate, 0
+			}
+			s.observeTokenScale(request.Model, ingressBytes, estimate, usage.PromptTokens)
 		}
 		s.recordUsage(UsageEvent{
 			Provider: s.providerNameFor(request.Model), Model: request.Model, Endpoint: "/v1/messages",
@@ -720,6 +729,11 @@ type streamOpener struct {
 	// trims counts how often this turn's history was cut down after an upstream refused
 	// it as too long. See retryAfterTrimmingContext.
 	trims int
+	// sentEstimate is the estimate of the payload the last attempt actually sent, or 0
+	// when the pipeline passed the caller's request through untouched. Only this number
+	// describes the same bytes the upstream counted, so it is the one calibration may
+	// learn from.
+	sentEstimate int
 }
 
 // retryAfterLearningOutputLimit turns an upstream's max_tokens rejection into a cap
@@ -820,16 +834,23 @@ func (s *Service) trimAfterContextRejection(ctx context.Context, model string, u
 	// already refused, so prefix stability is lost either way, and truncating old
 	// tool output keeps every turn where trimming drops whole ones. The strict
 	// shrink check keeps an already-compacted payload from being re-sent verbatim.
+	base := *unified
 	compacted := contextguard.AggressiveCompact(*unified, policy)
-	if tokens := contextguard.EstimateRequest(compacted); tokens <= budget && tokens < sent {
-		*unified = compacted
-		*trims++
-		slog.Warn("upstream refused the prompt as too long; compacted old tool output and retrying",
-			"model", model, "context_window", window, "budget_tokens", budget,
-			"estimate_tokens", tokens, "attempt", *trims)
-		return true
+	if tokens := contextguard.EstimateRequest(compacted); tokens < sent {
+		if tokens <= budget {
+			*unified = compacted
+			*trims++
+			slog.Warn("upstream refused the prompt as too long; compacted old tool output and retrying",
+				"model", model, "context_window", window, "budget_tokens", budget,
+				"estimate_tokens", tokens, "attempt", *trims)
+			return true
+		}
+		// Short of the budget but genuinely smaller, so trim from here rather than from
+		// the original: discarding the compaction meant dropping whole turns where
+		// truncating old tool output had already kept every one of them.
+		base = compacted
 	}
-	trimmed, ok := contextguard.TrimOldestTurns(*unified, budget)
+	trimmed, ok := contextguard.TrimOldestTurns(base, budget)
 	before := len(unified.Messages)
 	// Trimming that removed nothing cannot make the retry succeed. A single turn too
 	// large for the model is the honest end of the line: there is no older history left
@@ -939,7 +960,8 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 		} else if effort := s.effortFor(model); effort != "" {
 			candidate.Effort = effort
 		}
-		candidate, err := s.prepareStreamCandidate(ctx, candidate, o.unified)
+		candidate, sentEstimate, err := s.prepareStreamCandidate(ctx, candidate, o.unified)
+		o.sentEstimate = sentEstimate
 		if err != nil {
 			o.lastErr = err
 			if !errors.Is(err, contextguard.ErrBudgetExceeded) {

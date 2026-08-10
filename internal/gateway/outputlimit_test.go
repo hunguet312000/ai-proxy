@@ -87,9 +87,12 @@ func TestStreamClampSurvivesContextPreparation(t *testing.T) {
 
 	candidate := request
 	candidate.Model = "claude-cheap"
-	prepared, err := service.prepareStreamCandidate(context.Background(), candidate, &unified)
+	prepared, sentEstimate, err := service.prepareStreamCandidate(context.Background(), candidate, &unified)
 	if err != nil {
 		t.Fatalf("prepareStreamCandidate: %v", err)
+	}
+	if sentEstimate <= 0 {
+		t.Fatal("preparation must report the estimate of what it produced; calibration learns from it")
 	}
 	if prepared.MaxTokens != 32000 {
 		t.Fatalf("preparation was expected to restore max_tokens, got %d", prepared.MaxTokens)
