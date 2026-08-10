@@ -112,12 +112,15 @@ func (d Draft) HasSelection() bool {
 }
 
 // EffortLevels are the values Claude Code's settings parser accepts for effortLevel.
-//
-// `max` is omitted on purpose. It appears in the client's general effort enum, but a
-// narrower coercion — the one guarding the persisted setting — accepts only these four,
-// so writing `max` risks being silently dropped. Empty means "leave the user's own
-// effortLevel alone", which is why it is not in this list either.
-var EffortLevels = []string{"low", "medium", "high", "xhigh"}
+// Empty means "leave the user's own effortLevel alone", which is why it is not in this
+// list either. `ultracode` is intentionally absent: it is a session-only /effort mode
+// that combines xhigh with dynamic workflow orchestration, not a persisted effortLevel.
+var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
+
+// Ultracode is a Claude Code session-only mode, not a settings.json effortLevel. It
+// cannot be reproduced by LiteRouter's persistent CLI setup form because it also enables
+// dynamic workflow orchestration in the client.
+const Ultracode = "ultracode"
 
 // MaxContextAuto is the MaxContext value meaning "use the window LiteRouter resolved".
 const MaxContextAuto = "auto"

@@ -385,22 +385,40 @@ func TestDraftRoundTripsThroughRequest(t *testing.T) {
 func TestEffortValidation(t *testing.T) {
 	base := Request{Tool: ToolClaude, Action: Apply, BaseURL: "http://127.0.0.1:8317", Token: "secret", Model: "m"}
 	// Empty is the "don't manage effortLevel" case and must stay legal.
-	for _, effort := range []string{"", "low", "medium", "high", "xhigh"} {
+	for _, effort := range []string{"", "low", "medium", "high", "xhigh", "max"} {
 		request := base
 		request.Effort = effort
 		if err := request.validate(); err != nil {
 			t.Fatalf("effort %q rejected: %v", effort, err)
 		}
 	}
-	// max is in Claude Code's general effort enum but the coercion guarding the
-	// persisted setting drops it, so writing it would silently do nothing.
-	for _, effort := range []string{"max", "MAX", "High", "ultracode", "auto", "7"} {
+	// ultracode is a session-only mode that also enables dynamic workflows; it is
+	// not a persistable effortLevel and must not be written by this setup form.
+	for _, effort := range []string{"MAX", "High", "ultracode", "auto", "7"} {
 		request := base
 		request.Effort = effort
 		if err := request.validate(); err == nil {
 			t.Fatalf("effort %q was accepted", effort)
 		}
 	}
+}
+
+func TestEffortLevelsIncludeClaudeMaxButNotUltracode(t *testing.T) {
+	if !contains(EffortLevels, "max") {
+		t.Fatal("session effort levels omit max")
+	}
+	if contains(EffortLevels, Ultracode) {
+		t.Fatal("session effort levels must not persist ultracode")
+	}
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestEffortRoundTripsThroughDraft(t *testing.T) {

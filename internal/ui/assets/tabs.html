@@ -507,6 +507,7 @@ sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
                 <option value="medium"{{if eq .ClaudeSetup.Effort "medium"}} selected{{end}}>medium</option>
                 <option value="high"{{if eq .ClaudeSetup.Effort "high"}} selected{{end}}>high</option>
                 <option value="xhigh"{{if eq .ClaudeSetup.Effort "xhigh"}} selected{{end}}>xhigh</option>
+                <option value="max"{{if eq .ClaudeSetup.Effort "max"}} selected{{end}}>max</option>
               </select>
             </label>
             <label class="model-field-label"><span class="field-hint" title="The real context window of the models above, in tokens. Without it Claude Code assumes 200k — or 1M if /model picked a [1m] variant, a client-side marker LiteRouter never sees — so it compacts far too late and the compaction itself overflows. auto uses the smallest window LiteRouter knows for the models above, including any it learned from an upstream rejection. Written as CLAUDE_CODE_MAX_CONTEXT_TOKENS, plus an auto-compact percentage so compaction starts while it still fits. Ignored by Claude Code for claude-* model ids.">Max context</span>

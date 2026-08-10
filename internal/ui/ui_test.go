@@ -1106,9 +1106,11 @@ func TestCLITabRendersEffortSelect(t *testing.T) {
 	if strings.Contains(body, `<option value="" selected>`) {
 		t.Fatalf(`"keep current" selected despite a stored effort: %s`, body)
 	}
-	// max is in Claude Code's general enum but not persistable — don't offer it.
-	if strings.Contains(body, `<option value="max"`) {
-		t.Fatal("effort select offers max, which the settings parser drops")
+	if !strings.Contains(body, `<option value="max">max</option>`) {
+		t.Fatal("effort select omits Claude Code's max level")
+	}
+	if strings.Contains(body, `<option value="ultracode"`) {
+		t.Fatal("effort select must not persist the session-only ultracode mode")
 	}
 }
 
@@ -1128,9 +1130,9 @@ func TestApplyPersistsEffortIntoTheDraft(t *testing.T) {
 	}
 
 	// An invalid level must be rejected rather than written and silently ignored.
-	bad := url.Values{"base_url": {"http://127.0.0.1:8317"}, "model": {"cx/cheap"}, "effort": {"max"}}
+	bad := url.Values{"base_url": {"http://127.0.0.1:8317"}, "model": {"cx/cheap"}, "effort": {"ultracode"}}
 	if response := postCLISetup(t, e, "apply", bad); response.Code != http.StatusBadRequest {
-		t.Fatalf("effort=max returned %d, want 400", response.Code)
+		t.Fatalf("effort=ultracode returned %d, want 400", response.Code)
 	}
 }
 

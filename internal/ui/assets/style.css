@@ -2015,6 +2015,15 @@ select.field { appearance: none; }
 .cli-card > header > img {
   border-radius: 8px; border: 1px solid var(--line);
 }
+/* Cursor's app icon already includes its own badge. Let it fill these slots instead of
+   drawing a second frame around a shrunken copy. */
+.provider-detail[data-provider="cursor"] .provider-hero-icon,
+.provider-detail[data-provider="cursor"] .conn-avatar {
+  border: 0; background: transparent;
+}
+.provider-detail[data-provider="cursor"] .conn-avatar img {
+  width: 100%; height: 100%; border-radius: inherit; object-fit: cover;
+}
 .advice-unknown { font-size: 11.5px; opacity: .5; white-space: nowrap; }
 
 /* Per-model reasoning effort ---------------------------------------------------
