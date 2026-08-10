@@ -272,10 +272,8 @@ func adviseModel(profile storage.ModelPromptProfile, prior providerPrior, curren
 		// Cache reuse decides how much of a trimmed token turns into money, not whether
 		// trimming helps: a shorter prompt is fewer tokens either way. So the threshold
 		// is still computable from sizes alone, and only the saving carries a caveat.
-		return adviseBySize(advice, profile, currentWindow, measured)
-		advice.Reason = ReasonNoCacheData
 		advice.ReportedRequests = reported
-		return advice
+		return adviseBySize(advice, profile, currentWindow, measured)
 	}
 	if advice.LargeRequests < MinLargeRequests {
 		advice.Status = fmt.Sprintf("learning: %d/%d large requests observed", advice.LargeRequests, MinLargeRequests)

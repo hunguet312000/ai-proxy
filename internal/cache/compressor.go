@@ -69,6 +69,44 @@ func CompressToolResultMode(toolName, content string, mode CompressionMode) Comp
 	}
 }
 
+// CompressForHistory compresses a tool result that has aged past the compaction
+// boundary, where no later turn will quote it byte-for-byte. That is why, unlike
+// CompressToolResultMode, it does not exempt evidence tools — an old Read or Bash
+// result is no longer edit-quoting material — and unknown tools fall back to
+// head/tail instead of "none". Never call it on recent results.
+func CompressForHistory(toolName, content string) CompressionResult {
+	originalTokens := estimateTokens(content)
+	if len(content) < compressionThreshold {
+		return CompressionResult{OriginalTokens: originalTokens, Compressed: content, Method: "none"}
+	}
+	name := strings.ToLower(filepath.Base(strings.TrimSpace(toolName)))
+	var compressed, method string
+	switch {
+	case strings.Contains(content, "diff --git") || strings.HasPrefix(strings.TrimSpace(content), "commit "):
+		compressed, method = compressDiff(content, CompressionAggressive), "git_diff"
+	case slices.Contains([]string{"ls", "tree", "find"}, name):
+		compressed, method = compressListing(content, CompressionAggressive), "listing"
+	case strings.Contains(name, "grep") || slices.Contains([]string{"rg", "ag", "search"}, name):
+		compressed, method = compressGrep(content, CompressionAggressive), "grep"
+	case json.Valid([]byte(content)):
+		compressed, method = compactJSON(content), "json_compact"
+	case strings.Contains(name, "log"):
+		compressed, method = compressLog(content, CompressionAggressive), "log"
+	default:
+		compressed, method = compressHeadTail(content, CompressionAggressive), "head_tail"
+	}
+	if len(compressed) >= len(content) {
+		return CompressionResult{OriginalTokens: originalTokens, Compressed: content, Method: "none"}
+	}
+	compressedTokens := estimateTokens(compressed)
+	return CompressionResult{
+		OriginalTokens: originalTokens,
+		Compressed:     compressed,
+		SavedTokens:    max(originalTokens-compressedTokens, 0),
+		Method:         method,
+	}
+}
+
 // isEvidenceTool reports tools whose output a later turn must reproduce exactly.
 func isEvidenceTool(name string) bool {
 	if slices.Contains([]string{

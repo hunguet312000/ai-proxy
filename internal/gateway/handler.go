@@ -22,6 +22,20 @@ const maxRequestBody = 16 << 20
 
 type conversationIDKey struct{}
 type promptCacheSeedKey struct{}
+type forcedEffortKey struct{}
+
+// withForcedEffort pins the reasoning effort for every candidate serving this
+// turn. It rides the request context because the routing decision is made once
+// in the handler while candidates are built per attempt, in three different
+// places, from either the OpenAI or the unified form.
+func withForcedEffort(ctx context.Context, effort string) context.Context {
+	return context.WithValue(ctx, forcedEffortKey{}, effort)
+}
+
+func forcedEffort(ctx context.Context) string {
+	value, _ := ctx.Value(forcedEffortKey{}).(string)
+	return value
+}
 
 func withConversationID(c echo.Context) context.Context {
 	value := strings.TrimSpace(c.Request().Header.Get("X-Conversation-ID"))
@@ -128,6 +142,16 @@ func (s *Service) messagesHandler(c echo.Context) error {
 		}
 		if decision.Model != "" {
 			request.Model = decision.Model
+		}
+		if decision.Effort != "" {
+			// Both prongs are needed: the parsed request carries the effort through
+			// the unified translation (which streaming candidates are rebuilt from),
+			// while the context flag reaches the candidate loops that would otherwise
+			// let the per-model catalog override win. The raw passthrough payload is
+			// deliberately untouched — an Anthropic-native compact model is rerouted,
+			// not rewritten.
+			request.OutputConfig.Effort = decision.Effort
+			c.SetRequest(c.Request().WithContext(withForcedEffort(c.Request().Context(), decision.Effort)))
 		}
 	}
 	logAnthropicPayload("ingress", request, int64(len(raw)), 0, int64(len(raw)))

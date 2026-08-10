@@ -108,6 +108,15 @@ type SettingsHooks struct {
 	// this is LiteRouter's own routing decision and applies to a running gateway.
 	GetPlanModel func(context.Context) (string, error)
 	SetPlanModel func(context.Context, string) error
+	// GetCompactModel and SetCompactModel expose the router's compact-request
+	// override: detected Claude Code /compact and auto-compact turns are served by
+	// this model at medium effort. Same live-gateway contract as the plan model.
+	GetCompactModel func(context.Context) (string, error)
+	SetCompactModel func(context.Context, string) error
+	// GetContextMode and SetContextMode expose the proxy context pipeline switch:
+	// off, safe, or aggressive. Applied to the running gateway.
+	GetContextMode func(context.Context) (string, error)
+	SetContextMode func(context.Context, string) error
 	// GetLongContext and SetLongContext expose the router's long-context rule: the model
 	// a turn is handed to, and the share of the serving model's window that triggers it.
 	// Also LiteRouter's own routing, applied to a running gateway.
@@ -257,6 +266,8 @@ type viewData struct {
 	ClaudeSetup          clisetup.Request
 	ClaudeApplied        bool
 	PlanModel            string
+	CompactModel         string
+	ContextMode          string
 	LongContextModel     string
 	LongContextPercent   int
 	ImageModel           string
@@ -1228,6 +1239,16 @@ func (s *Service) pageData(c echo.Context, tab string) viewData {
 		if s.settings.GetPlanModel != nil {
 			if planModel, planErr := s.settings.GetPlanModel(c.Request().Context()); planErr == nil {
 				data.PlanModel = planModel
+			}
+		}
+		if s.settings.GetCompactModel != nil {
+			if compactModel, compactErr := s.settings.GetCompactModel(c.Request().Context()); compactErr == nil {
+				data.CompactModel = compactModel
+			}
+		}
+		if s.settings.GetContextMode != nil {
+			if mode, modeErr := s.settings.GetContextMode(c.Request().Context()); modeErr == nil {
+				data.ContextMode = mode
 			}
 		}
 		// Endpoint defaults to the LiteRouter instance serving this UI. Persisted
@@ -2237,6 +2258,16 @@ func (s *Service) routingHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	compactModel, err := routingModelValue(c, "compact_model")
+	if err != nil {
+		return err
+	}
+	contextMode := strings.ToLower(strings.TrimSpace(c.FormValue("context_mode")))
+	switch contextMode {
+	case "", "off", "safe", "aggressive":
+	default:
+		return echo.NewHTTPError(http.StatusBadRequest, "proxy compaction mode must be off, safe, or aggressive")
+	}
 	longModel, err := routingModelValue(c, "long_context_model")
 	if err != nil {
 		return err
@@ -2263,6 +2294,18 @@ func (s *Service) routingHandler(c echo.Context) error {
 	if err := s.settings.SetPlanModel(c.Request().Context(), planModel); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
+	if s.settings.SetCompactModel != nil {
+		if err := s.settings.SetCompactModel(c.Request().Context(), compactModel); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+	}
+	// An absent field means the form predates the control; only an explicit value
+	// may change the running mode.
+	if contextMode != "" && s.settings.SetContextMode != nil {
+		if err := s.settings.SetContextMode(c.Request().Context(), contextMode); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+	}
 	if s.settings.SetLongContext != nil {
 		if err := s.settings.SetLongContext(c.Request().Context(), longModel, percent); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
@@ -2275,11 +2318,19 @@ func (s *Service) routingHandler(c echo.Context) error {
 	}
 	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
 	c.Response().Header().Set("Cache-Control", "no-store")
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, 4)
 	if planModel == "" {
 		parts = append(parts, "plan turns use the requested model")
 	} else {
 		parts = append(parts, "plan → "+template.HTMLEscapeString(planModel))
+	}
+	if compactModel == "" {
+		parts = append(parts, "compacts stay on the session model")
+	} else {
+		parts = append(parts, "compact → "+template.HTMLEscapeString(compactModel)+" at medium effort")
+	}
+	if contextMode != "" {
+		parts = append(parts, "proxy compaction "+contextMode)
 	}
 	switch {
 	case longModel == "":

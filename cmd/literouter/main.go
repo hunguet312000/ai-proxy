@@ -182,6 +182,23 @@ func run() int {
 			gatewayService.SetPlanModel(stored)
 		}
 	}
+	if _, envSet := os.LookupEnv("LITEROUTER_ROUTER_COMPACT_MODEL"); !envSet {
+		if stored, storedErr := store.GetSetting(context.Background(), "router.compact_model"); storedErr == nil {
+			gatewayService.SetCompactModel(stored)
+		}
+	}
+	// The context mode needs both envs unset before a stored value may apply:
+	// enabled=false and mode=off express the same thing, so a deployment that pins
+	// either one must not be half-overridden by a stale dashboard row.
+	_, contextEnabledEnv := os.LookupEnv("LITEROUTER_CONTEXT_ENABLED")
+	_, contextModeEnv := os.LookupEnv("LITEROUTER_CONTEXT_MODE")
+	if !contextEnabledEnv && !contextModeEnv {
+		if stored, storedErr := store.GetSetting(context.Background(), "context.mode"); storedErr == nil && stored != "" {
+			if modeErr := gatewayService.SetContextMode(stored); modeErr != nil {
+				logger.Warn("stored context mode is invalid; keeping the boot mode", "value", stored)
+			}
+		}
+	}
 	// The long-context rule follows the same precedence, and both halves move together:
 	// a stored model with no stored percent must not inherit config.yaml's percent, or the
 	// threshold would belong to a rule the user replaced.
@@ -498,6 +515,27 @@ func run() int {
 			}
 			gatewayService.SetPlanModel(model)
 			return nil
+		},
+		GetCompactModel: func(context.Context) (string, error) {
+			// Same contract as GetPlanModel: the in-force value, already carrying the
+			// env-wins precedence applied at startup.
+			return gatewayService.CompactModel(), nil
+		},
+		SetCompactModel: func(ctx context.Context, model string) error {
+			if err := store.SetSetting(ctx, "router.compact_model", model); err != nil {
+				return err
+			}
+			gatewayService.SetCompactModel(model)
+			return nil
+		},
+		GetContextMode: func(context.Context) (string, error) {
+			return gatewayService.ContextMode(), nil
+		},
+		SetContextMode: func(ctx context.Context, mode string) error {
+			if err := gatewayService.SetContextMode(mode); err != nil {
+				return err
+			}
+			return store.SetSetting(ctx, "context.mode", mode)
 		},
 		GetCLIDraft: func(ctx context.Context) (clisetup.Draft, error) {
 			raw, err := store.GetSetting(ctx, "clisetup.claude")
@@ -977,6 +1015,22 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 		slog.Warn("load learned output limits", "error", err)
 		learnedOutputTokens = nil
 	}
+	// Tokenizer calibrations measured by earlier runs. Same contract: losing them
+	// only means the ratios are re-measured from live traffic.
+	var learnedCalibrations []gateway.TokenCalibration
+	if stored, calErr := store.ListModelCalibrations(context.Background()); calErr != nil {
+		slog.Warn("load model calibrations", "error", calErr)
+	} else {
+		for _, cal := range stored {
+			learnedCalibrations = append(learnedCalibrations, gateway.TokenCalibration{
+				Model: cal.Model, BytesPerToken: cal.BytesPerToken, EstimatePerToken: cal.EstimatePerToken,
+				Spread: cal.Spread, Samples: cal.Samples,
+			})
+		}
+		if len(learnedCalibrations) > 0 {
+			slog.Info("seeded tokenizer calibrations from previous runs", "models", len(learnedCalibrations))
+		}
+	}
 	return gateway.New(gateway.Options{
 		OpenAI: openAIClient, XAI: xaiClient, OpenAIStream: openAIStream, XAIStream: xaiStream,
 		OAuthInference:  oauthInference,
@@ -991,12 +1045,24 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 		XAIPromptCache: cfg.Cache.XAIPromptCache,
 		Models:         models, Aliases: cfg.Router.ModelAliases,
 		PlanModel:           cfg.Router.PlanModel,
+		CompactModel:        cfg.Router.CompactModel,
 		LongContextModel:    cfg.Router.LongContextModel,
 		LongContextPercent:  cfg.Router.LongContextPercent,
 		ImageModel:          cfg.Router.ImageModel,
 		TextOnlyModels:      cfg.Router.TextOnlyModels,
 		MaxOutputTokens:     cfg.Router.MaxOutputTokens,
 		LearnedOutputTokens: learnedOutputTokens,
+		LearnedCalibrations: learnedCalibrations,
+		OnCalibration: func(cal gateway.TokenCalibration) {
+			// Runs on the request path; the in-memory scale is already in effect, so
+			// this write only decides whether the next start remembers it.
+			if err := store.UpsertModelCalibration(context.Background(), storage.ModelCalibration{
+				Model: cal.Model, BytesPerToken: cal.BytesPerToken, EstimatePerToken: cal.EstimatePerToken,
+				Spread: cal.Spread, Samples: cal.Samples,
+			}); err != nil {
+				slog.Warn("persist model calibration", "model", cal.Model, "error", err)
+			}
+		},
 		OnOutputLimit: func(model string, limit int) {
 			// Runs on the request path. The in-memory cap is already in effect, so this
 			// write only decides whether the next process start remembers it.
@@ -1020,6 +1086,7 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 			windowResolver.ReplaceCatalog(windows)
 		},
 		ContextEnabled: cfg.Context.Enabled,
+		ContextMode:    cfg.Context.Mode,
 		ContextGuard:   cfg.Context.GuardEnabled,
 		ContextLimits:  contextguard.Limits{Default: cfg.Context.DefaultWindow, Models: cfg.Context.ModelWindows},
 		ContextWindow: func(_ context.Context, model string) (int, error) {
@@ -1031,6 +1098,10 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 		ContextPolicy: contextguard.Policy{
 			SoftRatio: cfg.Context.SoftRatio, SummarizeRatio: cfg.Context.SummarizeRatio, HardRatio: cfg.Context.HardRatio,
 			KeepRecentTurns: cfg.Context.KeepRecentTurns, ReserveTokens: cfg.Context.ReserveTokens,
+			// The quantized boundary keeps the compacted prefix byte-stable between
+			// grid advances; there is no config knob because turning it off is never
+			// the better trade.
+			BoundaryQuantum: contextguard.DefaultPolicy().BoundaryQuantum,
 		},
 		SummaryModel: cfg.Context.SummarizeModel, SummaryMaxTokens: cfg.Context.SummarizeMaxTokens,
 		SummaryTimeout: cfg.Context.SummarizeTimeout,

@@ -95,7 +95,7 @@ func (s *Service) longContextTarget(ctx context.Context, servingModel string, ra
 // each serve the turn, while this one rules out a model that cannot read what it was sent.
 // The error it can return means the turn is unservable as routed and must not be forwarded.
 func (s *Service) routeModel(ctx context.Context, request translator.AnthropicRequest, rawBytes int) (routeDecision, error) {
-	model, reason, overridden := s.sizeAndPlanRoute(ctx, request, rawBytes)
+	model, effort, reason, overridden := s.sizePlanAndCompactRoute(ctx, request, rawBytes)
 	serving := request.Model
 	if overridden {
 		serving = model
@@ -104,7 +104,7 @@ func (s *Service) routeModel(ctx context.Context, request translator.AnthropicRe
 	if err != nil {
 		return routeDecision{}, err
 	}
-	decision := routeDecision{Reason: reason}
+	decision := routeDecision{Reason: reason, Effort: effort}
 	if overridden {
 		decision.Model = model
 	}
@@ -130,6 +130,10 @@ func (s *Service) routeModel(ctx context.Context, request translator.AnthropicRe
 type routeDecision struct {
 	// Model is the model to serve the turn, or empty to keep the one the client asked for.
 	Model string
+	// Effort forces the reasoning effort for the turn, or empty to leave it alone.
+	// Only the compact route sets it today; it wins over the per-model catalog
+	// override because it describes the task, not the model.
+	Effort string
 	// Reason is for the log; it is what makes an unexpected handover explainable later.
 	Reason string
 	// StripImages means the turn is servable only once its images are replaced with a
@@ -142,22 +146,35 @@ type routeDecision struct {
 
 // overrides reports whether the decision changes anything about the turn.
 func (decision routeDecision) overrides() bool {
-	return decision.Model != "" || decision.StripImages
+	return decision.Model != "" || decision.StripImages || decision.Effort != ""
 }
 
-// sizeAndPlanRoute resolves the two rules that pick between models any of which could
-// serve the turn.
-func (s *Service) sizeAndPlanRoute(ctx context.Context, request translator.AnthropicRequest, rawBytes int) (string, string, bool) {
+// sizePlanAndCompactRoute resolves the rules that pick between models any of which
+// could serve the turn.
+//
+// Compact beats plan: a /compact issued while plan mode is active is a
+// summarization task, not a plan turn, and the plan markers are still in the
+// transcript. Compact also beats long-context, with the same escape hatch plan
+// mode has — a compact request is the largest request a session ever produces, so
+// one the compact model cannot hold goes to the long-context model instead,
+// keeping the forced effort because it is still a summarization turn.
+func (s *Service) sizePlanAndCompactRoute(ctx context.Context, request translator.AnthropicRequest, rawBytes int) (model, effort, reason string, overridden bool) {
+	if compactModel, ok := s.compactRoute(request, rawBytes); ok {
+		if long, tooBig := s.longContextTarget(ctx, compactModel, rawBytes); tooBig {
+			return long, compactEffort, "compact request exceeds the compact model's window", true
+		}
+		return compactModel, compactEffort, "compact request", true
+	}
 	if plan, ok := s.planModeModel(request); ok {
 		if long, tooBig := s.longContextTarget(ctx, plan, rawBytes); tooBig {
-			return long, "plan turn exceeds the plan model's window", true
+			return long, "", "plan turn exceeds the plan model's window", true
 		}
-		return plan, "plan mode", true
+		return plan, "", "plan mode", true
 	}
 	if long, ok := s.longContextTarget(ctx, request.Model, rawBytes); ok {
-		return long, "long context", true
+		return long, "", "long context", true
 	}
-	return "", "", false
+	return "", "", "", false
 }
 
 // ClientContextCeiling reports the window a client should be told it has, given the

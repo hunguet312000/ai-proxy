@@ -72,6 +72,10 @@ type RouterConfig struct {
 	// model for implementation and still plan on a strong one, without the 200k
 	// prompt-token gate that disables the client's own opusplan upgrade.
 	PlanModel string `yaml:"plan_model"`
+	// CompactModel serves detected Claude Code compact/auto-compact requests — the
+	// slowest request a session makes, and one nothing about needs the session
+	// model. Routed at medium effort. Empty disables the detection entirely.
+	CompactModel string `yaml:"compact_model"`
 	// LongContextModel serves a turn whose prompt is too large a share of the window
 	// belonging to the model that would otherwise take it — the routing equivalent of
 	// claude-code-router's `longContext`. Empty disables the rule.
@@ -113,7 +117,11 @@ type CacheConfig struct {
 }
 
 type ContextConfig struct {
-	Enabled            bool           `yaml:"enabled"`
+	Enabled bool `yaml:"enabled"`
+	// Mode refines Enabled: "safe" (default) keeps the lossless pipeline,
+	// "aggressive" adds superseded-result collapse and head/tail truncation of old
+	// bulky tool output. Ignored while Enabled is false.
+	Mode               string         `yaml:"mode"`
 	GuardEnabled       bool           `yaml:"guard_enabled"`
 	DefaultWindow      int            `yaml:"default_window"`
 	SoftRatio          float64        `yaml:"soft_ratio"`
@@ -251,8 +259,17 @@ func applyEnv(cfg *Config) error {
 	if value, ok := os.LookupEnv("LITEROUTER_ROUTER_PLAN_MODEL"); ok {
 		cfg.Router.PlanModel = value
 	}
+	if value, ok := os.LookupEnv("LITEROUTER_ROUTER_COMPACT_MODEL"); ok {
+		cfg.Router.CompactModel = value
+	}
 	if value, ok := os.LookupEnv("LITEROUTER_ROUTER_LONG_CONTEXT_MODEL"); ok {
 		cfg.Router.LongContextModel = value
+	}
+	if value, ok := os.LookupEnv("LITEROUTER_CONTEXT_MODE"); ok {
+		cfg.Context.Mode = value
+	}
+	if value, ok := os.LookupEnv("LITEROUTER_CONTEXT_SUMMARIZE_MODEL"); ok {
+		cfg.Context.SummarizeModel = value
 	}
 	if value, ok := os.LookupEnv("LITEROUTER_ROUTER_IMAGE_MODEL"); ok {
 		cfg.Router.ImageModel = value
@@ -267,10 +284,29 @@ func applyEnv(cfg *Config) error {
 		{"LITEROUTER_CACHE_RESPONSE_MAX_ENTRIES", &cfg.Cache.ResponseMaxEntries},
 		{"LITEROUTER_CACHE_PROMPT_MIN_BYTES", &cfg.Cache.PromptCacheMinBytes},
 		{"LITEROUTER_ROUTER_LONG_CONTEXT_PERCENT", &cfg.Router.LongContextPercent},
+		{"LITEROUTER_CONTEXT_KEEP_RECENT_TURNS", &cfg.Context.KeepRecentTurns},
+		{"LITEROUTER_CONTEXT_SUMMARIZE_MAX_TOKENS", &cfg.Context.SummarizeMaxTokens},
 	}
 	for _, item := range integers {
 		if value, ok := os.LookupEnv(item.name); ok {
 			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", item.name, err)
+			}
+			*item.target = parsed
+		}
+	}
+	floats := []struct {
+		name   string
+		target *float64
+	}{
+		{"LITEROUTER_CONTEXT_SOFT_RATIO", &cfg.Context.SoftRatio},
+		{"LITEROUTER_CONTEXT_SUMMARIZE_RATIO", &cfg.Context.SummarizeRatio},
+		{"LITEROUTER_CONTEXT_HARD_RATIO", &cfg.Context.HardRatio},
+	}
+	for _, item := range floats {
+		if value, ok := os.LookupEnv(item.name); ok {
+			parsed, err := strconv.ParseFloat(value, 64)
 			if err != nil {
 				return fmt.Errorf("parse %s: %w", item.name, err)
 			}
@@ -358,6 +394,7 @@ func (cfg *Config) Validate() error {
 		return fmt.Errorf("router.strategy is invalid")
 	}
 	cfg.Router.PlanModel = strings.TrimSpace(cfg.Router.PlanModel)
+	cfg.Router.CompactModel = strings.TrimSpace(cfg.Router.CompactModel)
 	cfg.Router.LongContextModel = strings.TrimSpace(cfg.Router.LongContextModel)
 	cfg.Router.ImageModel = strings.TrimSpace(cfg.Router.ImageModel)
 	cfg.Router.TextOnlyModels = trimModelList(cfg.Router.TextOnlyModels)
@@ -399,6 +436,12 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.Context.SoftRatio <= 0 || cfg.Context.SoftRatio >= cfg.Context.SummarizeRatio || cfg.Context.SummarizeRatio >= cfg.Context.HardRatio || cfg.Context.HardRatio > 1 {
 		return fmt.Errorf("context ratios must satisfy 0 < soft < summarize < hard <= 1")
+	}
+	cfg.Context.Mode = strings.ToLower(strings.TrimSpace(cfg.Context.Mode))
+	switch cfg.Context.Mode {
+	case "", "safe", "aggressive":
+	default:
+		return fmt.Errorf("context.mode must be safe or aggressive")
 	}
 	for model, window := range cfg.Context.ModelWindows {
 		if strings.TrimSpace(model) == "" || window <= 0 {

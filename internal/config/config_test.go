@@ -78,6 +78,45 @@ func TestLoadRouterPlanModel(t *testing.T) {
 	}
 }
 
+func TestLoadCompactModelAndContextMode(t *testing.T) {
+	path := writeConfig(t, "router:\n  compact_model: \"  yaml-fast  \"\ncontext:\n  mode: \"Aggressive\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Router.CompactModel != "yaml-fast" {
+		t.Fatalf("Router.CompactModel = %q, want trimmed yaml value", cfg.Router.CompactModel)
+	}
+	if cfg.Context.Mode != "aggressive" {
+		t.Fatalf("Context.Mode = %q, want lowercased aggressive", cfg.Context.Mode)
+	}
+
+	t.Setenv("LITEROUTER_ROUTER_COMPACT_MODEL", "env-fast")
+	t.Setenv("LITEROUTER_CONTEXT_MODE", "safe")
+	t.Setenv("LITEROUTER_CONTEXT_SUMMARIZE_MODEL", "env-summarizer")
+	t.Setenv("LITEROUTER_CONTEXT_KEEP_RECENT_TURNS", "4")
+	t.Setenv("LITEROUTER_CONTEXT_SOFT_RATIO", "0.7")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Router.CompactModel != "env-fast" || cfg.Context.Mode != "safe" ||
+		cfg.Context.SummarizeModel != "env-summarizer" || cfg.Context.KeepRecentTurns != 4 ||
+		cfg.Context.SoftRatio != 0.7 {
+		t.Fatalf("env overrides not applied: %+v", cfg.Context)
+	}
+
+	t.Setenv("LITEROUTER_CONTEXT_MODE", "bogus")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "context.mode") {
+		t.Fatalf("invalid mode error = %v", err)
+	}
+	t.Setenv("LITEROUTER_CONTEXT_MODE", "safe")
+	t.Setenv("LITEROUTER_CONTEXT_SOFT_RATIO", "0.95")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "context ratios") {
+		t.Fatalf("bad ratio error = %v", err)
+	}
+}
+
 func TestLoadRejectsInvalidInput(t *testing.T) {
 	tests := []struct {
 		name    string

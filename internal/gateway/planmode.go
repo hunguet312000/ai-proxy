@@ -36,26 +36,42 @@ const (
 // Only text blocks on user messages can carry a reminder, so tool results — which
 // are the bulk of a coding transcript — are skipped rather than searched.
 func planModeActive(request translator.AnthropicRequest) bool {
+	// Claude Code has emitted the reminder in both user-message metadata and the
+	// top-level system block across client versions. Message markers are checked first:
+	// they are ordered history and therefore can explicitly exit an older system marker.
 	for index := len(request.Messages) - 1; index >= 0; index-- {
 		message := request.Messages[index]
 		if message.Role != "user" {
 			continue
 		}
-		for block := len(message.Content) - 1; block >= 0; block-- {
-			content := message.Content[block]
-			if content.Type != "text" || content.Text == "" {
-				continue
-			}
-			switch {
-			case strings.Contains(content.Text, planExitedMarker):
-				return false
-			case strings.Contains(content.Text, planActiveMarker),
-				strings.Contains(content.Text, planEnteredMarker):
-				return true
-			}
+		if active, found := planMarkerState(message.Content); found {
+			return active
 		}
 	}
+	if active, found := planMarkerState(request.System); found {
+		return active
+	}
 	return false
+}
+
+// planMarkerState reports the last plan-mode marker in one content collection.
+// Top-level system content describes the current request, while message content is
+// scanned backwards by planModeActive so an approval can override an older reminder.
+func planMarkerState(contents []translator.AnthropicContent) (active, found bool) {
+	for index := len(contents) - 1; index >= 0; index-- {
+		content := contents[index]
+		if content.Type != "text" || content.Text == "" {
+			continue
+		}
+		switch {
+		case strings.Contains(content.Text, planExitedMarker):
+			return false, true
+		case strings.Contains(content.Text, planActiveMarker),
+			strings.Contains(content.Text, planEnteredMarker):
+			return true, true
+		}
+	}
+	return false, false
 }
 
 // planModeModel reports the model that should serve this turn when plan mode is

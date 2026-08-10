@@ -27,6 +27,14 @@ router:
   # plans here instead. Unlike the client's own opusplan setting, this is not disabled
   # above 200k prompt tokens. Empty disables it. May be an alias from model_aliases.
   plan_model: ""
+  # LITEROUTER_ROUTER_COMPACT_MODEL — serves detected Claude Code /compact and
+  # auto-compact requests (no tools + the fixed summarization instruction + a large
+  # payload) at medium effort. The 5-minute compacts were the session model reasoning
+  # at max effort over the whole history; any fast model here — or even the same
+  # model, since medium effort is forced either way — cuts that to well under a
+  # minute. Also used as the proxy's own summarizer unless context.summarize_model
+  # is set. Empty disables the detection. Usually configured from the dashboard.
+  compact_model: ""
   # Cap the max_tokens forwarded upstream, per model. Keys match exactly or as a model
   # prefix, like context.model_windows.
   #
@@ -47,16 +55,32 @@ cache:
   xai_prompt_cache_key: false       # LITEROUTER_CACHE_XAI_PROMPT_CACHE_KEY; enable only for verified compatible endpoints
 
 context:
+  # Most of this block self-tunes and rarely needs touching. The ratios below only
+  # exist to absorb token-estimate uncertainty — and the proxy measures the real
+  # estimate-to-token ratio per model from served traffic (persisted in the
+  # model_calibration table, log line "measured tokenizer scale"). Once a model has
+  # enough agreeing samples, the measured value drives budget math and these knobs
+  # stop mattering. The two decisions that stay yours: enabled/mode here, and the
+  # compact/plan/long-context models in the router block or dashboard.
   enabled: false           # LITEROUTER_CONTEXT_ENABLED; false skips auto-compact + summarize
+  # LITEROUTER_CONTEXT_MODE — refines enabled: "safe" (default) keeps the lossless
+  # pipeline (old reasoning elision + exact-duplicate tool-result dedup, then
+  # summarize/trim); "aggressive" additionally collapses re-reads superseded by a
+  # newer identical call and head/tail-truncates old bulky tool output. Recent turns
+  # stay byte-for-byte and error output is kept intact in both modes. Ignored while
+  # enabled is false. Also switchable at runtime from the dashboard.
+  mode: safe
   guard_enabled: true      # LITEROUTER_CONTEXT_GUARD_ENABLED; fail-fast at the model's DB context limit
   default_window: 128000
-  soft_ratio: 0.78
-  summarize_ratio: 0.88
-  hard_ratio: 0.96
-  keep_recent_turns: 6
+  soft_ratio: 0.78         # LITEROUTER_CONTEXT_SOFT_RATIO
+  summarize_ratio: 0.88    # LITEROUTER_CONTEXT_SUMMARIZE_RATIO
+  hard_ratio: 0.96         # LITEROUTER_CONTEXT_HARD_RATIO
+  keep_recent_turns: 6     # LITEROUTER_CONTEXT_KEEP_RECENT_TURNS
   reserve_tokens: 2048
-  summarize_model: ""       # Empty uses the resolved request model.
-  summarize_max_tokens: 4000
+  # LITEROUTER_CONTEXT_SUMMARIZE_MODEL — who writes the proxy's own summaries.
+  # Empty falls back to router.compact_model, then to the resolved request model.
+  summarize_model: ""
+  summarize_max_tokens: 4000 # LITEROUTER_CONTEXT_SUMMARIZE_MAX_TOKENS
   summarize_timeout: 60s     # LITEROUTER_CONTEXT_SUMMARIZE_TIMEOUT; on timeout LiteRouter drops oldest turns instead of failing.
   model_windows: {}          # Exact or prefix model names, e.g. gpt-4.1: 1000000.
 

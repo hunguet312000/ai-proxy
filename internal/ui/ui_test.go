@@ -898,6 +898,78 @@ func TestRoutingHandlerSavesAndClears(t *testing.T) {
 	}
 }
 
+func TestRoutingHandlerSavesCompactModelAndContextMode(t *testing.T) {
+	var savedCompact []string
+	var savedModes []string
+	service, err := New(
+		pool.New([]pool.Account{{ID: "account", Provider: "codex", Enabled: true, Weight: 1}}),
+		"api-token", nil, nil, nil, nil, nil, APIKeyHooks{}, ModelHooks{},
+		SettingsHooks{
+			GetPlanModel: func(context.Context) (string, error) { return "", nil },
+			SetPlanModel: func(context.Context, string) error { return nil },
+			GetCompactModel: func(context.Context) (string, error) {
+				if len(savedCompact) == 0 {
+					return "", nil
+				}
+				return savedCompact[len(savedCompact)-1], nil
+			},
+			SetCompactModel: func(_ context.Context, value string) error {
+				savedCompact = append(savedCompact, value)
+				return nil
+			},
+			GetContextMode: func(context.Context) (string, error) { return "safe", nil },
+			SetContextMode: func(_ context.Context, mode string) error {
+				savedModes = append(savedModes, mode)
+				return nil
+			},
+		}, UsageHooks{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := echo.New()
+	if err := service.Register(e); err != nil {
+		t.Fatal(err)
+	}
+	post := func(form url.Values) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/ui/routing", strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.Header.Set("Origin", "http://example.com")
+		request.Host = "example.com"
+		recorder := httptest.NewRecorder()
+		e.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	response := post(url.Values{"compact_model": {" cx/fast-model "}, "context_mode": {"aggressive"}})
+	if response.Code != http.StatusOK {
+		t.Fatalf("save = %d %q", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "compact → cx/fast-model at medium effort") ||
+		!strings.Contains(response.Body.String(), "proxy compaction aggressive") {
+		t.Fatalf("flash = %q", response.Body.String())
+	}
+	if len(savedCompact) != 1 || savedCompact[0] != "cx/fast-model" {
+		t.Fatalf("saved compact = %v", savedCompact)
+	}
+	if len(savedModes) != 1 || savedModes[0] != "aggressive" {
+		t.Fatalf("saved modes = %v", savedModes)
+	}
+
+	// Clearing the model turns the route off; an absent mode field changes nothing.
+	response = post(url.Values{"compact_model": {""}})
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "compacts stay on the session model") {
+		t.Fatalf("clear = %d %q", response.Code, response.Body.String())
+	}
+	if len(savedModes) != 1 {
+		t.Fatalf("absent mode field still wrote a mode: %v", savedModes)
+	}
+
+	if response := post(url.Values{"context_mode": {"bogus"}}); response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid mode = %d, want 400", response.Code)
+	}
+}
+
 func TestRoutingUnavailableWithoutHook(t *testing.T) {
 	service, err := New(
 		pool.New([]pool.Account{{ID: "account", Provider: "codex", Enabled: true, Weight: 1}}),

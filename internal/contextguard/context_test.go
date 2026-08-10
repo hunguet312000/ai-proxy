@@ -58,6 +58,9 @@ func TestPrepareCompactsOldToolResults(t *testing.T) {
 	request := provider.Request{Model: "model", Messages: messages}
 	policy := DefaultPolicy()
 	policy.ReserveTokens = 0
+	// Quantum 1 pins the boundary exactly at KeepRecentTurns; the quantized
+	// boundary has its own tests.
+	policy.BoundaryQuantum = 1
 	result, err := Prepare(request, Limits{Default: 20_000}, policy)
 	if err != nil || !result.Compacted || result.SavedTokens <= 0 {
 		t.Fatalf("Prepare() = %#v, %v", result, err)
@@ -91,6 +94,7 @@ func TestPrepareCompactsOldThinkingWithoutChangingDurableContent(t *testing.T) {
 	policy := DefaultPolicy()
 	policy.ReserveTokens = 0
 	policy.KeepRecentTurns = 1
+	policy.BoundaryQuantum = 1
 	result, err := Prepare(provider.Request{Model: "model", Messages: messages}, Limits{Default: 1_000}, policy)
 	if err != nil || !result.Compacted {
 		t.Fatalf("Prepare() = %#v, %v", result, err)
@@ -209,7 +213,7 @@ func TestApplySummaryKeepsRecentMessages(t *testing.T) {
 		{Role: "assistant", Content: []provider.Content{{Type: "text", Text: "recent answer"}}},
 		{Role: "user", Content: []provider.Content{{Type: "text", Text: "latest instruction"}}},
 	}}
-	result := ApplySummary(request, "facts", 1)
+	result := ApplySummary(request, "facts", 1, 1)
 	if len(result.Messages) != 2 || result.Messages[1].Content[0].Text != "latest instruction" {
 		t.Fatalf("ApplySummary() = %#v", result.Messages)
 	}
@@ -344,7 +348,7 @@ func TestSummaryBoundaryKeepsUserTurnsAndToolChain(t *testing.T) {
 		{Role: "user", Content: []provider.Content{{Type: "tool_result", ToolUseID: "call", Text: "result"}}},
 		{Role: "assistant", Content: []provider.Content{{Type: "text", Text: "recent answer"}}},
 	}
-	older := SummaryMessages(messages, 1)
+	older := SummaryMessages(messages, 1, 1)
 	if len(older) != 2 || older[0].Content[0].Text != "old user" {
 		t.Fatalf("older = %#v", older)
 	}
@@ -419,7 +423,7 @@ func TestWindowPrefixBoundariesAndReserves(t *testing.T) {
 	}
 }
 
-func TestQualityFirstCompactDoesNotDropUniqueToolResult(t *testing.T) {
+func TestSafeModeCompactDoesNotDropUniqueToolResult(t *testing.T) {
 	unique := strings.Repeat("unique diagnostic line\n", 500)
 	request := provider.Request{Model: "model", Messages: []provider.Message{
 		{Role: "user", Content: []provider.Content{{Type: "tool_result", Name: "unknown", Text: unique}}},

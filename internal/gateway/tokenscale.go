@@ -33,6 +33,22 @@ type tokenScale struct {
 	bytesPerToken float64
 	// estimatePerToken converts a token budget into the units EstimateRequest reports.
 	estimatePerToken float64
+	// samples counts the estimate-bearing measurements folded in; spread is the
+	// smoothed relative deviation between successive samples. Together they say
+	// whether the measurement has earned trust: many samples that agree with each
+	// other are evidence, three that disagree are noise.
+	samples int
+	spread  float64
+}
+
+// TokenCalibration is the exported shape of a learned scale, for persisting
+// across restarts. Options.LearnedCalibrations seeds it back at boot.
+type TokenCalibration struct {
+	Model            string
+	BytesPerToken    float64
+	EstimatePerToken float64
+	Spread           float64
+	Samples          int
 }
 
 // Fallbacks for a model nothing has been learned about yet. 4 bytes per token is the
@@ -63,29 +79,81 @@ const minScaleSampleTokens = 5_000
 // which changes character is tracked within a handful of turns.
 const scaleSmoothing = 0.3
 
+// initialSpread is where an unmeasured model starts: maximal disagreement, so
+// nothing is trusted until the samples themselves earn it. Each consistent sample
+// blends it down; a dozen agreeing samples reach calibStableSpread, while samples
+// that keep disagreeing hold it high indefinitely.
+const initialSpread = 1.0
+
+// Confidence gate: with at least this many estimate-bearing samples whose spread
+// has settled below this bound, the measured estimate ratio is applied to budget
+// math as-is instead of through the conservative clamp. This is what replaces
+// hand-tuned ratio knobs over time — the measurement takes over from the guess,
+// but only once it has the evidence to.
+const (
+	calibConfidentSamples = 12
+	calibStableSpread     = 0.05
+)
+
+// persistEvery bounds how often a converged calibration is re-persisted, so the
+// samples/spread counters survive a restart without writing on every turn.
+const persistEvery = 8
+
 // observeTokenScale folds one served turn into a model's scales.
 //
 // reported must be the upstream's own count. An estimate on both sides of the ratio would
 // only ever teach it that the estimator agrees with itself.
+//
+// Either side of the sample may be missing: the non-streaming candidate loops
+// never held the raw body (rawBytes 0, estimate-only), and the Anthropic
+// passthrough never translates so it has no estimate (estimate 0, bytes-only).
+// Each side updates only its own ratio; the confidence counters follow the
+// estimate side, which is what budget decisions ride on.
 func (s *Service) observeTokenScale(model string, rawBytes, estimate, reported int) {
-	if model == "" || reported < minScaleSampleTokens || rawBytes <= 0 || estimate <= 0 {
+	if model == "" || reported < minScaleSampleTokens || (estimate <= 0 && rawBytes <= 0) {
 		return
 	}
-	bytesPer := float64(rawBytes) / float64(reported)
-	estimatePer := float64(estimate) / float64(reported)
-	if bytesPer < minBytesPerToken || bytesPer > maxBytesPerToken ||
-		estimatePer < minEstimatePerToken || estimatePer > maxEstimatePerToken {
-		return
+	estimatePer := 0.0
+	if estimate > 0 {
+		estimatePer = float64(estimate) / float64(reported)
+		if estimatePer < minEstimatePerToken || estimatePer > maxEstimatePerToken {
+			return
+		}
+	}
+	bytesPer := 0.0
+	if rawBytes > 0 {
+		bytesPer = float64(rawBytes) / float64(reported)
+		if bytesPer < minBytesPerToken || bytesPer > maxBytesPerToken {
+			return
+		}
 	}
 	s.learnedMu.Lock()
 	if s.tokenScales == nil {
 		s.tokenScales = map[string]tokenScale{}
 	}
 	previous, known := s.tokenScales[model]
-	scale := tokenScale{bytesPerToken: bytesPer, estimatePerToken: estimatePer}
-	if known {
-		scale.bytesPerToken = blend(previous.bytesPerToken, bytesPer)
-		scale.estimatePerToken = blend(previous.estimatePerToken, estimatePer)
+	scale := previous
+	if !known {
+		scale = tokenScale{bytesPerToken: fallbackBytesPerToken, estimatePerToken: fallbackEstimatePerToken, spread: initialSpread}
+	}
+	if bytesPer > 0 {
+		if known && previous.bytesPerToken > 0 {
+			scale.bytesPerToken = blend(previous.bytesPerToken, bytesPer)
+		} else {
+			scale.bytesPerToken = bytesPer
+		}
+	}
+	if estimatePer > 0 {
+		if scale.samples > 0 {
+			// How far this sample sits from the running value is what spread tracks:
+			// consistent traffic blends it toward zero, contradictory traffic holds
+			// it high and keeps the conservative clamp in charge.
+			scale.spread = blend(scale.spread, relativeChange(scale.estimatePerToken, estimatePer))
+			scale.estimatePerToken = blend(scale.estimatePerToken, estimatePer)
+		} else {
+			scale.estimatePerToken = estimatePer
+		}
+		scale.samples++
 	}
 	s.tokenScales[model] = scale
 	s.learnedMu.Unlock()
@@ -93,11 +161,45 @@ func (s *Service) observeTokenScale(model string, rawBytes, estimate, reported i
 	// debug. This value silently decides which model serves a turn and how much history a
 	// trim keeps, and until it was surfaced the only way to see it was to infer it from
 	// behaviour. A quiet self-tuning number is one nobody can check.
-	if !known || movedMaterially(previous, scale) {
+	moved := !known || movedMaterially(previous, scale)
+	if moved {
 		slog.Info("measured tokenizer scale", "model", model,
 			"bytes_per_token", round2(scale.bytesPerToken),
 			"estimate_per_token", round2(scale.estimatePerToken),
+			"spread", round2(scale.spread), "samples", scale.samples,
 			"sample_tokens", reported, "first", !known)
+	}
+	// Persisted on material moves plus a periodic heartbeat: the heartbeat is what
+	// carries the samples/spread confidence counters across a restart once the
+	// ratios themselves have converged and stopped moving.
+	if s.onCalibration != nil && (moved || (scale.samples > 0 && scale.samples%persistEvery == 0)) {
+		s.onCalibration(TokenCalibration{
+			Model: model, BytesPerToken: scale.bytesPerToken, EstimatePerToken: scale.estimatePerToken,
+			Spread: scale.spread, Samples: scale.samples,
+		})
+	}
+}
+
+// seedTokenScales restores calibrations persisted by previous runs.
+func (s *Service) seedTokenScales(calibrations []TokenCalibration) {
+	if len(calibrations) == 0 {
+		return
+	}
+	s.learnedMu.Lock()
+	defer s.learnedMu.Unlock()
+	if s.tokenScales == nil {
+		s.tokenScales = map[string]tokenScale{}
+	}
+	for _, cal := range calibrations {
+		if cal.Model == "" || cal.BytesPerToken <= 0 || cal.EstimatePerToken <= 0 {
+			continue
+		}
+		s.tokenScales[cal.Model] = tokenScale{
+			bytesPerToken:    cal.BytesPerToken,
+			estimatePerToken: cal.EstimatePerToken,
+			spread:           cal.Spread,
+			samples:          cal.Samples,
+		}
 	}
 }
 

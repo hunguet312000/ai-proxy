@@ -153,8 +153,8 @@ func SummaryKey(model string, maxTokens int, messages []provider.Message) (strin
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func SummaryMessages(messages []provider.Message, keepRecentTurns int) []provider.Message {
-	boundary := summaryBoundary(messages, keepRecentTurns)
+func SummaryMessages(messages []provider.Message, keepRecentTurns, quantum int) []provider.Message {
+	boundary := summaryBoundary(messages, keepRecentTurns, quantum)
 	result := make([]provider.Message, boundary)
 	for index := range boundary {
 		result[index] = messages[index]
@@ -354,8 +354,8 @@ func cloneMessages(messages []provider.Message) []provider.Message {
 	return result
 }
 
-func ApplySummary(request provider.Request, summary string, keepRecentTurns int) provider.Request {
-	boundary := summaryBoundary(request.Messages, keepRecentTurns)
+func ApplySummary(request provider.Request, summary string, keepRecentTurns, quantum int) provider.Request {
+	boundary := summaryBoundary(request.Messages, keepRecentTurns, quantum)
 	if boundary == 0 {
 		return request
 	}
@@ -366,7 +366,13 @@ func ApplySummary(request provider.Request, summary string, keepRecentTurns int)
 	return request
 }
 
-func summaryBoundary(messages []provider.Message, keepRecentTurns int) int {
+// summaryBoundary is the index where the summarized backlog ends. It lands on the
+// keep-th real user turn from the end, quantized down to a K-message grid and then
+// snapped down to a turn start. Quantization means the backlog bytes are identical
+// for ~K appended messages, so SummaryKey hits the cache instead of paying a fresh
+// LLM call — and the summarized prefix stays byte-stable for the upstream cache.
+// Rounding down only ever summarizes less, never more.
+func summaryBoundary(messages []provider.Message, keepRecentTurns, quantum int) int {
 	if keepRecentTurns < 1 {
 		keepRecentTurns = 1
 	}
@@ -384,6 +390,12 @@ func summaryBoundary(messages []provider.Message, keepRecentTurns int) int {
 	}
 	if users < keepRecentTurns {
 		return 0
+	}
+	if quantum > 1 {
+		boundary = (boundary / quantum) * quantum
+		for boundary > 0 && (messages[boundary].Role != "user" || messageHasToolResult(messages[boundary])) {
+			boundary--
+		}
 	}
 	return boundary
 }

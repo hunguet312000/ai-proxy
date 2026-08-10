@@ -36,10 +36,7 @@ type OAuthInference interface {
 type summaryClient struct{ service *Service }
 
 func (client summaryClient) Summarize(ctx context.Context, input contextguard.SummaryInput) (string, error) {
-	model := input.Model
-	if client.service.summaryModel != "" {
-		model = client.service.summaryModel
-	}
+	model := client.service.resolveSummaryModel(input.Model)
 	const instruction = `Compress the older conversation into a loss-minimizing continuation context.
 Preserve exactly: user intent, constraints, preferences, acceptance criteria, unresolved tasks, decisions and rationale, file paths, code symbols, APIs, commands, IDs, numbers, URLs, errors, failed attempts, test results, current state, next action, and tool findings.
 Never invent or claim unfinished work completed. Distinguish verified facts from assumptions. Use dense structured bullets and exact strings when later work depends on them.`
@@ -167,6 +164,7 @@ type Service struct {
 	models          []string
 	aliases         map[string][]string
 	planModel       atomic.Pointer[string]
+	compactModel    atomic.Pointer[string]
 	longContext     longContextPointer
 	imageRoute      atomic.Pointer[imageRoute]
 	outputLimits    map[string]int
@@ -177,11 +175,14 @@ type Service struct {
 	warnedInflated  map[string]bool
 	// modelEfforts overrides the reasoning effort per model. Held as a pointer so a
 	// catalog edit is visible to in-flight requests without locking the hot path.
-	modelEfforts     atomic.Pointer[map[string]string]
-	learnedMu        sync.RWMutex
-	onOutputLimit    func(model string, limit int)
-	onContextWindow  func(model string, window int)
-	contextEnabled   bool
+	modelEfforts    atomic.Pointer[map[string]string]
+	learnedMu       sync.RWMutex
+	onOutputLimit   func(model string, limit int)
+	onContextWindow func(model string, window int)
+	onCalibration   func(TokenCalibration)
+	// contextMode is the runtime state of the proxy pipeline: off, safe, or
+	// aggressive. Atomic so the dashboard can flip it without a restart.
+	contextMode      atomic.Pointer[string]
 	contextGuard     bool
 	contextLimits    contextguard.Limits
 	customProviders  *CustomProviderRegistry
@@ -212,6 +213,10 @@ type Options struct {
 	// Claude Code's plan mode is active. Empty disables the override entirely,
 	// including the transcript scan it needs.
 	PlanModel string
+	// CompactModel serves detected Claude Code compact/auto-compact requests, at
+	// compactEffort. Empty disables the detection and leaves compaction on the
+	// session model.
+	CompactModel string
 	// LongContextModel serves a /v1/messages turn whose prompt is too large a share of
 	// the window belonging to the model that would otherwise take it. Empty disables it.
 	LongContextModel string
@@ -240,9 +245,21 @@ type Options struct {
 	// catalog column ContextWindow already reads, so the next boot picks them up as
 	// ordinary catalog data.
 	OnContextWindow func(model string, window int)
-	ContextEnabled  bool
-	ContextGuard    bool
-	ContextLimits   contextguard.Limits
+	// LearnedCalibrations seeds the per-model tokenizer scales measured by previous
+	// runs, so budget math starts from evidence instead of the conventional guesses
+	// and re-earns nothing after a restart.
+	LearnedCalibrations []TokenCalibration
+	// OnCalibration is called when a model's measured scale changes materially (or
+	// on the periodic heartbeat that carries the confidence counters), so it can be
+	// persisted. Runs on the request path; keep it cheap and non-blocking.
+	OnCalibration  func(TokenCalibration)
+	ContextEnabled bool
+	// ContextMode refines ContextEnabled: "safe" keeps the lossless pipeline,
+	// "aggressive" adds superseded-result collapse and old-tool-output truncation.
+	// Ignored when ContextEnabled is false. Empty means safe.
+	ContextMode   string
+	ContextGuard  bool
+	ContextLimits contextguard.Limits
 	// CustomProviders resolves user-registered upstreams by model prefix.
 	CustomProviders *CustomProviderRegistry
 	// TouchCustomKey records that a key served a request, for the UI's last-used
@@ -268,33 +285,96 @@ func New(options Options) *Service {
 		learnedLimits:   cloneOutputLimits(options.LearnedOutputTokens),
 		onOutputLimit:   options.OnOutputLimit,
 		onContextWindow: options.OnContextWindow,
-		contextEnabled:  options.ContextEnabled, contextGuard: options.ContextGuard, contextLimits: options.ContextLimits, contextWindow: options.ContextWindow, contextPolicy: options.ContextPolicy,
+		onCalibration:   options.OnCalibration,
+		contextGuard:    options.ContextGuard, contextLimits: options.ContextLimits, contextWindow: options.ContextWindow, contextPolicy: options.ContextPolicy,
 		customProviders: options.CustomProviders, touchCustomKey: options.TouchCustomKey,
 		summarizer: options.Summarizer, summaryCache: options.SummaryCache, summaryModel: options.SummaryModel,
 		summaryMaxTokens: options.SummaryMaxTokens, summaryTimeout: options.SummaryTimeout,
 		onUsage: options.OnUsage,
 	}
 	service.SetPlanModel(options.PlanModel)
+	service.SetCompactModel(options.CompactModel)
 	service.SetLongContext(options.LongContextModel, options.LongContextPercent)
 	service.SetImageRoute(options.ImageModel, options.TextOnlyModels)
-	if service.contextEnabled {
-		if service.summarizer == nil {
-			service.summarizer = summaryClient{service: service}
-		}
-		if service.summaryCache == nil {
-			service.summaryCache = contextguard.NewSummaryCache(128)
-		}
-		if service.summaryMaxTokens <= 0 {
-			service.summaryMaxTokens = 1200
-		}
-		if service.summaryTimeout <= 0 {
-			// Summarization runs inline in the request path against a live upstream.
-			// 20s routinely expired on large coding contexts and turned every long
-			// session into a stall followed by a rejection.
-			service.summaryTimeout = 60 * time.Second
+	service.seedTokenScales(options.LearnedCalibrations)
+	mode := ContextModeOff
+	if options.ContextEnabled {
+		mode = strings.ToLower(strings.TrimSpace(options.ContextMode))
+		if mode != ContextModeAggressive {
+			mode = ContextModeSafe
 		}
 	}
+	service.contextMode.Store(&mode)
+	// Summarization machinery is initialised regardless of the boot mode: the
+	// dashboard can switch the pipeline on at runtime, and a nil summarizer at
+	// that moment would silently skip straight to trimming.
+	if service.summarizer == nil {
+		service.summarizer = summaryClient{service: service}
+	}
+	if service.summaryCache == nil {
+		service.summaryCache = contextguard.NewSummaryCache(128)
+	}
+	if service.summaryMaxTokens <= 0 {
+		service.summaryMaxTokens = 1200
+	}
+	if service.summaryTimeout <= 0 {
+		// Summarization runs inline in the request path against a live upstream.
+		// 20s routinely expired on large coding contexts and turned every long
+		// session into a stall followed by a rejection.
+		service.summaryTimeout = 60 * time.Second
+	}
+	if service.ContextMode() == ContextModeAggressive && service.compressionMode == cache.CompressionAggressive {
+		slog.Warn("both cache compression and the context pipeline are aggressive; the cache pass also mutates recent turns and busts the upstream prompt cache — prefer LITEROUTER_CACHE_COMPRESSION_MODE=safe")
+	}
 	return service
+}
+
+// Context pipeline modes. Off leaves requests untouched (the guard may still
+// warn); safe is the lossless compact/summarize/trim pipeline; aggressive adds
+// superseded-result collapse and old-tool-output truncation.
+const (
+	ContextModeOff        = "off"
+	ContextModeSafe       = "safe"
+	ContextModeAggressive = "aggressive"
+)
+
+// ContextMode reports the pipeline mode currently in force.
+func (s *Service) ContextMode() string {
+	if value := s.contextMode.Load(); value != nil {
+		return *value
+	}
+	return ContextModeOff
+}
+
+// SetContextMode changes the pipeline mode on a running gateway.
+func (s *Service) SetContextMode(mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case ContextModeOff, ContextModeSafe, ContextModeAggressive:
+		s.contextMode.Store(&mode)
+		return nil
+	default:
+		return fmt.Errorf("context mode must be off, safe, or aggressive")
+	}
+}
+
+// contextPrepEnabled reports whether requests may be mutated to fit their window.
+func (s *Service) contextPrepEnabled() bool {
+	return s.ContextMode() != ContextModeOff
+}
+
+// activeContextPolicy resolves the policy for the mode in force. A zero-valued
+// configured policy — the guard switched off in config — falls back to the
+// defaults rather than silently disabling every budget.
+func (s *Service) activeContextPolicy() contextguard.Policy {
+	policy := s.contextPolicy
+	if policy.Validate() != nil {
+		policy = contextguard.DefaultPolicy()
+	}
+	if s.ContextMode() == ContextModeAggressive {
+		policy = contextguard.AggressivePolicy(policy)
+	}
+	return policy
 }
 
 func (s *Service) Chat(ctx context.Context, request translator.OpenAIRequest) (translator.OpenAIResponse, error) {
@@ -343,7 +423,11 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 		client := s.clientForModel(model)
 		candidate := request
 		candidate.Model = model
-		if effort := s.effortFor(model); effort != "" {
+		// A route-forced effort describes the task, so it wins over the per-model
+		// catalog override, which describes the model.
+		if forced := forcedEffort(ctx); forced != "" {
+			candidate.Effort = forced
+		} else if effort := s.effortFor(model); effort != "" {
 			candidate.Effort = effort
 		}
 		// Per candidate, not once per request: an alias chain can mix models whose
@@ -456,17 +540,24 @@ func (s *Service) prepareStreamCandidate(ctx context.Context, request translator
 	if unified == nil {
 		return s.prepareOpenAIRequest(ctx, request)
 	}
-	if !s.contextEnabled && !s.contextGuard && s.compressionMode != cache.CompressionAggressive {
+	if !s.contextPrepEnabled() && !s.contextGuard && s.compressionMode != cache.CompressionAggressive {
 		return request, nil
 	}
 	candidate := cloneProviderRequest(*unified)
 	candidate.Model = request.Model
 	candidate.Stream = request.Stream
+	// The caller resolved this candidate's effort (route-forced or per-model
+	// catalog override) on the OpenAI form. Rebuilding from the unified request
+	// silently dropped it, which is how a catalog effort never reached a
+	// streaming /v1/messages upstream while context work was enabled.
+	if request.Effort != "" {
+		candidate.Effort = request.Effort
+	}
 	if s.compressionMode == cache.CompressionAggressive {
 		compressToolResults(&candidate, s.compressionMode)
 	}
 	var err error
-	if s.contextEnabled {
+	if s.contextPrepEnabled() {
 		candidate, err = s.prepareContext(ctx, candidate)
 		if err != nil {
 			return translator.OpenAIRequest{}, err
@@ -485,7 +576,7 @@ func (s *Service) prepareStreamCandidate(ctx context.Context, request translator
 }
 
 func (s *Service) prepareOpenAIRequest(ctx context.Context, request translator.OpenAIRequest) (translator.OpenAIRequest, error) {
-	if !s.contextEnabled && !s.contextGuard && s.compressionMode != cache.CompressionAggressive {
+	if !s.contextPrepEnabled() && !s.contextGuard && s.compressionMode != cache.CompressionAggressive {
 		return request, nil
 	}
 	unified, err := translator.FromOpenAIRequest(request)
@@ -495,7 +586,7 @@ func (s *Service) prepareOpenAIRequest(ctx context.Context, request translator.O
 	if s.compressionMode == cache.CompressionAggressive {
 		compressToolResults(&unified, s.compressionMode)
 	}
-	if s.contextEnabled {
+	if s.contextPrepEnabled() {
 		unified, err = s.prepareContext(ctx, unified)
 		if err != nil {
 			return translator.OpenAIRequest{}, err
@@ -547,12 +638,15 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 	var emptyResponse provider.Response
 	var sawEmpty bool
 	clampAttempts := map[string]int{}
+	trims := 0
 	for index := 0; index < len(chain); index++ {
 		model := chain[index]
 		client := s.clientForModel(model)
 		candidate := cloneProviderRequest(request)
 		candidate.Model = model
-		if effort := s.effortFor(model); effort != "" {
+		if forced := forcedEffort(ctx); forced != "" {
+			candidate.Effort = forced
+		} else if effort := s.effortFor(model); effort != "" {
 			candidate.Effort = effort
 		}
 		s.clampProviderOutput(&candidate)
@@ -561,7 +655,7 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		}
 		prepared := candidate
 		var err error
-		if s.contextEnabled {
+		if s.contextPrepEnabled() {
 			prepared, err = s.prepareContext(ctx, candidate)
 		} else if s.contextGuard {
 			err = s.guardContext(ctx, candidate)
@@ -602,10 +696,18 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		}
 		if !isCustom && (err != nil || s.oauthInference == nil) {
 			if client == nil {
-				if err != nil {
-					lastErr = err
-				} else {
+				if err == nil {
 					lastErr = ErrProviderUnavailable
+					continue
+				}
+				// OAuth-only deployments have no fallback client, so this is the only
+				// place an oauth rejection can be recovered from. Learn the window and
+				// re-attempt the same candidate on the shrunken history; otherwise move
+				// on exactly as before.
+				lastErr = err
+				s.learnContextWindow(model, 0, err)
+				if s.trimAfterContextRejection(ctx, model, &request, &trims, err) {
+					index--
 				}
 				continue
 			}
@@ -614,15 +716,22 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		}
 		if err != nil {
 			lastErr = err
-			// A context rejection is banked rather than retried: the prompt cannot be made
-			// to fit by re-sending it, so what the upstream just revealed is only useful to
-			// later turns and to the window reported back to the client.
+			// The rejection teaches the real window first, so the trim retry below
+			// budgets against what the upstream just revealed.
 			s.learnContextWindow(model, 0, err)
 			// An output-cap rejection is not retryable as sent, but it is retryable once
 			// the cap it just revealed is applied. Learn it and re-attempt this candidate
 			// so the caller never sees the 400.
 			if s.learnOutputLimit(model, requestedOutputTokens(upstream), clampAttempts[model], err) {
 				clampAttempts[model]++
+				index--
+				continue
+			}
+			// A context rejection is recoverable the same way the streaming path
+			// recovers: compact or trim the shared request and re-attempt this
+			// candidate. The helper mutates the outer request, so the retry's
+			// per-candidate clone starts from the smaller history.
+			if s.trimAfterContextRejection(ctx, model, &request, &trims, err) {
 				index--
 				continue
 			}
@@ -666,6 +775,11 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		return provider.Response{}, lastErr
 	}
 	usage := raw.Usage
+	// A reported prompt count plus the estimate of the same payload is a free
+	// calibration sample; the streaming path was the only teacher before this.
+	if usage.PromptTokensReported {
+		s.observeTokenScale(request.Model, 0, contextguard.EstimateRequest(request), usage.PromptTokens)
+	}
 	// As above: estimate each side independently so a partially reporting provider
 	// does not record a zero that is indistinguishable from a free request.
 	if usage.PromptTokens == 0 {
@@ -715,7 +829,7 @@ func (s *Service) guardContext(ctx context.Context, request provider.Request) er
 	if window > 0 {
 		limits = contextguard.Limits{Default: window, Models: map[string]int{request.Model: window}}
 	}
-	result, err := contextguard.Check(request, limits, s.contextPolicy)
+	result, err := contextguard.Check(request, limits, s.requestContextPolicy(request.Model))
 	if err != nil {
 		return err
 	}
@@ -727,48 +841,100 @@ func (s *Service) guardContext(ctx context.Context, request provider.Request) er
 	return nil
 }
 
+// requestContextPolicy resolves the policy for one request: the mode in force,
+// plus the estimate scale this model's own served turns have taught.
+//
+// While the measurement is young it passes through a conservative clamp — a bad
+// early sample applied to the budget could either erase the safety margin or
+// starve the request, and 0.6–1.5 covers both measured extremes (0.9 and 1.8)
+// with room. Once enough samples agree (calibConfidentSamples at or under
+// calibStableSpread), the measured value is applied as-is: the evidence takes
+// over from the guess, which is exactly what makes the ratio knobs stop needing
+// hand-tuning.
+func (s *Service) requestContextPolicy(model string) contextguard.Policy {
+	policy := s.activeContextPolicy()
+	scale := s.tokenScaleFor(model)
+	low, high := 0.6, 1.5
+	if scale.samples >= calibConfidentSamples && scale.spread <= calibStableSpread {
+		low, high = minEstimatePerToken, maxEstimatePerToken
+	}
+	policy.EstimateScale = min(max(scale.estimatePerToken, low), high)
+	return policy
+}
+
+// contextPrepOutcome is what prepareContext reports about one mutated request.
+type contextPrepOutcome struct {
+	stage        string
+	beforeTokens int
+	afterTokens  int
+	window       int
+	summaryModel string
+}
+
 func (s *Service) prepareContext(ctx context.Context, request provider.Request) (provider.Request, error) {
-	if !s.contextEnabled {
+	if !s.contextPrepEnabled() {
 		return request, nil
 	}
+	start := time.Now()
+	prepared, outcome, err := s.prepareContextStages(ctx, request)
+	if err != nil {
+		return provider.Request{}, err
+	}
+	if outcome.stage != "" {
+		// One line per mutated request — the success ledger. The Warn lines inside
+		// the stages remain the failure diagnostics.
+		slog.Info("context pipeline mutated request",
+			"model", request.Model, "stage", outcome.stage,
+			"before_tokens", outcome.beforeTokens, "after_tokens", outcome.afterTokens,
+			"window", outcome.window, "summary_model", outcome.summaryModel,
+			"duration", time.Since(start).Round(time.Millisecond))
+	}
+	return prepared, nil
+}
+
+func (s *Service) prepareContextStages(ctx context.Context, request provider.Request) (provider.Request, contextPrepOutcome, error) {
+	policy := s.requestContextPolicy(request.Model)
 	limits := s.contextLimits
 	if window := s.resolveContextWindow(ctx, request.Model); window > 0 {
 		limits = contextguard.Limits{Default: window, Models: map[string]int{request.Model: window}}
 	}
-	prepared, err := contextguard.Prepare(request, limits, s.contextPolicy)
+	outcome := contextPrepOutcome{window: limits.Window(request.Model)}
+	prepared, err := contextguard.Prepare(request, limits, policy)
+	outcome.beforeTokens, outcome.afterTokens = prepared.BeforeTokens, prepared.AfterTokens
 	if err != nil {
 		if errors.Is(err, contextguard.ErrBudgetExceeded) {
-			return s.trimToBudget(request, limits)
+			return s.trimStage(request, limits, policy, outcome)
 		}
-		return provider.Request{}, err
+		return provider.Request{}, outcome, err
+	}
+	if prepared.Compacted {
+		outcome.stage = "compact"
 	}
 	if !prepared.NeedsSummary {
-		return prepared.Request, nil
+		return prepared.Request, outcome, nil
 	}
-	keepRecentTurns := s.summaryRecentTurns(prepared.Request, limits)
-	older := contextguard.SummaryMessages(prepared.Request.Messages, keepRecentTurns)
+	keepRecentTurns := s.summaryRecentTurns(prepared.Request, limits, policy)
+	older := contextguard.SummaryMessages(prepared.Request.Messages, keepRecentTurns, policy.BoundaryQuantum)
 	if len(older) == 0 || s.summarizer == nil {
-		if contextguard.ExceedsHardLimit(prepared, s.contextPolicy) {
-			return s.trimToBudget(prepared.Request, limits)
+		if contextguard.ExceedsHardLimit(prepared, policy) {
+			return s.trimStage(prepared.Request, limits, policy, outcome)
 		}
-		return prepared.Request, nil
+		return prepared.Request, outcome, nil
 	}
-	model := prepared.Request.Model
-	if s.summaryModel != "" {
-		model = s.summaryModel
-	}
+	model := s.resolveSummaryModel(prepared.Request.Model)
+	outcome.summaryModel = model
 	// Summarizing means sending the backlog to a model, so the summary call is
 	// itself bound by the context window. Once the backlog alone overflows, the
 	// call cannot succeed — it just burns the whole summary timeout before the
 	// deterministic trim runs anyway, which showed up as a flat 60s added to
 	// time-to-first-token on every oversized turn.
-	if !s.summaryInputFits(older, model, limits) {
-		if contextguard.ExceedsHardLimit(prepared, s.contextPolicy) {
+	if !s.summaryInputFits(older, model, limits, policy) {
+		if contextguard.ExceedsHardLimit(prepared, policy) {
 			slog.Warn("summary backlog exceeds the context window; trimming oldest turns without summarizing",
 				"model", prepared.Request.Model, "summary_model", model, "backlog_messages", len(older))
-			return s.trimToBudget(prepared.Request, limits)
+			return s.trimStage(prepared.Request, limits, policy, outcome)
 		}
-		return prepared.Request, nil
+		return prepared.Request, outcome, nil
 	}
 	key, keyErr := contextguard.SummaryKey(model, s.summaryMaxTokens, older)
 	summaryContext, cancel := context.WithTimeout(ctx, s.summaryTimeout)
@@ -785,36 +951,66 @@ func (s *Service) prepareContext(ctx context.Context, request provider.Request) 
 	}
 	cancel()
 	if err != nil || strings.TrimSpace(summary) == "" {
-		if contextguard.ExceedsHardLimit(prepared, s.contextPolicy) {
+		if contextguard.ExceedsHardLimit(prepared, policy) {
 			slog.Warn("summarization unavailable; trimming oldest turns", "model", prepared.Request.Model, "error", err)
-			return s.trimToBudget(prepared.Request, limits)
+			return s.trimStage(prepared.Request, limits, policy, outcome)
 		}
-		return prepared.Request, nil
+		return prepared.Request, outcome, nil
 	}
-	summarized := contextguard.ApplySummary(prepared.Request, summary, keepRecentTurns)
-	verified, verifyErr := contextguard.Prepare(summarized, limits, s.contextPolicy)
-	if verifyErr != nil || contextguard.ExceedsHardLimit(verified, s.contextPolicy) {
-		return s.trimToBudget(summarized, limits)
+	summarized := contextguard.ApplySummary(prepared.Request, summary, keepRecentTurns, policy.BoundaryQuantum)
+	outcome.stage = "summarize"
+	verified, verifyErr := contextguard.Prepare(summarized, limits, policy)
+	if verifyErr != nil || contextguard.ExceedsHardLimit(verified, policy) {
+		return s.trimStage(summarized, limits, policy, outcome)
 	}
-	return verified.Request, nil
+	outcome.afterTokens = verified.AfterTokens
+	return verified.Request, outcome, nil
+}
+
+// resolveSummaryModel picks who writes proxy summaries: the explicit configured
+// summarizer, else the compact model — the operator already chose it as the fast
+// summarizer for client compacts — else the request's own model.
+func (s *Service) resolveSummaryModel(requestModel string) string {
+	if s.summaryModel != "" {
+		return s.summaryModel
+	}
+	if compact := s.CompactModel(); compact != "" {
+		return compact
+	}
+	return requestModel
 }
 
 // summaryInputFits reports whether the backlog plus the summary's own output
 // still fits the window the summarization request would be sent under.
-func (s *Service) summaryInputFits(older []provider.Message, model string, limits contextguard.Limits) bool {
+func (s *Service) summaryInputFits(older []provider.Message, model string, limits contextguard.Limits, policy contextguard.Policy) bool {
 	window := limits.Window(model)
 	if window <= 0 {
 		return true
 	}
 	tokens := contextguard.EstimateRequest(provider.Request{Model: model, Messages: older})
-	return tokens+s.summaryMaxTokens+s.contextPolicy.ReserveTokens <= window
+	return tokens+s.summaryMaxTokens+policy.ReserveTokens <= window
+}
+
+// trimStage runs the deterministic trim and stamps the outcome accordingly.
+func (s *Service) trimStage(request provider.Request, limits contextguard.Limits, policy contextguard.Policy, outcome contextPrepOutcome) (provider.Request, contextPrepOutcome, error) {
+	trimmed, err := s.trimToBudget(request, limits, policy)
+	if err != nil {
+		return provider.Request{}, outcome, err
+	}
+	if outcome.stage == "summarize" {
+		outcome.stage = "summarize+trim"
+	} else {
+		outcome.stage = "trim"
+	}
+	outcome.afterTokens = contextguard.EstimateRequest(trimmed)
+	return trimmed, outcome, nil
 }
 
 // trimToBudget is the deterministic last resort before rejecting a request.
 // Dropping whole older turns is lossy, but it keeps the session alive; a hard
 // rejection ends the turn and leaves the caller with nothing to continue from.
-func (s *Service) trimToBudget(request provider.Request, limits contextguard.Limits) (provider.Request, error) {
-	budget := contextguard.HardBudget(request, limits, s.contextPolicy)
+func (s *Service) trimToBudget(request provider.Request, limits contextguard.Limits, policy contextguard.Policy) (provider.Request, error) {
+	budget := contextguard.HardBudget(request, limits, policy)
 	trimmed, ok := contextguard.TrimOldestTurns(request, budget)
 	if !ok {
 		return provider.Request{}, contextguard.ErrBudgetExceeded
@@ -824,12 +1020,12 @@ func (s *Service) trimToBudget(request provider.Request, limits contextguard.Lim
 	return trimmed, nil
 }
 
-func (s *Service) summaryRecentTurns(request provider.Request, limits contextguard.Limits) int {
-	keep := s.contextPolicy.KeepRecentTurns
+func (s *Service) summaryRecentTurns(request provider.Request, limits contextguard.Limits, policy contextguard.Policy) int {
+	keep := policy.KeepRecentTurns
 	for keep > 1 {
-		probe := contextguard.ApplySummary(request, strings.Repeat("s", max(s.summaryMaxTokens, 1)*4), keep)
-		prepared, err := contextguard.Prepare(probe, limits, s.contextPolicy)
-		if err == nil && !contextguard.ExceedsHardLimit(prepared, s.contextPolicy) {
+		probe := contextguard.ApplySummary(request, strings.Repeat("s", max(s.summaryMaxTokens, 1)*4), keep, policy.BoundaryQuantum)
+		prepared, err := contextguard.Prepare(probe, limits, policy)
+		if err == nil && !contextguard.ExceedsHardLimit(prepared, policy) {
 			break
 		}
 		keep--

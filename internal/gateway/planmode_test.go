@@ -79,10 +79,19 @@ func TestPlanModeActive(t *testing.T) {
 			name:     "marker echoed by the assistant",
 			messages: []translator.AnthropicMessage{userText("hi"), assistantText(enter)},
 		},
+		{
+			name:     "plan marker in the top-level system block",
+			messages: []translator.AnthropicMessage{userText("continue")},
+			want:     true,
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			got := planModeActive(translator.AnthropicRequest{Messages: testCase.messages})
+			request := translator.AnthropicRequest{Messages: testCase.messages}
+			if testCase.name == "plan marker in the top-level system block" {
+				request.System = []translator.AnthropicContent{{Type: "text", Text: enter}}
+			}
+			got := planModeActive(request)
 			if got != testCase.want {
 				t.Fatalf("planModeActive = %v, want %v", got, testCase.want)
 			}

@@ -16,6 +16,30 @@ type Policy struct {
 	HardRatio       float64
 	KeepRecentTurns int
 	ReserveTokens   int
+	// Aggressive enables the lossy history stages — superseded-result collapse and
+	// head/tail truncation of old bulky tool results — on top of the always-safe
+	// thinking elision and exact dedup. Recent turns stay byte-for-byte either way.
+	Aggressive bool
+	// TruncateRatio is the share of the available budget above which old unique
+	// tool results are truncated (aggressive mode only). It sits between SoftRatio
+	// and SummarizeRatio so mechanical truncation gets a chance before the LLM
+	// summary does.
+	TruncateRatio float64
+	// TruncateThresholdBytes is the size below which an old tool result is never
+	// truncated; TruncateHeadBytes/TruncateTailBytes are what survives of a larger
+	// one. Zero values fall back to the package defaults.
+	TruncateThresholdBytes int
+	TruncateHeadBytes      int
+	TruncateTailBytes      int
+	// BoundaryQuantum quantizes the old/recent boundary to a K-message grid so the
+	// compacted prefix stays byte-identical for K consecutive appended messages —
+	// without it every new message shifts the boundary and rewrites a prefix the
+	// upstream had cached. Zero or one disables quantization.
+	BoundaryQuantum int
+	// EstimateScale is the learned ratio of estimated tokens to the upstream's real
+	// count for this model. Budgets are token-space while estimates are not, so the
+	// available budget is multiplied by this before any comparison. Zero means 1.0.
+	EstimateScale float64
 }
 
 type Limits struct {
@@ -42,7 +66,21 @@ type Result struct {
 }
 
 func DefaultPolicy() Policy {
-	return Policy{SoftRatio: 0.78, SummarizeRatio: 0.88, HardRatio: 0.96, KeepRecentTurns: 6, ReserveTokens: 2048}
+	return Policy{
+		SoftRatio: 0.78, SummarizeRatio: 0.88, HardRatio: 0.96, KeepRecentTurns: 6, ReserveTokens: 2048,
+		TruncateRatio: 0.82, TruncateThresholdBytes: defaultTruncateThreshold,
+		TruncateHeadBytes: defaultTruncateHead, TruncateTailBytes: defaultTruncateTail,
+		BoundaryQuantum: defaultBoundaryQuantum,
+	}
+}
+
+// AggressivePolicy is base with the lossy history stages switched on.
+func AggressivePolicy(base Policy) Policy {
+	base.Aggressive = true
+	if base.TruncateRatio <= 0 {
+		base.TruncateRatio = 0.82
+	}
+	return base
 }
 
 func (limits Limits) Window(model string) int {
@@ -113,7 +151,31 @@ func (policy Policy) Validate() error {
 	if policy.KeepRecentTurns < 1 || policy.ReserveTokens < 0 {
 		return fmt.Errorf("recent turns must be positive and reserve tokens cannot be negative")
 	}
+	if policy.Aggressive && policy.TruncateRatio > 0 &&
+		(policy.TruncateRatio < policy.SoftRatio || policy.TruncateRatio >= policy.SummarizeRatio) {
+		return fmt.Errorf("truncate ratio must satisfy soft <= truncate < summarize")
+	}
+	if head, tail, threshold := policy.truncateSizes(); head+tail >= threshold {
+		return fmt.Errorf("truncate head+tail must stay under the truncate threshold")
+	}
+	if policy.BoundaryQuantum < 0 {
+		return fmt.Errorf("boundary quantum cannot be negative")
+	}
+	if policy.EstimateScale != 0 && (policy.EstimateScale < 0.25 || policy.EstimateScale > 6) {
+		return fmt.Errorf("estimate scale must be 0 or within [0.25, 6]")
+	}
 	return nil
+}
+
+// scaledAvailable converts a token-space budget into estimate space using the
+// learned per-model ratio, so preflight decisions and the upstream tokenizer agree
+// about how much room is left. Without it the byte heuristic ran 1.8x high on
+// prose (compacting 40% early) and 0.9x low on dense text (missing real overflows).
+func scaledAvailable(available int, policy Policy) int {
+	if policy.EstimateScale <= 0 {
+		return available
+	}
+	return int(float64(available) * policy.EstimateScale)
 }
 
 func Check(request provider.Request, limits Limits, policy Policy) (CheckResult, error) {
@@ -122,7 +184,7 @@ func Check(request provider.Request, limits Limits, policy Policy) (CheckResult,
 	}
 	window := limits.Window(request.Model)
 	inputTokens := EstimateRequest(request)
-	safeLimit := window - outputReserve(request, policy, window) - safetyReserve(window)
+	safeLimit := scaledAvailable(window-outputReserve(request, policy, window)-safetyReserve(window), policy)
 	// EstimateRequest is intentionally conservative and is not tokenizer-authoritative.
 	// Crossing the policy threshold is telemetry only; upstream must make the hard
 	// rejection with its exact tokenizer and actual model context window.
@@ -143,14 +205,14 @@ func Prepare(request provider.Request, limits Limits, policy Policy) (Result, er
 	result := Result{Request: cloneRequest(request), Window: limits.Window(request.Model)}
 	result.BeforeTokens = EstimateRequest(result.Request)
 	result.AfterTokens = result.BeforeTokens
-	available := result.Window - outputReserve(request, policy, result.Window) - safetyReserve(result.Window)
+	available := scaledAvailable(result.Window-outputReserve(request, policy, result.Window)-safetyReserve(result.Window), policy)
 	if available < 1 {
 		return result, ErrBudgetExceeded
 	}
 	if float64(result.BeforeTokens) < float64(available)*policy.SoftRatio {
 		return result, nil
 	}
-	compact(&result.Request, policy, available)
+	compact(&result.Request, policy, available, result.BeforeTokens)
 	result.AfterTokens = EstimateRequest(result.Request)
 	result.SavedTokens = max(result.BeforeTokens-result.AfterTokens, 0)
 	result.Compacted = result.SavedTokens > 0
@@ -165,7 +227,7 @@ func Prepare(request provider.Request, limits Limits, policy Policy) (Result, er
 // Callers use it to trim deterministically instead of failing the request.
 func HardBudget(request provider.Request, limits Limits, policy Policy) int {
 	window := limits.Window(request.Model)
-	available := window - outputReserve(request, policy, window) - safetyReserve(window)
+	available := scaledAvailable(window-outputReserve(request, policy, window)-safetyReserve(window), policy)
 	if available < 1 {
 		return 0
 	}
@@ -173,7 +235,7 @@ func HardBudget(request provider.Request, limits Limits, policy Policy) int {
 }
 
 func ExceedsHardLimit(result Result, policy Policy) bool {
-	available := result.Window - outputReserve(result.Request, policy, result.Window) - safetyReserve(result.Window)
+	available := scaledAvailable(result.Window-outputReserve(result.Request, policy, result.Window)-safetyReserve(result.Window), policy)
 	return available < 1 || float64(result.AfterTokens) >= float64(available)*policy.HardRatio
 }
 

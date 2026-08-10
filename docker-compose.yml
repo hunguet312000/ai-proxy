@@ -25,13 +25,24 @@ services:
       LITEROUTER_OAUTH_REFRESH_INTERVAL: "1m"
       LITEROUTER_OAUTH_CALLBACK_CONTAINER: "true"
       # Stability profile for Claude CLI: sticky_soft affinity + pressure migrate,
-      # no response cache, no prompt_cache_key injection, no context compact/summarize.
+      # no response cache, no prompt_cache_key injection. The context pipeline is ON
+      # in aggressive mode: requests approaching their model's window get old
+      # duplicate/superseded tool results collapsed and bulky old tool output
+      # truncated before the LLM summary or trim stages — this is what stops agent
+      # "Prompt is too long" failures. Cache compression stays "safe": the aggressive
+      # cache pass also mutates recent turns and is subsumed by this pipeline.
+      #
+      # The compact-request model (fast /compact routing) is configured in the
+      # dashboard (CLI tab → routing) and persists in the DB volume. Set
+      # LITEROUTER_ROUTER_COMPACT_MODEL here only to pin it as infrastructure —
+      # env wins over the dashboard at boot.
       LITEROUTER_ROUTER_STRATEGY: "sticky_soft"
       LITEROUTER_CACHE_RESPONSE_TTL: "15m"
       LITEROUTER_CACHE_RESPONSE_MAX_ENTRIES: "0"
       LITEROUTER_CACHE_COMPRESSION_MODE: "safe"
       LITEROUTER_CACHE_PROMPT_MIN_BYTES: "0"
-      LITEROUTER_CONTEXT_ENABLED: "false"
+      LITEROUTER_CONTEXT_ENABLED: "true"
+      LITEROUTER_CONTEXT_MODE: "aggressive"
       LITEROUTER_CONTEXT_GUARD_ENABLED: "true"
       LITEROUTER_OPENAI_BASE_URL: "https://api.openai.com/v1"
       LITEROUTER_XAI_BASE_URL: "https://api.x.ai/v1"

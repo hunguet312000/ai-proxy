@@ -771,12 +771,23 @@ const maxContextTrimRetries = 2
 // would cut history out of every long session to prevent a failure that has not
 // happened. Here the upstream has already refused, so there is nothing left to lose.
 func (o *streamOpener) retryAfterTrimmingContext(ctx context.Context, model string, err error) bool {
-	if o.unified == nil || o.trims >= maxContextTrimRetries || !isContextOverflow(err) {
+	if !o.service.trimAfterContextRejection(ctx, model, o.unified, &o.trims, err) {
 		return false
 	}
-	// Runs after learnContextWindowFrom, so this picks up the window the rejection just
+	o.index--
+	return true
+}
+
+// trimAfterContextRejection shrinks a refused request in place and reports whether
+// the caller should re-attempt the same candidate. Shared by the streaming opener
+// and the non-streaming /v1/messages candidate loop.
+func (s *Service) trimAfterContextRejection(ctx context.Context, model string, unified *provider.Request, trims *int, err error) bool {
+	if unified == nil || *trims >= maxContextTrimRetries || !isContextOverflow(err) {
+		return false
+	}
+	// Runs after learnContextWindow, so this picks up the window the rejection just
 	// revealed rather than the catalog's guess about it.
-	window := o.service.resolveContextWindow(ctx, model)
+	window := s.resolveContextWindow(ctx, model)
 	if window <= 0 {
 		return false
 	}
@@ -784,42 +795,53 @@ func (o *streamOpener) retryAfterTrimmingContext(ctx context.Context, model stri
 	// request's own model, which is the id the client asked for and not necessarily the
 	// candidate being attempted.
 	limits := contextguard.Limits{Default: window, Models: map[string]int{
-		model: window, o.unified.Model: window,
+		model: window, unified.Model: window,
 	}}
-	policy := o.service.contextPolicy
-	if policy.Validate() != nil {
-		// The guard may be switched off, leaving the policy zero-valued, which would make
-		// HardBudget return nothing and silently disable the backstop.
-		policy = contextguard.DefaultPolicy()
-	}
+	// activeContextPolicy already falls back to the defaults when the configured
+	// policy is zero-valued, which would make HardBudget return nothing and
+	// silently disable the backstop.
+	policy := s.activeContextPolicy()
 	// HardBudget answers in tokens, derived from the window. TrimOldestTurns compares
 	// against EstimateRequest. Handing one to the other unconverted is what made this trim
 	// far harsher than the model required: on prose the estimate reads well above the real
 	// count, so a token budget used as an estimate budget cuts history the model could
 	// have held. Observed live, 30 messages became 6 where 10 would have fit.
-	budget := o.service.estimateBudgetForTokens(model, contextguard.HardBudget(*o.unified, limits, policy))
+	budget := s.estimateBudgetForTokens(model, contextguard.HardBudget(*unified, limits, policy))
 	// The upstream has refused a request that this budget may well call acceptable —
 	// which only means the window belief or the estimate is wrong. Shrinking by a
 	// quarter regardless is what guarantees the retry is smaller than what was just
 	// rejected; without it, TrimOldestTurns reports success having changed nothing
 	// (its contract for "already fits") and the same payload goes back up forever.
-	if shrunk := estimateSentTokens(*o.unified) * 3 / 4; budget <= 0 || shrunk < budget {
+	sent := estimateSentTokens(*unified)
+	if shrunk := sent * 3 / 4; budget <= 0 || shrunk < budget {
 		budget = shrunk
 	}
-	trimmed, ok := contextguard.TrimOldestTurns(*o.unified, budget)
-	before := len(o.unified.Messages)
+	// Mechanical compaction first, at maximal aggressiveness: the upstream has
+	// already refused, so prefix stability is lost either way, and truncating old
+	// tool output keeps every turn where trimming drops whole ones. The strict
+	// shrink check keeps an already-compacted payload from being re-sent verbatim.
+	compacted := contextguard.AggressiveCompact(*unified, policy)
+	if tokens := contextguard.EstimateRequest(compacted); tokens <= budget && tokens < sent {
+		*unified = compacted
+		*trims++
+		slog.Warn("upstream refused the prompt as too long; compacted old tool output and retrying",
+			"model", model, "context_window", window, "budget_tokens", budget,
+			"estimate_tokens", tokens, "attempt", *trims)
+		return true
+	}
+	trimmed, ok := contextguard.TrimOldestTurns(*unified, budget)
+	before := len(unified.Messages)
 	// Trimming that removed nothing cannot make the retry succeed. A single turn too
 	// large for the model is the honest end of the line: there is no older history left
 	// to drop, and reporting the overflow lets the client decide.
 	if !ok || len(trimmed.Messages) >= before {
 		return false
 	}
-	*o.unified = trimmed
-	o.trims++
-	o.index--
+	*unified = trimmed
+	*trims++
 	slog.Warn("upstream refused the prompt as too long; dropped oldest turns and retrying",
 		"model", model, "context_window", window, "budget_tokens", budget,
-		"before_messages", before, "after_messages", len(trimmed.Messages), "attempt", o.trims)
+		"before_messages", before, "after_messages", len(trimmed.Messages), "attempt", *trims)
 	return true
 }
 
@@ -912,7 +934,9 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 		client := s.streamClientForModel(model)
 		candidate := o.request
 		candidate.Model = model
-		if effort := s.effortFor(model); effort != "" {
+		if forced := forcedEffort(ctx); forced != "" {
+			candidate.Effort = forced
+		} else if effort := s.effortFor(model); effort != "" {
 			candidate.Effort = effort
 		}
 		candidate, err := s.prepareStreamCandidate(ctx, candidate, o.unified)

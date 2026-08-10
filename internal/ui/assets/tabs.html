@@ -534,15 +534,28 @@ sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
         <form class="form-grid" hx-post="/ui/routing" hx-target="find .cli-plan-result" hx-swap="innerHTML">
           <label class="model-field-label"><span class="field-hint" title="Routed by LiteRouter, not written to Claude Code. Serves any turn taken while plan mode is active, whatever model the client asked for — detected from the transcript, so unlike opusplan it still works above 200k prompt tokens. Applies immediately, no restart. Empty turns it off.">Plan</span>
             <div class="model-field">
-              <input class="field grow" name="plan_model" value="{{.PlanModel}}" list="model-options" placeholder="strong · plan mode only" data-model-input="plan_model">
+              <input class="field grow" name="plan_model" value="{{.PlanModel}}" list="model-options" placeholder="pick a strong model — empty turns this off" data-model-input="plan_model">
               <button class="btn secondary sm" type="button" data-open-model-picker="plan_model" data-picker-title="Select model for plan mode">Browse</button>
             </div>
+          </label>
+          <label class="model-field-label"><span class="field-hint" title="Serves detected Claude Code /compact and auto-compact requests — recognised by the fixed summarization instruction, no tools, and a large payload. Routed at medium effort, which is where the 5-minute compacts actually went: max-effort reasoning over the whole history. Picking the session model here still helps, because the forced medium effort applies either way. Also writes the proxy&#39;s own summaries unless context.summarize_model overrides it. Empty leaves compaction on the session model, untouched.">Compact</span>
+            <div class="model-field">
+              <input class="field grow" name="compact_model" value="{{.CompactModel}}" list="model-options" placeholder="pick a fast model — empty turns this off" data-model-input="compact_model">
+              <button class="btn secondary sm" type="button" data-open-model-picker="compact_model" data-picker-title="Select model for compact requests">Browse</button>
+            </div>
+          </label>
+          <label class="model-field-label"><span class="field-hint" title="LiteRouter&#39;s own pipeline for requests approaching their model&#39;s window. Safe: drop old reasoning and exact-duplicate tool results — lossless. Aggressive: additionally collapse re-reads superseded by a newer identical call and head/tail-truncate old bulky tool output; recent turns stay byte-for-byte and error output is kept. Off forwards requests untouched. Applies immediately.">Proxy compaction</span>
+            <select class="field" name="context_mode">
+              <option value="off"{{if eq .ContextMode "off"}} selected{{end}}>off — forward untouched</option>
+              <option value="safe"{{if eq .ContextMode "safe"}} selected{{end}}>safe — lossless only</option>
+              <option value="aggressive"{{if eq .ContextMode "aggressive"}} selected{{end}}>aggressive — truncate old tool output</option>
+            </select>
           </label>
           <details class="form-section"{{if or .LongContextModel .ImageModel .TextOnlyModels}} open{{end}}>
             <summary><span>Advanced routing</span><em>long context · threshold · text-only · image</em></summary>
             <label class="model-field-label"><span class="field-hint" title="Takes over when a turn grows past the threshold below, measured against the window of the model that would otherwise serve it. Routing costs nothing — the alternatives are the client compacting or LiteRouter trimming, and both throw away conversation. Set this and Max context &#39;auto&#39; reports this model&#39;s window, so the session is allowed the room it actually has. Plan mode still wins, unless the plan model cannot hold the turn either.">Long context</span>
               <div class="model-field">
-                <input class="field grow" name="long_context_model" value="{{.LongContextModel}}" list="model-options" placeholder="big window · optional" data-model-input="long_context_model">
+                <input class="field grow" name="long_context_model" value="{{.LongContextModel}}" list="model-options" placeholder="pick a model with a bigger window — empty turns this off" data-model-input="long_context_model">
                 <button class="btn secondary sm" type="button" data-open-model-picker="long_context_model" data-picker-title="Select model for long context">Browse</button>
               </div>
             </label>
@@ -557,7 +570,7 @@ sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
             </label>
             <label class="model-field-label"><span class="field-hint" title="Takes any turn carrying an image whose routed model was declared text-only above. Only fires for that pair — an image alone never reroutes, so a screenshot during plan mode stays on the plan model when that model reads images. Only the newest turn counts: once an image is history it is replaced with a placeholder and the session returns to the cheap model, instead of following the picture onto the vision model for every remaining turn and paying for its base64 each time. Left empty the two cases split: an image you attached is refused with a message naming the cause, while an image a tool returned (Read on a PNG, an MCP screenshot) is replaced with a placeholder so the turn survives — a subagent should not die over one incidental file.">Image</span>
               <div class="model-field">
-                <input class="field grow" name="image_model" value="{{.ImageModel}}" list="model-options" placeholder="vision · only if needed" data-model-input="image_model">
+                <input class="field grow" name="image_model" value="{{.ImageModel}}" list="model-options" placeholder="pick a vision model — empty refuses image turns" data-model-input="image_model">
                 <button class="btn secondary sm" type="button" data-open-model-picker="image_model" data-picker-title="Select model for image turns">Browse</button>
               </div>
             </label>

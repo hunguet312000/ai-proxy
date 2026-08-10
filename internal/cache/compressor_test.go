@@ -97,6 +97,66 @@ func TestJSONCompressionStaysValid(t *testing.T) {
 	}
 }
 
+func TestCompressForHistorySmallUnchanged(t *testing.T) {
+	result := CompressForHistory("read_file", "small")
+	if result.Compressed != "small" || result.Method != "none" || result.SavedTokens != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestCompressForHistoryCompressesEvidenceTools(t *testing.T) {
+	// Past the compaction boundary a Read result is no longer edit-quoting material,
+	// so unlike the live-turn path evidence tools are fair game and unknown tools
+	// fall back to head/tail rather than "none".
+	content := numberedLines(400)
+	for _, tool := range []string{"read_file", "cat", "bash", "mcp__custom__thing"} {
+		result := CompressForHistory(tool, content)
+		if result.Method != "head_tail" || len(result.Compressed) >= len(content) {
+			t.Fatalf("tool %q: method=%q len=%d (original %d)", tool, result.Method, len(result.Compressed), len(content))
+		}
+		if !strings.Contains(result.Compressed, "line-000") || !strings.Contains(result.Compressed, "line-399") {
+			t.Fatalf("tool %q lost head or tail: %q", tool, result.Compressed[:200])
+		}
+	}
+}
+
+func TestCompressForHistoryGrepKeepsMatchContext(t *testing.T) {
+	lines := make([]string, 500)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("context %d", index)
+	}
+	lines[250] = "file.go:42:MATCH"
+	result := CompressForHistory("rg", strings.Join(lines, "\n"))
+	if result.Method != "grep" {
+		t.Fatalf("method = %q", result.Method)
+	}
+	if !strings.Contains(result.Compressed, "file.go:42:MATCH") {
+		t.Fatalf("match line lost: %q", result.Compressed)
+	}
+}
+
+func TestCompressForHistoryStructuredFormats(t *testing.T) {
+	var diff strings.Builder
+	diff.WriteString("diff --git a/file.go b/file.go\n@@ -1,500 +1,500 @@\n")
+	diff.WriteString(strings.Repeat(" context\n", 500))
+	diff.WriteString("-old\n+new\n")
+	if result := CompressForHistory("bash", diff.String()); result.Method != "git_diff" || !strings.Contains(result.Compressed, "+new") {
+		t.Fatalf("diff = %#v", result)
+	}
+	jsonContent := "{\n  \"items\": [\n" + strings.Repeat("    {\"value\": 1},\n", 300) + "    {\"value\": 2}\n  ]\n}"
+	if result := CompressForHistory("output", jsonContent); result.Method != "json_compact" || !json.Valid([]byte(result.Compressed)) {
+		t.Fatalf("json = %#v", result)
+	}
+}
+
+func TestCompressForHistoryNeverExpands(t *testing.T) {
+	content := strings.Repeat("x", compressionThreshold)
+	result := CompressForHistory("unknown", content)
+	if len(result.Compressed) > len(content) {
+		t.Fatalf("compressed grew from %d to %d", len(content), len(result.Compressed))
+	}
+}
+
 func TestCompressionNeverExpands(t *testing.T) {
 	content := strings.Repeat("x", compressionThreshold)
 	result := CompressToolResult("unknown", content)

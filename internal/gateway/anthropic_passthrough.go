@@ -100,6 +100,10 @@ func (s *Service) anthropicPassthroughStream(c echo.Context, request translator.
 			s.recordUsage(relay.usageEvent(streamErrorStatus(readErr)))
 			return true, relay.closeTruncated(c)
 		}
+		// A bytes-only calibration sample: this path never translates, so it has no
+		// estimate, but the payload length against the upstream's own count teaches
+		// the byte ratio that long-context routing thresholds ride on.
+		s.observeTokenScale(model, len(payload), 0, relay.promptTotal())
 		s.recordUsage(relay.usageEvent(""))
 		return true, relay.closeTruncated(c)
 	}
@@ -282,6 +286,12 @@ func (relay *anthropicRelay) closeTruncated(c echo.Context) error {
 	}
 	relay.sawStop = true
 	return writeSSE(c, "message_stop", map[string]string{"type": "message_stop"})
+}
+
+// promptTotal is the full prompt size the upstream counted: Anthropic reports
+// cache reads and writes separately from input_tokens, and all three were sent.
+func (relay *anthropicRelay) promptTotal() int {
+	return relay.inputTokens + relay.cacheRead + relay.cacheWrite
 }
 
 func (relay *anthropicRelay) reportedModel() string {
