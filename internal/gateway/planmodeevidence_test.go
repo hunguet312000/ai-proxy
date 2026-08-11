@@ -136,6 +136,26 @@ func TestSystemBlockCountsAsTheCurrentTurn(t *testing.T) {
 	}
 }
 
+func TestSystemRoleMessageCountsAsTheCurrentTurn(t *testing.T) {
+	request := translator.AnthropicRequest{
+		Model: "cx/gpt-5.6-luna",
+		Messages: []translator.AnthropicMessage{
+			userText("Earlier: " + planExitedMarker),
+			{Role: "system", Content: []translator.AnthropicContent{{
+				Type: "text", Text: planEnteredMarker + " The user indicated that they do not want to execute yet.",
+			}}},
+			userText("make a plan"),
+		},
+	}
+	active, evidence := planModeState(request)
+	if !active {
+		t.Fatalf("the system-role marker should have decided; evidence = %q", evidence)
+	}
+	if evidence != "marker in system instructions on the current turn" {
+		t.Fatalf("evidence = %q, want the system-instructions tier", evidence)
+	}
+}
+
 func TestNoMarkerAnywhereReportsSo(t *testing.T) {
 	request := translator.AnthropicRequest{
 		Model:    "cx/gpt-5.6-luna",

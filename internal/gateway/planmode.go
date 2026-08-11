@@ -69,8 +69,13 @@ func planModeState(request translator.AnthropicRequest) (active bool, evidence s
 	if active, found := planMarkerState(current); found {
 		return active, "marker on the current turn"
 	}
-	// Only text blocks on user messages can carry a reminder, so tool results — which
-	// are the bulk of a coding transcript — are skipped rather than searched.
+	// System/developer messages are current request instructions too. Claude Code 2.1.227
+	// places its plan marker in one of these message-shaped instruction blocks rather than
+	// in AnthropicRequest.System. Tool results — which are the bulk of a coding transcript —
+	// are still skipped rather than searched.
+	if active, found := planMarkerState(currentTurnSystemContent(request)); found {
+		return active, "marker in system instructions on the current turn"
+	}
 	for index := len(request.Messages) - 1; index >= 0; index-- {
 		message := request.Messages[index]
 		if message.Role != "user" {
@@ -83,18 +88,33 @@ func planModeState(request translator.AnthropicRequest) (active bool, evidence s
 	return false, "no marker"
 }
 
-// currentTurnContent is what describes this request rather than its past: the top-level
-// system block, plus the last user message. Claude Code has emitted the reminder in both
-// across client versions, so both are read as one.
-func currentTurnContent(request translator.AnthropicRequest) []translator.AnthropicContent {
+// currentTurnSystemContent contains instruction-shaped content that describes this request,
+// not its conversational history. Claude Code has emitted plan reminders in the top-level
+// system field and in system-role messages across client versions.
+func currentTurnSystemContent(request translator.AnthropicRequest) []translator.AnthropicContent {
 	content := append([]translator.AnthropicContent(nil), request.System...)
 	for index := len(request.Messages) - 1; index >= 0; index-- {
-		if request.Messages[index].Role != "user" {
+		message := request.Messages[index]
+		if message.Role != "system" && message.Role != "developer" {
 			continue
 		}
-		return append(content, request.Messages[index].Content...)
+		// Instruction messages are current-turn metadata, but older system messages may
+		// be retained in a reconstructed transcript. The newest instruction block wins.
+		return append(content, message.Content...)
 	}
 	return content
+}
+
+// currentTurnContent is the user-facing part of the current request: the last user message.
+// System instructions are checked separately so a trusted instruction marker cannot be
+// mistaken for quoted prose in that message.
+func currentTurnContent(request translator.AnthropicRequest) []translator.AnthropicContent {
+	for index := len(request.Messages) - 1; index >= 0; index-- {
+		if request.Messages[index].Role == "user" {
+			return request.Messages[index].Content
+		}
+	}
+	return nil
 }
 
 // reminderMarkerState reads only markers that sit inside a complete <system-reminder>
@@ -153,11 +173,10 @@ func planMarkerState(contents []translator.AnthropicContent) (active, found bool
 // planModeModel reports the model that should serve this turn when plan mode is
 // active and a plan model is configured.
 //
-// This exists because Claude Code's own opusplan setting gives up above 200k
-// prompt tokens: its plan-mode upgrade is gated on !exceeds200kTokens, so on a
-// large context the client silently plans with the cheap resting model — exactly
-// the sessions where a good plan matters most. Deciding here is not subject to
-// that gate.
+// This exists because Claude Code's own opusplan setting gives up above 200k prompt tokens:
+// its plan-mode upgrade is gated on !exceeds200kTokens, so on a large context the client
+// silently plans with the cheap resting model — exactly the sessions where a good plan
+// matters most. Deciding here is not subject to that gate.
 func (s *Service) planModeModel(request translator.AnthropicRequest) (string, bool) {
 	planModel := s.PlanModel()
 	if planModel == "" || planModel == request.Model {
