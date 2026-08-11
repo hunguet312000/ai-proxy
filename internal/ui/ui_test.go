@@ -657,7 +657,7 @@ func TestUIUsageAnalytics(t *testing.T) {
 				Recent: []storage.UsageEvent{{
 					ID: 1, Timestamp: now, Provider: "codex", Model: "cx/gpt-5.6-sol", Endpoint: "/v1/chat/completions",
 					Status: "ok", PromptTokens: 150100, CompletionTokens: 170, CachedTokens: 50, CostUSD: 0.021,
-					PromptTokensEstimated: true, CachedTokensReported: true,
+					Effort: "high", PromptTokensEstimated: true, CachedTokensReported: true,
 				}},
 			}, nil
 		},

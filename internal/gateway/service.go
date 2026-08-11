@@ -1359,6 +1359,8 @@ type UsageEvent struct {
 	PromptTokensEstimated     bool
 	CompletionTokensEstimated bool
 	CachedTokensReported      bool
+	// Effort is the reasoning effort sent upstream for this turn.
+	Effort string
 	// RequestModel is the id the client asked for, when it differs from Model.
 	//
 	// Model carries what the upstream reported, which is right for usage attribution but

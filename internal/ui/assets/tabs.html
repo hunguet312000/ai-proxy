@@ -1057,6 +1057,7 @@ wire_api = "responses"</pre>
             <th>Provider</th>
             <th>Model</th>
             <th>Kind</th>
+            <th>Effort</th>
             <th class="num">In</th>
             <th class="num">Out</th>
             <th class="num">Cached</th>
@@ -1071,6 +1072,7 @@ wire_api = "responses"</pre>
             <td><span class="prov-chip {{.Provider}}">{{providerLabel .Provider}}</span></td>
             <td class="model-cell" title="{{.Model}}">{{prettyModel .Model}}</td>
             <td><span class="kind-chip">{{endpointLabel .Endpoint}}</span></td>
+            <td><span class="effort-chip{{if eq .Effort ""}} unset{{end}}">{{if .Effort}}{{.Effort}}{{else}}—{{end}}</span></td>
             <td class="num" title="{{formatUsageInt .PromptTokens}} input tokens · {{if .PromptTokensEstimated}}estimated{{else}}reported by upstream{{end}}">{{if .PromptTokensEstimated}}<span class="usage-est">~</span>{{end}}{{formatUsageInt .PromptTokens}}</td>
             <td class="num" title="{{formatUsageInt .CompletionTokens}} output tokens · {{if .CompletionTokensEstimated}}estimated{{else}}reported by upstream{{end}}">{{if .CompletionTokensEstimated}}<span class="usage-est">~</span>{{end}}{{formatUsageInt .CompletionTokens}}</td>
             <td class="num" title="{{if .CachedTokensReported}}{{formatUsageInt .CachedTokens}} cached input tokens reported by upstream{{else}}Upstream did not report cached tokens{{end}}">{{if .CachedTokensReported}}{{formatUsageInt .CachedTokens}}{{else}}<span class="usage-unknown">—</span>{{end}}</td>

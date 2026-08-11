@@ -22,6 +22,11 @@ type UsageEvent struct {
 	PromptTokensEstimated     bool
 	CompletionTokensEstimated bool
 	CachedTokensReported      bool
+	// Effort is the reasoning effort actually sent upstream for this turn, which is not
+	// derivable from anything else on the row: it can come from the client, from the
+	// per-model dashboard setting, or be forced by a route (a compact turn is pinned to
+	// medium), and the last one to write it wins. Empty means none was sent.
+	Effort string
 }
 
 type UsageSummary struct {
@@ -67,8 +72,8 @@ func (s *Store) InsertUsageEvents(ctx context.Context, events []UsageEvent) erro
 	INSERT INTO usage_events (
 	  ts, provider, model, endpoint, status,
 	  prompt_tokens, completion_tokens, cached_tokens, total_tokens, cost_usd,
-	  prompt_estimated, completion_estimated, cached_reported
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	  prompt_estimated, completion_estimated, cached_reported, effort
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("prepare usage batch: %w", err)
 	}
@@ -97,6 +102,7 @@ func (s *Store) InsertUsageEvents(ctx context.Context, events []UsageEvent) erro
 			event.PromptTokensEstimated,
 			event.CompletionTokensEstimated,
 			event.CachedTokensReported,
+			strings.ToLower(strings.TrimSpace(event.Effort)),
 		); err != nil {
 			return fmt.Errorf("insert usage event: %w", err)
 		}
@@ -205,7 +211,7 @@ LIMIT 20`, sinceMs)
 
 	rrows, err := s.db.QueryContext(ctx, `
 SELECT id, ts, provider, model, endpoint, status, prompt_tokens, completion_tokens, cached_tokens, total_tokens, cost_usd,
-       prompt_estimated, completion_estimated, cached_reported
+       prompt_estimated, completion_estimated, cached_reported, COALESCE(effort,'')
 FROM usage_events
 WHERE ts >= ?
 ORDER BY ts DESC
@@ -219,7 +225,8 @@ LIMIT ?`, sinceMs, recentLimit)
 		var ts int64
 		if err := rrows.Scan(&e.ID, &ts, &e.Provider, &e.Model, &e.Endpoint, &e.Status,
 			&e.PromptTokens, &e.CompletionTokens, &e.CachedTokens, &e.TotalTokens, &e.CostUSD,
-			&e.PromptTokensEstimated, &e.CompletionTokensEstimated, &e.CachedTokensReported); err != nil {
+			&e.PromptTokensEstimated, &e.CompletionTokensEstimated, &e.CachedTokensReported,
+			&e.Effort); err != nil {
 			return out, err
 		}
 		e.Timestamp = time.UnixMilli(ts).UTC()

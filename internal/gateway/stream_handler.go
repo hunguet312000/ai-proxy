@@ -75,7 +75,7 @@ func (s *Service) chatStream(c echo.Context, request translator.OpenAIRequest) e
 			// caller reports as a mid-response server error, so close the stream
 			// cleanly instead and let the caller keep the partial completion.
 			slog.Warn("upstream stream ended early", "endpoint", "/v1/chat/completions", "model", lastModel, "status", streamErrorStatus(readErr), "error", readErr)
-			s.recordUsage(UsageEvent{Provider: s.providerNameFor(request.Model), Model: lastModel, Endpoint: "/v1/chat/completions", Status: streamErrorStatus(readErr)})
+			s.recordUsage(UsageEvent{Provider: s.providerNameFor(request.Model), Model: lastModel, Endpoint: "/v1/chat/completions", Status: streamErrorStatus(readErr), Effort: opener.sentEffort})
 			return writeSSERaw(c, "[DONE]")
 		}
 		if !delivered {
@@ -88,6 +88,7 @@ func (s *Service) chatStream(c echo.Context, request translator.OpenAIRequest) e
 			CachedTokens:          lastUsage.PromptTokensDetails.CachedTokens,
 			PromptTokensEstimated: promptEstimated, CompletionTokensEstimated: completionEstimated,
 			CachedTokensReported: lastUsage.PromptTokensDetails.CachedTokensReported,
+			Effort:               opener.sentEffort,
 		})
 		return writeSSERaw(c, "[DONE]")
 	}
@@ -223,7 +224,8 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 				// smallest bucket and made "does this break at large context?"
 				// unanswerable from the data. Record the estimate here too.
 				s.recordUsage(UsageEvent{Provider: s.providerNameFor(request.Model), Model: request.Model, Endpoint: "/v1/messages",
-					Status: streamErrorStatus(readErr), PromptTokens: promptTokens, PromptTokensEstimated: true})
+					Status: streamErrorStatus(readErr), PromptTokens: promptTokens, PromptTokensEstimated: true,
+					Effort: opener.sentEffort})
 				if errors.Is(readErr, errEmptyUpstreamStream) {
 					// Every candidate produced an output-free turn. The client still needs a
 					// well-formed message, so fall back to the empty-turn padding here —
@@ -249,7 +251,7 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 				}
 				return messagesGatewayError(c, readErr)
 			}
-			return s.closeBrokenStream(c, request, state, readErr)
+			return s.closeBrokenStream(c, request, state, opener.sentEffort, readErr)
 		}
 		if err := state.finish(c); err != nil {
 			return err
@@ -292,6 +294,7 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 			CachedTokens:          usage.PromptTokensDetails.CachedTokens,
 			PromptTokensEstimated: promptEstimated, CompletionTokensEstimated: completionEstimated,
 			CachedTokensReported: usage.PromptTokensDetails.CachedTokensReported,
+			Effort:               opener.sentEffort,
 		})
 		return writeSSE(c, "message_stop", map[string]string{"type": "message_stop"})
 	}
@@ -301,13 +304,14 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 // an `event: error` frame. Claude Code treats a mid-stream error event as a failed
 // turn and reports "Server error mid-response"; a well-formed truncation lets the
 // caller keep what it already received and continue from there.
-func (s *Service) closeBrokenStream(c echo.Context, request translator.AnthropicRequest, state *anthropicStreamState, cause error) error {
+func (s *Service) closeBrokenStream(c echo.Context, request translator.AnthropicRequest, state *anthropicStreamState, effort string, cause error) error {
 	slog.Warn("upstream stream ended early", "endpoint", "/v1/messages", "model", request.Model,
 		"status", streamErrorStatus(cause), "prompt_tokens", state.promptTokens, "error", cause)
 	s.recordUsage(UsageEvent{
 		Provider: s.providerNameFor(request.Model), Model: request.Model, Endpoint: "/v1/messages",
 		Status: streamErrorStatus(cause), PromptTokens: state.promptTokens, PromptTokensEstimated: true,
 		CompletionTokens: estimateTextBytes(state.completionBytes), CompletionTokensEstimated: true,
+		Effort: effort,
 	})
 	if err := state.abort(c); err != nil {
 		return err
@@ -734,6 +738,11 @@ type streamOpener struct {
 	// describes the same bytes the upstream counted, so it is the one calibration may
 	// learn from.
 	sentEstimate int
+	// sentEffort is the reasoning effort the last attempt actually sent. Recorded here
+	// because it is decided per candidate — a forced route beats the per-model setting,
+	// which beats the client's own ask — so by the time the turn is being filed there is
+	// nothing left to derive it from.
+	sentEffort string
 }
 
 // retryAfterLearningOutputLimit turns an upstream's max_tokens rejection into a cap
@@ -962,6 +971,7 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 		}
 		candidate, sentEstimate, err := s.prepareStreamCandidate(ctx, candidate, o.unified)
 		o.sentEstimate = sentEstimate
+		o.sentEffort = candidate.Effort
 		if err != nil {
 			o.lastErr = err
 			if !errors.Is(err, contextguard.ErrBudgetExceeded) {

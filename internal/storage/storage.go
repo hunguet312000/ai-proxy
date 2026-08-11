@@ -237,6 +237,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 		"prompt_estimated INTEGER NOT NULL DEFAULT 0",
 		"completion_estimated INTEGER NOT NULL DEFAULT 0",
 		"cached_reported INTEGER NOT NULL DEFAULT 0",
+		// Empty for rows recorded before this column existed, and for a turn that sent no
+		// effort at all — the two are indistinguishable here on purpose, because both mean
+		// "nothing was chosen" as far as a reader of the row is concerned.
+		"effort TEXT NOT NULL DEFAULT ''",
 	} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE usage_events ADD COLUMN `+column); err != nil {
 			if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
