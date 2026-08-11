@@ -46,7 +46,7 @@ func CompressToolResultMode(toolName, content string, mode CompressionMode) Comp
 	}
 	var compressed, method string
 	switch {
-	case strings.Contains(content, "diff --git") || strings.HasPrefix(strings.TrimSpace(content), "commit "):
+	case looksLikeDiff(content):
 		compressed, method = compressDiff(content, mode), "git_diff"
 	case slices.Contains([]string{"ls", "tree", "find"}, name):
 		compressed, method = compressListing(content, mode), "listing"
@@ -82,7 +82,7 @@ func CompressForHistory(toolName, content string) CompressionResult {
 	name := strings.ToLower(filepath.Base(strings.TrimSpace(toolName)))
 	var compressed, method string
 	switch {
-	case strings.Contains(content, "diff --git") || strings.HasPrefix(strings.TrimSpace(content), "commit "):
+	case looksLikeDiff(content):
 		compressed, method = compressDiff(content, CompressionAggressive), "git_diff"
 	case slices.Contains([]string{"ls", "tree", "find"}, name):
 		compressed, method = compressListing(content, CompressionAggressive), "listing"
@@ -228,6 +228,22 @@ func grepMatchLine(line string) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(line), "match")
+}
+
+// looksLikeDiff reports whether content is diff output rather than content that merely
+// mentions one.
+//
+// Matching the substring anywhere was too eager, and the cost is not subtle: compressDiff
+// keeps hunk headers and drops everything around them, so any result that happened to
+// contain the literal lost nearly all of itself. Observed on a real transcript — an agent
+// read this very file, whose detection code carries the literal, and 9,082 bytes of Go
+// came back as 143. A diff announces itself at the start of a line, which is the thing
+// worth matching.
+func looksLikeDiff(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	return strings.HasPrefix(trimmed, "commit ") ||
+		strings.HasPrefix(trimmed, "diff --git ") ||
+		strings.Contains(content, "\ndiff --git ")
 }
 
 func compressHeadTail(content string, mode CompressionMode) string {

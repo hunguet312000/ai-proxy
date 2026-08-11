@@ -213,11 +213,11 @@ func truncateOldToolResults(request *provider.Request, boundary int, policy Poli
 	if boundary == 0 {
 		return
 	}
-	names := make(map[string]string)
+	calls := make(map[string]resultSource)
 	for _, message := range request.Messages {
 		for _, block := range message.Content {
 			if block.Type == "tool_use" && block.ToolUseID != "" {
-				names[block.ToolUseID] = block.Name
+				calls[block.ToolUseID] = resultSource{name: block.Name, input: block.Input}
 			}
 		}
 	}
@@ -228,11 +228,51 @@ func truncateOldToolResults(request *provider.Request, boundary int, policy Poli
 			if block.Type != "tool_result" || block.Text == "" || strings.HasPrefix(block.Text, proxyMarkerPrefix) {
 				continue
 			}
-			if replacement, ok := truncateToolResult(names[block.ToolUseID], block.ToolUseID, block.Text, block.IsError, policy); ok {
+			call := calls[block.ToolUseID]
+			if replacement, ok := truncateToolResult(call, block.ToolUseID, block.Text, block.IsError, policy); ok {
 				block.Text = replacement
 			}
 		}
 	}
+}
+
+// resultSource is the call that produced a tool result, carried to the truncation note
+// so it can say what to re-run. Both fields come from the tool_use block, which
+// truncation never touches — the note only makes salient what is already one message up.
+// Distinct from toolCall, which the supersede pass keys on a canonicalized form.
+type resultSource struct {
+	name  string
+	input json.RawMessage
+}
+
+// maxRecoveryArgumentBytes caps the arguments quoted in a truncation note. A file path
+// belongs there; the 40 KB body of a Write call does not — quoting that would grow the
+// prefix this stage exists to shrink.
+const maxRecoveryArgumentBytes = 200
+
+// recoveryHint is what the note tells the model to do to get the elided bytes back.
+//
+// Naming the call is the whole point of it: "re-run the tool" leaves the model to work
+// the call out from a tool_use_id, and models act on names and arguments, not ids. So
+// the note that mattered least — the one read exactly when the model needs the missing
+// content — was the one saying least.
+//
+// It is a pure function of the call being replaced, so the note stays byte-identical as
+// the conversation grows. That is the same property collapseSuperseded protects by
+// deliberately not naming the newer tool_use id: a note that changes later rewrites the
+// prefix and reprices the upstream cache for nothing.
+func recoveryHint(call resultSource) string {
+	if call.name == "" {
+		return "re-run the tool"
+	}
+	if len(call.input) == 0 {
+		return "re-run " + call.name
+	}
+	var compacted bytes.Buffer
+	if err := json.Compact(&compacted, call.input); err != nil || compacted.Len() > maxRecoveryArgumentBytes {
+		return "re-run " + call.name
+	}
+	return "re-run " + call.name + " with " + compacted.String()
 }
 
 // truncateToolResult shrinks one old bulky tool result: structure-aware
@@ -240,7 +280,7 @@ func truncateOldToolResults(request *provider.Request, boundary int, policy Poli
 // line-aligned head/tail cap. The head keeps the file paths and line numbers
 // that lead tool output; the tail keeps exit status and final errors. The marker
 // tells the model to re-run the tool rather than guess at elided content.
-func truncateToolResult(name, toolUseID, text string, isError bool, policy Policy) (string, bool) {
+func truncateToolResult(call resultSource, toolUseID, text string, isError bool, policy Policy) (string, bool) {
 	head, tail, threshold := policy.truncateSizes()
 	if isError {
 		if len(text) <= intactErrorBytes {
@@ -251,14 +291,41 @@ func truncateToolResult(name, toolUseID, text string, isError bool, policy Polic
 	if len(text) <= threshold {
 		return "", false
 	}
+	// spec carries what stays true about the tool's own output as the body is rewritten,
+	// so the note describes the output rather than whatever this stage left of it.
+	spec := elision{originalLines: lineCount(text), contiguous: true}
 	body := text
 	if !isError {
-		if result := cache.CompressForHistory(name, text); result.Method != "none" {
-			body = result.Compressed
+		// A head_tail compression is this stage's own operation counted in lines, with an
+		// elision note of its own. Running it first nested two notes — and, the reason it
+		// matters, renumbered the body: the range reported here described the compressed
+		// copy while appearing to describe the tool's output. Measured at 600 lines, the
+		// note claimed "lines 21-113 of 121" for content whose real gap was 21-592 of 600,
+		// which sends the model to re-read what it already has and leaves the rest missing.
+		//
+		// Structural methods earn their place — they keep the matches, hunks and highlights
+		// a positional cut destroys — and after one of those the gap is scattered rather
+		// than a span, which is what spec.contiguous records.
+		if result := cache.CompressForHistory(call.name, text); result.Method != "none" && result.Method != "head_tail" {
+			body, spec.contiguous = result.Compressed, false
 		}
 	}
-	if len(body) > head+tail {
-		body = headTailByBytes(body, head, tail)
+	switch {
+	case len(body) > head+tail:
+		body = headTailByBytes(body, head, tail, recoveryHint(call), spec)
+	case len(body) < len(text):
+		// Compression alone met the cap, so headTailByBytes never ran — and it was carrying
+		// the note. Seen on a real transcript: a 274-line file read collapsed to 143 bytes
+		// with nothing left saying content was dropped, let alone what to re-run. The note
+		// belongs to the truncation, not to whichever stage happened to perform it.
+		//
+		// It leads the body rather than trailing it. What survives a structural pass is
+		// dotted with the compressor's own small notes — "2 unchanged lines omitted", forty
+		// times over — and a single note underneath them reads as one more of the same. Put
+		// first, next to the header, it is the frame for everything that follows.
+		body = fmt.Sprintf(
+			"[... %s elided by the proxy to fit the context window; %s if you need the full output ...]\n%s",
+			spec.describeCompressed(body, len(text)), recoveryHint(call), body)
 	}
 	replacement := fmt.Sprintf("%s tool_use_id=%s original_bytes=%d hash=%s]\n%s",
 		truncateMarker, toolUseID, len(text), shortHash(sha256.Sum256([]byte(text))), body)
@@ -284,9 +351,92 @@ func (policy Policy) truncateSizes() (head, tail, threshold int) {
 	return head, tail, threshold
 }
 
+// lineCount counts \n-separated lines, treating a trailing newline as ending the last
+// line rather than starting an empty one. Tool output almost always ends with one, and
+// counting it would report every result one line longer than it is.
+func lineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	count := strings.Count(text, "\n") + 1
+	if strings.HasSuffix(text, "\n") {
+		count--
+	}
+	return count
+}
+
+// elision is what the note can truthfully say about the lines that went missing.
+//
+// Two shapes, because two things happened. A body cut from the tool's own output has a
+// gap: one span, which a Read can fetch back with offset and limit. A body that was
+// structurally compressed first had lines selected out of it — matches kept, context
+// dropped — so what is missing is scattered and no span describes it. Saying "lines
+// 21-592" there would send the model to fetch the wrong lines, so it gets the count
+// instead, which is the part that stayed true.
+type elision struct {
+	// originalLines is the tool output's own line count, before any compression.
+	originalLines int
+	// contiguous is whether the surviving text is a single span of that output.
+	contiguous bool
+}
+
+// describe renders the extent for the note. text is the body being cut, and headEnd and
+// tailStart bound the part that will not survive.
+func (spec elision) describe(text string, headEnd, tailStart int) string {
+	bytes := fmt.Sprintf("%d bytes", tailStart-headEnd)
+	if spec.originalLines <= 0 {
+		return bytes
+	}
+	if spec.contiguous {
+		headLines, tailLines := lineCount(text[:headEnd]), lineCount(text[tailStart:])
+		if spec.originalLines-headLines-tailLines <= 0 {
+			return bytes
+		}
+		return fmt.Sprintf("lines %d-%d of %d (%s)",
+			headLines+1, spec.originalLines-tailLines, spec.originalLines, bytes)
+	}
+	kept := outputLines(text[:headEnd]) + outputLines(text[tailStart:])
+	return spec.scattered(spec.originalLines-kept, bytes)
+}
+
+// scattered words a non-contiguous loss. It carries the share as well as the count
+// because the count alone is read against whatever else is in the block, and a body that
+// survived structural compression is full of the compressor's own small numbers — "2
+// unchanged lines omitted" — for a large one to be mistaken for.
+func (spec elision) scattered(missing int, bytes string) string {
+	if missing <= 0 {
+		return bytes
+	}
+	return fmt.Sprintf("%d of %d lines (%d%% of the output), scattered (%s)",
+		missing, spec.originalLines, missing*100/spec.originalLines, bytes)
+}
+
+// describeCompressed is the extent when compression alone met the cap: there is no
+// head/tail gap, so what is missing is whatever the compressor selected away.
+func (spec elision) describeCompressed(body string, originalBytes int) string {
+	bytes := fmt.Sprintf("%d bytes", originalBytes-len(body))
+	if spec.originalLines <= 0 {
+		return bytes
+	}
+	return spec.scattered(spec.originalLines-outputLines(body), bytes)
+}
+
+// outputLines counts lines that came from the tool, discounting the notes a compressor
+// left behind. Those are not lines of the output, and counting them as kept would
+// understate what is missing.
+func outputLines(text string) int {
+	count := lineCount(text)
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "[... ") {
+			count--
+		}
+	}
+	return max(count, 0)
+}
+
 // headTailByBytes keeps the first head and last tail bytes, snapped outward to
 // line boundaries, with an elision note in between.
-func headTailByBytes(text string, head, tail int) string {
+func headTailByBytes(text string, head, tail int, recovery string, spec elision) string {
 	if head+tail >= len(text) {
 		return text
 	}
@@ -301,10 +451,11 @@ func headTailByBytes(text string, head, tail int) string {
 	if tailStart <= headEnd {
 		return text
 	}
-	elided := text[headEnd:tailStart]
+	// Derived from the kept parts rather than by counting newlines in the elided slice,
+	// which starts and ends mid-boundary and is off by one in both directions.
 	return fmt.Sprintf(
-		"%s\n[... %d lines (%d bytes) elided by the proxy to fit the context window; re-run the tool if you need the full output ...]\n%s",
-		text[:headEnd], strings.Count(elided, "\n"), len(elided), text[tailStart:])
+		"%s\n[... %s elided by the proxy to fit the context window; %s if you need the full output ...]\n%s",
+		text[:headEnd], spec.describe(text, headEnd, tailStart), recovery, text[tailStart:])
 }
 
 func shortHash(hash [32]byte) string {

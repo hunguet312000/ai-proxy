@@ -132,7 +132,7 @@ func TestTruncateKeepsHeadTailAndMarker(t *testing.T) {
 	}
 	text := strings.Join(lines, "\n")
 	policy := Policy{}
-	replacement, ok := truncateToolResult("mcp__custom__analyze", "use-1", text, false, policy)
+	replacement, ok := truncateToolResult(resultSource{name: "mcp__custom__analyze"}, "use-1", text, false, policy)
 	if !ok {
 		t.Fatalf("large unique result was not truncated (%d bytes)", len(text))
 	}
@@ -142,8 +142,10 @@ func TestTruncateKeepsHeadTailAndMarker(t *testing.T) {
 	if !strings.Contains(replacement, "src/pkg/file.go:0:") || !strings.Contains(replacement, "src/pkg/file.go:499:") {
 		t.Fatal("head or tail lines lost")
 	}
-	if !strings.Contains(replacement, "re-run the tool") {
-		t.Fatal("re-run guidance missing")
+	// Naming the call is the point: "re-run the tool" left the model to work out which
+	// one from a tool_use_id, which is not something a model acts on.
+	if !strings.Contains(replacement, "re-run mcp__custom__analyze") {
+		t.Fatalf("recovery hint does not name the tool: %q", replacement)
 	}
 	if len(replacement) >= len(text) {
 		t.Fatalf("truncation did not shrink: %d >= %d", len(replacement), len(text))
@@ -152,11 +154,11 @@ func TestTruncateKeepsHeadTailAndMarker(t *testing.T) {
 
 func TestTruncateKeepsErrorResultsIntact(t *testing.T) {
 	text := strings.Repeat("panic: goroutine stack trace line\n", 300) // ~10KB, under the 16KB error allowance
-	if _, ok := truncateToolResult("Bash", "use-err", text, true, Policy{}); ok {
+	if _, ok := truncateToolResult(resultSource{name: "Bash"}, "use-err", text, true, Policy{}); ok {
 		t.Fatal("error result under the allowance was truncated")
 	}
 	huge := strings.Repeat("panic: goroutine stack trace line\n", 1000)
-	replacement, ok := truncateToolResult("Bash", "use-err", huge, true, Policy{})
+	replacement, ok := truncateToolResult(resultSource{name: "Bash"}, "use-err", huge, true, Policy{})
 	if !ok {
 		t.Fatal("oversized error result was not truncated")
 	}

@@ -186,3 +186,31 @@ func numberedLines(count int) string {
 	}
 	return builder.String()
 }
+
+// A result that merely mentions a diff is not one. Matching the substring anywhere sent
+// an agent's read of this package's own source — the detection literal is in it — through
+// compressDiff, which keeps hunk headers and drops the rest: 9,082 bytes of Go returned as
+// 143. Seen on a real transcript, not constructed.
+func TestDiffDetectionRequiresALineThatStartsADiff(t *testing.T) {
+	goSource := "1\tpackage cache\n2\t\n3\tfunc detect(content string) bool {\n" +
+		"4\t\treturn strings.Contains(content, \"diff --git\")\n5\t}\n" +
+		strings.Repeat("6\t// padding line to clear the compression threshold\n", 200)
+	if looksLikeDiff(goSource) {
+		t.Fatal("source that mentions the literal must not be read as a diff")
+	}
+	result := CompressForHistory("Read", goSource)
+	if result.Method == "git_diff" {
+		t.Fatalf("a source file was diff-compressed: %d -> %d bytes", len(goSource), len(result.Compressed))
+	}
+
+	// Real diff output still is one, whether it leads or follows a commit header.
+	for _, real := range []string{
+		"diff --git a/x.go b/x.go\n@@ -1,2 +1,2 @@\n-old\n+new\n",
+		"commit abc123\nAuthor: someone\n\n    message\n\ndiff --git a/x.go b/x.go\n@@ -1 +1 @@\n-a\n+b\n",
+		"$ git diff\ndiff --git a/x.go b/x.go\n@@ -1 +1 @@\n-a\n+b\n",
+	} {
+		if !looksLikeDiff(real) {
+			t.Fatalf("real diff output not detected: %q", real[:min(40, len(real))])
+		}
+	}
+}
