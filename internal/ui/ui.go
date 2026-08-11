@@ -210,6 +210,12 @@ type QuotaProviderGroup struct {
 	Enabled   int
 	Disabled  int
 	Exhausted int
+	// NeedsSignIn counts accounts the gateway switched off itself, which today means the
+	// provider refused their credentials. It is separate from Disabled because a card the
+	// user turned off needs no attention, while one the gateway retired is lost capacity
+	// that only a sign-in restores — and the summary line is where that gets noticed
+	// without reading every card.
+	NeedsSignIn int
 }
 
 type ModelGroup struct {
@@ -261,31 +267,35 @@ type viewData struct {
 	Total                int
 	Enabled              int
 	Exhausted            int
-	Models               []string
-	BaseURL              string
-	ClaudeSetup          clisetup.Request
-	ClaudeApplied        bool
-	PlanModel            string
-	CompactModel         string
-	ContextMode          string
-	LongContextModel     string
-	LongContextPercent   int
-	ImageModel           string
-	TextOnlyModels       string
-	Tab                  string
-	TabTitle             string
-	TabHeading           string
-	View                 string
-	Strategy             string
-	FilterProvider       string
-	FilterStatus         string
-	Sort                 string
-	AutoRefresh          bool
-	Usage                storage.UsageSummary
-	UsageRange           string
-	UsageSince           time.Time
-	UsageLive            UsageLive
-	UsageMap             []MapProviderNode
+	// NeedsSignIn counts accounts the gateway retired because the provider refused their
+	// credentials. Surfaced in the summary line so lost capacity is noticed there rather
+	// than only on the card of whichever account happens to be scrolled into view.
+	NeedsSignIn        int
+	Models             []string
+	BaseURL            string
+	ClaudeSetup        clisetup.Request
+	ClaudeApplied      bool
+	PlanModel          string
+	CompactModel       string
+	ContextMode        string
+	LongContextModel   string
+	LongContextPercent int
+	ImageModel         string
+	TextOnlyModels     string
+	Tab                string
+	TabTitle           string
+	TabHeading         string
+	View               string
+	Strategy           string
+	FilterProvider     string
+	FilterStatus       string
+	Sort               string
+	AutoRefresh        bool
+	Usage              storage.UsageSummary
+	UsageRange         string
+	UsageSince         time.Time
+	UsageLive          UsageLive
+	UsageMap           []MapProviderNode
 }
 
 func newViewData(accounts []AccountView) viewData {
@@ -296,6 +306,9 @@ func newViewData(accounts []AccountView) viewData {
 		}
 		if account.QuotaExhausted {
 			data.Exhausted++
+		}
+		if !account.Enabled && strings.TrimSpace(account.DisabledReason) != "" {
+			data.NeedsSignIn++
 		}
 	}
 	data.QuotaGroups = groupQuotaAccounts(accounts)
@@ -324,6 +337,9 @@ func groupQuotaAccounts(accounts []AccountView) []QuotaProviderGroup {
 		}
 		if account.QuotaExhausted {
 			group.Exhausted++
+		}
+		if !account.Enabled && strings.TrimSpace(account.DisabledReason) != "" {
+			group.NeedsSignIn++
 		}
 	}
 	return groups

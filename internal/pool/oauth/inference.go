@@ -230,13 +230,19 @@ func (inference *Inference) openWithExcluded(ctx context.Context, request transl
 			return nil, "", "", ctx.Err()
 		}
 		var providerErr *provider.ProviderError
-		if errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusTooManyRequests {
+		switch {
+		case errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusTooManyRequests:
 			if selected.Account.Provider == "antigravity" {
 				inference.selector.ReportModelRateLimit(selected.Account.ID, selected.ResolvedModel)
 			} else {
 				inference.selector.ReportRateLimit(selected.Account.ID)
 			}
-		} else {
+		case retiresAccount(err):
+			inference.selector.ReportError(selected.Account.ID)
+			errors.As(err, &providerErr)
+			inference.credentials.RetireRejectedAccount(ctx, selected.Account.ID,
+				selected.Account.Provider, providerErr.Message)
+		default:
 			inference.selector.ReportError(selected.Account.ID)
 		}
 		slog.Debug("OAuth account inference failed", "provider", providerName, "model", selected.ResolvedModel, "account_id", selected.Account.ID, "error", err)
@@ -244,6 +250,19 @@ func (inference *Inference) openWithExcluded(ctx context.Context, request transl
 			return nil, "", "", err
 		}
 	}
+}
+
+// retiresAccount reports whether a failure means this account's credentials are finished
+// rather than this request being unlucky.
+//
+// Only 401. LoadFresh has already refreshed a token that was near expiry before the call,
+// so a refusal at request time is the provider saying the credential itself is no good, and
+// it will say the same on every later turn. Everything else stays in the pool: a 429 is
+// quota, a 5xx is an upstream fault, and a 403 can be a per-model permission — retiring on
+// any of those would drain the pool during an incident that ends on its own.
+func retiresAccount(err error) bool {
+	var providerErr *provider.ProviderError
+	return errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusUnauthorized
 }
 
 func retryAcrossOAuthAccounts(err error) bool {

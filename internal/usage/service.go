@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -28,6 +29,12 @@ type refreshBackoff struct {
 	failures int
 	nextAt   time.Time
 }
+
+// ErrCredentialsRejected marks a quota failure that was the provider refusing the account's
+// credentials rather than refusing the quota call. A fetcher wraps it so the refresh loop can
+// retire the account, which matters for an account no traffic reaches: it is never rejected at
+// request time, so the health check is the only place its death can be noticed.
+var ErrCredentialsRejected = errors.New("the provider rejected this account's credentials; sign in again")
 
 // A quota endpoint can fail permanently while inference keeps working, and then a
 // once-a-minute health check is a once-a-minute warning forever. Measured on a live
@@ -169,6 +176,14 @@ func (s *Service) refreshAll(ctx context.Context) {
 		_, err := s.RefreshAccount(refreshCtx, account.ID)
 		cancel()
 		if err == nil {
+			continue
+		}
+		if errors.Is(err, ErrCredentialsRejected) && s.credentials != nil {
+			// Not backed off and not quieted: this one does not resolve itself, and the account
+			// is dead capacity until someone signs in. Retiring it here is what makes an idle
+			// account's death visible at all — nothing routes to it, so nothing else would ever
+			// find out.
+			s.credentials.RetireRejectedAccount(ctx, account.ID, account.Provider, "")
 			continue
 		}
 		failures, next := s.recordRefreshFailure(account.ID, now)

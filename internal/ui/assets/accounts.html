@@ -207,7 +207,11 @@
   </div>
 
   {{if .Accounts}}
-  <div class="quota-summary"><strong>{{.Total}}</strong> accounts <span>·</span> <b class="ok">{{.Enabled}} active</b>{{if .Exhausted}} <span>·</span> <b class="danger">{{.Exhausted}} need attention</b>{{end}}</div>
+  {{/* Sign-in is called out separately from "need attention": an exhausted account recovers
+       on its own at the reset time, while a refused credential stays dead until someone signs
+       in. Both used to be invisible here, and three dead accounts read as three healthy ones
+       while the whole load funnelled onto the one that still worked. */}}
+  <div class="quota-summary"><strong>{{.Total}}</strong> accounts <span>·</span> <b class="ok">{{.Enabled}} active</b>{{if .Exhausted}} <span>·</span> <b class="danger">{{.Exhausted}} need attention</b>{{end}}{{if .NeedsSignIn}} <span>·</span> <b class="danger">{{.NeedsSignIn}} need sign-in</b>{{end}}</div>
   <div class="quota-groups">
     {{range .QuotaGroups}}
     <section class="quota-provider" data-quota-provider="{{.ID}}">

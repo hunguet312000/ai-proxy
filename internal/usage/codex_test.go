@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -174,5 +175,33 @@ func TestCodexFetcherHeaders(t *testing.T) {
 	}
 	if len(quota.Windows) != 1 || time.Since(quota.FetchedAt) > time.Second {
 		t.Fatalf("Fetch() = %#v", quota)
+	}
+}
+
+// A 401 from the quota endpoint is the provider refusing the credential, and it has to be
+// distinguishable: an account nothing routes to is never refused at request time, so the
+// health check is the only chance to notice it died. Other failures must not be mistaken for
+// it, or an upstream incident would retire the whole pool.
+func TestCodexFetcherTypesRejectedCredentials(t *testing.T) {
+	for _, testCase := range []struct{ status, rejected int }{
+		{status: http.StatusUnauthorized, rejected: 1},
+		{status: http.StatusForbidden},
+		{status: http.StatusTooManyRequests},
+		{status: http.StatusInternalServerError},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(testCase.status)
+		}))
+		fetcher := NewCodexFetcher(server.Client())
+		fetcher.url = server.URL
+		_, err := fetcher.Fetch(context.Background(), "token", "account")
+		server.Close()
+		if err == nil {
+			t.Fatalf("status %d: expected an error", testCase.status)
+		}
+		if got := errors.Is(err, ErrCredentialsRejected); got != (testCase.rejected == 1) {
+			t.Fatalf("status %d: rejected = %v, want %v (error = %v)",
+				testCase.status, got, testCase.rejected == 1, err)
+		}
 	}
 }

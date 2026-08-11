@@ -35,6 +35,46 @@ func NewCredentialManager(store *storage.Store, accountPool *pool.Pool, logger *
 	return manager
 }
 
+// RetireRejectedAccount switches an account off because the upstream refused its
+// credentials, recording the upstream's own words so the dashboard can say what happened.
+//
+// This exists because a rejected credential used to be invisible. Refresh failures were
+// handled — LoadFresh disables on a permanent refresh error — but a token the provider
+// rejects at request time is not a refresh failure, so nothing recorded it: the account
+// stayed enabled, the selector kept picking it, every turn burned a round trip on it
+// before falling through, and the only trace was a debug line the default log level does
+// not print. Three dead accounts looked exactly like three healthy ones on the dashboard,
+// while the whole load funnelled onto the one that still worked and overloaded it.
+//
+// Disabling rather than a softer flag is deliberate: the selector already skips disabled
+// accounts and the dashboard already explains them, so this reuses the one path the rest
+// of the system understands. Re-authenticating or re-enabling clears the reason.
+func (m *CredentialManager) RetireRejectedAccount(ctx context.Context, accountID, provider, reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "the provider rejected this account's credentials; sign in again"
+	}
+	if m.store != nil {
+		if err := m.store.DisableAccountWithReason(ctx, accountID, reason); err != nil {
+			m.log().Warn("could not record a rejected account", "account_id", accountID, "error", err)
+		}
+	}
+	if m.pool != nil {
+		m.pool.SetDisabled(accountID, true, reason)
+	}
+	// Warn, not debug: this is the one event that silently removes capacity while looking
+	// like nothing happened, and it needs a human to sign in again before it recovers.
+	m.log().Warn("account credentials were rejected upstream; routing disabled until you sign in again",
+		"account_id", accountID, "provider", provider, "reason", reason)
+}
+
+func (m *CredentialManager) log() *slog.Logger {
+	if m.logger != nil {
+		return m.logger
+	}
+	return slog.Default()
+}
+
 func (m *CredentialManager) LoadFresh(ctx context.Context, accountID string) (storage.Account, TokenSet, AccountInfo, error) {
 	lock := m.accountLock(accountID)
 	lock.Lock()

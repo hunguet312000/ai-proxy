@@ -46,6 +46,12 @@ func (f *CodexFetcher) Fetch(ctx context.Context, accessToken, accountID string)
 		return Quota{}, fmt.Errorf("read Codex quota: %w", err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == http.StatusUnauthorized {
+			// Typed so the refresh loop can retire the account instead of only logging. An
+			// account nothing routes to is never rejected at request time, so without this a
+			// dead credential stays invisible for as long as the pool has a working peer.
+			return Quota{}, fmt.Errorf("fetch Codex quota: HTTP 401: %w", ErrCredentialsRejected)
+		}
 		return Quota{}, fmt.Errorf("fetch Codex quota: HTTP %d", response.StatusCode)
 	}
 	quota, err := ParseCodexQuota(body)

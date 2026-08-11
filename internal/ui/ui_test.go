@@ -1358,6 +1358,41 @@ func TestDisabledAccountShowsTheReason(t *testing.T) {
 	}
 }
 
+// Reading every card is not how lost capacity gets noticed. Three accounts whose tokens the
+// provider had invalidated read as three healthy ones on this page, while the whole load
+// funnelled onto the one that still worked until it started returning 502s — so the count
+// belongs in the summary line, and separately from the exhausted count: an exhausted account
+// recovers by itself at its reset time, a refused credential does not.
+func TestSummaryCountsAccountsThatNeedSignIn(t *testing.T) {
+	accounts := pool.New([]pool.Account{
+		{ID: "codex:dead1", Provider: "codex", Weight: 1, Enabled: false,
+			DisabledReason: "Your authentication token has been invalidated."},
+		{ID: "codex:dead2", Provider: "codex", Weight: 1, Enabled: false,
+			DisabledReason: "Your authentication token has been invalidated."},
+		// Turned off by hand: nothing for the user to do about it, so it must not be counted.
+		{ID: "codex:off-by-hand", Provider: "codex", Weight: 1, Enabled: false},
+		{ID: "codex:live", Provider: "codex", Weight: 1, Enabled: true},
+	})
+	service, err := New(accounts, "api-token", nil, nil, nil, nil, nil,
+		APIKeyHooks{}, ModelHooks{}, SettingsHooks{}, UsageHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := echo.New()
+	if err := service.Register(e); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/ui/quota", nil))
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if !strings.Contains(body, "2 need sign-in") {
+		t.Fatalf("summary does not report the retired accounts: %s", body)
+	}
+}
+
 // A dashboard response is a live reading. With no Cache-Control, no ETag and no
 // Last-Modified, a browser may apply heuristic freshness and serve a reload from its cache —
 // which is what made a disabled account reappear as enabled after F5, with the toggle having
