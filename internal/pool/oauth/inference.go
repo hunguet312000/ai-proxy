@@ -485,8 +485,20 @@ func openAIToCodexRequest(request translator.OpenAIRequest, model string) map[st
 	instructions := make([]string, 0, 1)
 	for _, message := range request.Messages {
 		if message.Role == "system" || message.Role == "developer" {
-			if text := strings.TrimSpace(openAIContentText(message.Content)); text != "" {
+			text := strings.TrimSpace(openAIContentText(message.Content))
+			if text == "" {
+				continue
+			}
+			// Only the instruction messages that open the request become `instructions`.
+			// That string sits ahead of the conversation and is what the Codex prompt
+			// cache is keyed on, so a per-turn block hoisted into it moves the cacheable
+			// prefix and the whole system prompt is charged again. A later one is placed
+			// in the conversation instead, at the point the client put it.
+			if len(input) == 0 {
 				instructions = append(instructions, text)
+			} else {
+				input = append(input, map[string]any{"type": "message", "role": "user",
+					"content": codexMessageContent("user", text)})
 			}
 			continue
 		}

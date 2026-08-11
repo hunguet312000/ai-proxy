@@ -195,6 +195,43 @@ func TestOutputReserveNeverTakesMoreThanHalfTheWindow(t *testing.T) {
 	}
 }
 
+// System content becomes the front of the upstream payload — for Codex the
+// `instructions` string, which is what the prompt cache is keyed on. Two trims that
+// dropped different amounts must therefore produce byte-identical System content, or
+// every trimmed turn re-bills the entire system prompt on top of the trim itself.
+func TestTrimKeepsSystemContentIdenticalAcrossDifferentDropCounts(t *testing.T) {
+	system := []provider.Content{{Type: "text", Text: "you are a coding assistant"}}
+	request := provider.Request{Model: "model", System: system,
+		Messages: subagentTranscript(40, 8192)}
+
+	light, ok := TrimOldestTurns(request, EstimateRequest(request)*3/4)
+	if !ok {
+		t.Fatal("light trim failed")
+	}
+	heavy, ok := TrimOldestTurns(request, EstimateRequest(request)/8)
+	if !ok {
+		t.Fatal("heavy trim failed")
+	}
+	// Different amounts really were dropped, or the comparison below proves nothing.
+	if len(light.Messages) <= len(heavy.Messages) {
+		t.Fatalf("both trims kept the same amount: %d vs %d",
+			len(light.Messages), len(heavy.Messages))
+	}
+	if len(light.System) != len(heavy.System) {
+		t.Fatalf("system block count differs: %d vs %d", len(light.System), len(heavy.System))
+	}
+	for index := range light.System {
+		if light.System[index].Text != heavy.System[index].Text {
+			t.Fatalf("system block %d differs between trims:\n%q\n%q",
+				index, light.System[index].Text, heavy.System[index].Text)
+		}
+	}
+	// The notice still has to be there — the model needs to know history is missing.
+	if !strings.Contains(light.System[len(light.System)-1].Text, trimMarker) {
+		t.Fatalf("trim notice missing: %#v", light.System)
+	}
+}
+
 func TestTrimReportsFailureWhenTheHeadAloneCannotFit(t *testing.T) {
 	// No tool chains to give up, and the opening turn is never dropped.
 	request := provider.Request{Model: "model", Messages: []provider.Message{

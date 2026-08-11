@@ -123,7 +123,21 @@ func FromAnthropicRequest(request AnthropicRequest) (provider.Request, error) {
 			return provider.Request{}, err
 		}
 		if message.Role == "system" || message.Role == "developer" {
-			result.System = append(result.System, content...)
+			// Only instruction messages that open the request join the System block.
+			// System is translated into the front of the upstream payload — for Codex
+			// the `instructions` string, which is the byte range the prompt cache is
+			// keyed on — so hoisting a block that arrives mid-conversation moves the
+			// cacheable prefix and the whole system prompt is charged again. Claude Code
+			// injects its per-turn reminders exactly there.
+			//
+			// A later one is carried as a user message instead: it keeps the position the
+			// client chose, and it is the shape Anthropic uses for the same thing
+			// anyway — reminders normally arrive as text blocks on a user message.
+			if len(result.Messages) == 0 {
+				result.System = append(result.System, content...)
+				continue
+			}
+			result.Messages = append(result.Messages, provider.Message{Role: "user", Content: content})
 			continue
 		}
 		result.Messages = append(result.Messages, provider.Message{Role: message.Role, Content: content})

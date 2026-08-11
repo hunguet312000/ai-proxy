@@ -172,6 +172,39 @@ func TestAnthropicInBandInstructionsBecomeSystem(t *testing.T) {
 	}
 }
 
+// A reminder injected after the conversation has started must stay in the conversation.
+// System becomes the front of the upstream payload — the Codex `instructions` string is
+// what the prompt cache is keyed on — so hoisting a per-turn block into it re-bills the
+// whole system prompt on every turn that carries one.
+func TestAnthropicMidConversationInstructionsStayInTheConversation(t *testing.T) {
+	reminder := "<system-reminder>Todo list: 1 item in progress.</system-reminder>"
+	request := AnthropicRequest{
+		Model: "model", MaxTokens: 10,
+		System: []AnthropicContent{{Type: "text", Text: "static prompt"}},
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: []AnthropicContent{{Type: "text", Text: "start"}}},
+			{Role: "assistant", Content: []AnthropicContent{{Type: "text", Text: "working"}}},
+			{Role: "system", Content: []AnthropicContent{{Type: "text", Text: reminder}}},
+			{Role: "user", Content: []AnthropicContent{{Type: "text", Text: "continue"}}},
+		},
+	}
+	unified, err := FromAnthropicRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unified.System) != 1 || unified.System[0].Text != "static prompt" {
+		t.Fatalf("the reminder reached System: %#v", unified.System)
+	}
+	if len(unified.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4: %#v", len(unified.Messages), unified.Messages)
+	}
+	// Carried as a user message: "system" is not a role provider.Request accepts, so
+	// keeping the original role would fail validation and reject the turn outright.
+	if got := unified.Messages[2]; got.Role != "user" || got.Content[0].Text != reminder {
+		t.Fatalf("reminder message = %#v", got)
+	}
+}
+
 func TestAnthropicStringAndRedactedThinking(t *testing.T) {
 	var request AnthropicRequest
 	if err := json.Unmarshal([]byte(`{"model":"model","system":"system","messages":[{"role":"user","content":"hello"}],"max_tokens":10}`), &request); err != nil {

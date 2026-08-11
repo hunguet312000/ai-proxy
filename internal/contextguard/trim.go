@@ -1,12 +1,22 @@
 package contextguard
 
 import (
-	"fmt"
-
 	"literouter/internal/provider"
 )
 
 const trimMarker = "[literouter:trim-v1"
+
+// trimNotice is the block appended to System when turns were dropped.
+//
+// It carries no count on purpose. System content is translated into the front of the
+// upstream payload — for Codex it becomes the `instructions` string, which is the
+// byte range the prompt cache is keyed on — so a notice that reads "dropped_turns=7"
+// and then "dropped_turns=8" moves the cacheable prefix on every trimmed turn and the
+// whole system prompt is re-billed each time. Constant text costs one prefix change
+// when trimming first engages and none afterwards. How much was dropped is still
+// recorded, in the log line the gateway writes next to the trim.
+const trimNotice = trimMarker + "] Older conversation turns were removed to fit the" +
+	" context window. Ask the user to restate anything you need that is no longer visible."
 
 // TrimOldestTurns drops whole leading conversation turns until the request fits
 // budget. It is the deterministic fallback for when summarization fails or times
@@ -99,9 +109,6 @@ func trimmedRequest(request provider.Request, units [][]provider.Message, droppe
 		messages = append(messages, unit...)
 	}
 	result.Messages = messages
-	result.System = append(result.System, provider.Content{
-		Type: "text",
-		Text: fmt.Sprintf("%s dropped_turns=%d] Older conversation turns were removed to fit the context window. Ask the user to restate anything you need that is no longer visible.", trimMarker, dropped),
-	})
+	result.System = append(result.System, provider.Content{Type: "text", Text: trimNotice})
 	return result
 }

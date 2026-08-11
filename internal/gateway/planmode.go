@@ -88,33 +88,34 @@ func planModeState(request translator.AnthropicRequest) (active bool, evidence s
 	return false, "no marker"
 }
 
-// currentTurnSystemContent contains instruction-shaped content that describes this request,
-// not its conversational history. Claude Code has emitted plan reminders in the top-level
-// system field and in system-role messages across client versions.
+// currentTurnSystemContent is the newest instruction-shaped message in the request.
+//
+// Measured against Claude Code 2.1.227: the plan reminder arrives as a system-role
+// message inside Messages, not in the top-level System field, which is why the
+// top-level check alone reported "no marker" on a real plan turn. The newest such
+// message wins, because a reconstructed transcript can retain older ones.
 func currentTurnSystemContent(request translator.AnthropicRequest) []translator.AnthropicContent {
-	content := append([]translator.AnthropicContent(nil), request.System...)
 	for index := len(request.Messages) - 1; index >= 0; index-- {
 		message := request.Messages[index]
-		if message.Role != "system" && message.Role != "developer" {
-			continue
-		}
-		// Instruction messages are current-turn metadata, but older system messages may
-		// be retained in a reconstructed transcript. The newest instruction block wins.
-		return append(content, message.Content...)
-	}
-	return content
-}
-
-// currentTurnContent is the user-facing part of the current request: the last user message.
-// System instructions are checked separately so a trusted instruction marker cannot be
-// mistaken for quoted prose in that message.
-func currentTurnContent(request translator.AnthropicRequest) []translator.AnthropicContent {
-	for index := len(request.Messages) - 1; index >= 0; index-- {
-		if request.Messages[index].Role == "user" {
-			return request.Messages[index].Content
+		if message.Role == "system" || message.Role == "developer" {
+			return message.Content
 		}
 	}
 	return nil
+}
+
+// currentTurnContent is what describes this request rather than its past: the top-level
+// system block, plus the last user message. Claude Code has emitted the reminder in both
+// across client versions, so both are read as one.
+func currentTurnContent(request translator.AnthropicRequest) []translator.AnthropicContent {
+	content := append([]translator.AnthropicContent(nil), request.System...)
+	for index := len(request.Messages) - 1; index >= 0; index-- {
+		if request.Messages[index].Role != "user" {
+			continue
+		}
+		return append(content, request.Messages[index].Content...)
+	}
+	return content
 }
 
 // reminderMarkerState reads only markers that sit inside a complete <system-reminder>
