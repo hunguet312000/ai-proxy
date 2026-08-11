@@ -73,6 +73,15 @@ type affinityBinding struct {
 	lastUsedAt time.Time
 }
 
+// accountRuntime is the in-memory selection state for one account: what it has spent
+// recently and whether it is being held back.
+//
+// There is deliberately no "healthy" flag here. There used to be one, set by a SetHealthy
+// method that nothing ever called, so the eligibility check it guarded could not fire and
+// the pool looked like it tracked account health when it did not. Credentials the provider
+// has rejected are recorded on the account itself instead (Enabled plus DisabledReason,
+// persisted by the credential manager), which survives a restart and gives the dashboard
+// something to show — neither of which an in-memory flag could do.
 type accountRuntime struct {
 	tokensHour        rollingCounter
 	requestsMinute    rollingCounter
@@ -81,8 +90,6 @@ type accountRuntime struct {
 	cooldownUntil     time.Time
 	circuitUntil      time.Time
 	lastUsed          time.Time
-	healthSet         bool
-	healthy           bool
 	currentWeight     int
 	pendingRequests   int64
 }
@@ -240,14 +247,6 @@ func (s *Selector) ReportError(accountID string) {
 	}
 }
 
-func (s *Selector) SetHealthy(accountID string, healthy bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	state := s.state(accountID)
-	state.healthSet = true
-	state.healthy = healthy
-}
-
 func (s *Selector) eligible(accounts []Account, provider, model string, excluded map[string]struct{}, now time.Time) []Account {
 	eligible := make([]Account, 0, len(accounts))
 	for _, account := range accounts {
@@ -260,7 +259,7 @@ func (s *Selector) eligible(accounts []Account, provider, model string, excluded
 		if !account.Enabled || (provider != "" && account.Provider != provider) || !supportsModel(account.Models, model) {
 			continue
 		}
-		if state.healthSet && !state.healthy || now.Before(state.cooldownUntil) || now.Before(state.circuitUntil) {
+		if now.Before(state.cooldownUntil) || now.Before(state.circuitUntil) {
 			continue
 		}
 		if cooldownUntil := s.modelCooldown[account.ID+"\x00"+model]; now.Before(cooldownUntil) {
