@@ -567,6 +567,12 @@ sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
               <option value="aggressive"{{if eq .ContextMode "aggressive"}} selected{{end}}>aggressive — truncate old tool output</option>
             </select>
           </label>
+          <label class="model-field-label"><span class="field-hint" title="How room is reclaimed once the cheap stages are not enough. LLM summary sends the older backlog to a model and replaces it with the summary: it keeps the arc of the conversation and costs an upstream call — measured at 15–35s on a six-figure-token backlog, which is most of the latency of a large turn. Trim drops whole turns from the middle instead, keeping the opening turn (the task, the constraints, the paths) and the recent ones, in milliseconds; the model is told with a notice so it asks rather than inventing the gap. Compaction requests always trim regardless, because the model they are sent to is about to summarize anyway. Applies immediately.">Reclaim room by</span>
+            <select class="field" name="summarize_mode">
+              <option value="llm"{{if ne .SummarizeMode "trim"}} selected{{end}}>LLM summary — keeps the arc, 15–35s</option>
+              <option value="trim"{{if eq .SummarizeMode "trim"}} selected{{end}}>trim — drops the middle, milliseconds</option>
+            </select>
+          </label>
           <details class="form-section"{{if or .LongContextModel .ImageModel .TextOnlyModels}} open{{end}}>
             <summary><span>Advanced routing</span><em>long context · threshold · text-only · image</em></summary>
             <label class="model-field-label"><span class="field-hint" title="Takes over when a turn grows past the threshold below, measured against the window of the model that would otherwise serve it. Routing costs nothing — the alternatives are the client compacting or LiteRouter trimming, and both throw away conversation. Set this and Max context &#39;auto&#39; reports this model&#39;s window, so the session is allowed the room it actually has. Plan mode still wins, unless the plan model cannot hold the turn either.">Long context</span>

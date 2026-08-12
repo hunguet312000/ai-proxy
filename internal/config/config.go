@@ -125,15 +125,19 @@ type ContextConfig struct {
 	// Mode refines Enabled: "safe" (default) keeps the lossless pipeline,
 	// "aggressive" adds superseded-result collapse and head/tail truncation of old
 	// bulky tool output. Ignored while Enabled is false.
-	Mode               string         `yaml:"mode"`
-	GuardEnabled       bool           `yaml:"guard_enabled"`
-	DefaultWindow      int            `yaml:"default_window"`
-	SoftRatio          float64        `yaml:"soft_ratio"`
-	SummarizeRatio     float64        `yaml:"summarize_ratio"`
-	HardRatio          float64        `yaml:"hard_ratio"`
-	KeepRecentTurns    int            `yaml:"keep_recent_turns"`
-	ReserveTokens      int            `yaml:"reserve_tokens"`
-	SummarizeModel     string         `yaml:"summarize_model"`
+	Mode            string  `yaml:"mode"`
+	GuardEnabled    bool    `yaml:"guard_enabled"`
+	DefaultWindow   int     `yaml:"default_window"`
+	SoftRatio       float64 `yaml:"soft_ratio"`
+	SummarizeRatio  float64 `yaml:"summarize_ratio"`
+	HardRatio       float64 `yaml:"hard_ratio"`
+	KeepRecentTurns int     `yaml:"keep_recent_turns"`
+	ReserveTokens   int     `yaml:"reserve_tokens"`
+	SummarizeModel  string  `yaml:"summarize_model"`
+	// Summarize selects how room is reclaimed once the cheap stages are not enough:
+	// "llm" (default) summarizes the older backlog through a model, "trim" drops whole
+	// turns from the middle instead. trim is milliseconds where llm is 15-35s.
+	Summarize          string         `yaml:"summarize"`
 	SummarizeMaxTokens int            `yaml:"summarize_max_tokens"`
 	SummarizeTimeout   time.Duration  `yaml:"summarize_timeout"`
 	ModelWindows       map[string]int `yaml:"model_windows"`
@@ -275,6 +279,9 @@ func applyEnv(cfg *Config) error {
 	if value, ok := os.LookupEnv("LITEROUTER_CONTEXT_MODE"); ok {
 		cfg.Context.Mode = value
 	}
+	if value, ok := os.LookupEnv("LITEROUTER_CONTEXT_SUMMARIZE"); ok {
+		cfg.Context.Summarize = value
+	}
 	if value, ok := os.LookupEnv("LITEROUTER_CONTEXT_SUMMARIZE_MODEL"); ok {
 		cfg.Context.SummarizeModel = value
 	}
@@ -402,6 +409,7 @@ func (cfg *Config) Validate() error {
 	}
 	cfg.Router.PlanModel = strings.TrimSpace(cfg.Router.PlanModel)
 	cfg.Router.CompactModel = strings.TrimSpace(cfg.Router.CompactModel)
+	cfg.Context.Summarize = strings.ToLower(strings.TrimSpace(cfg.Context.Summarize))
 	cfg.Router.FallbackModel = strings.TrimSpace(cfg.Router.FallbackModel)
 	cfg.Router.LongContextModel = strings.TrimSpace(cfg.Router.LongContextModel)
 	cfg.Router.ImageModel = strings.TrimSpace(cfg.Router.ImageModel)

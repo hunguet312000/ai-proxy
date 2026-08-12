@@ -292,6 +292,28 @@ func (s *Service) learnContextWindow(model string, sent int, err error) {
 // The error is returned rather than handled because the two callers want different things
 // from it: the guard logs it and carries on against the fallback window, while the
 // pipeline has nothing useful to say about it. The window is serviceable either way.
+// laterCandidateHoldsMore reports whether any remaining candidate has a larger context
+// window than the one that just failed to fit.
+//
+// Candidates used to share one budget, so a budget failure on the first meant the turn was
+// unservable and the whole chain was abandoned. That premise died twice over: the window is
+// resolved per model, and the router's fallback model is appended to every chain — so a chain
+// routinely spans two different sizes, and abandoning on the first failure skips a model that
+// could have taken the turn. Live shape: a request too large for a ~35k custom-provider model
+// never reached the 370k fallback behind it.
+//
+// Checked rather than always continuing, because preparation on a six-figure-token turn is
+// not free: where every candidate really is the same size, retrying only pays for the same
+// compression again.
+func (s *Service) laterCandidateHoldsMore(ctx context.Context, remaining []string, window int) bool {
+	for _, model := range remaining {
+		if _, candidateWindow, _ := s.contextLimitsFor(ctx, model); candidateWindow > window {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) contextLimitsFor(ctx context.Context, model string) (contextguard.Limits, int, error) {
 	window, err := s.resolveContextWindowErr(ctx, model)
 	if window <= 0 {

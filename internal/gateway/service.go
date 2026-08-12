@@ -230,6 +230,7 @@ type Service struct {
 	// contextMode is the runtime state of the proxy pipeline: off, safe, or
 	// aggressive. Atomic so the dashboard can flip it without a restart.
 	contextMode      atomic.Pointer[string]
+	summarizeMode    atomic.Pointer[string]
 	contextGuard     bool
 	contextLimits    contextguard.Limits
 	customProviders  *CustomProviderRegistry
@@ -321,7 +322,9 @@ type Options struct {
 	// ContextMode refines ContextEnabled: "safe" keeps the lossless pipeline,
 	// "aggressive" adds superseded-result collapse and old-tool-output truncation.
 	// Ignored when ContextEnabled is false. Empty means safe.
-	ContextMode   string
+	ContextMode string
+	// SummarizeMode selects llm or trim for reclaiming room. Empty means llm.
+	SummarizeMode string
 	ContextGuard  bool
 	ContextLimits contextguard.Limits
 	// CustomProviders resolves user-registered upstreams by model prefix.
@@ -371,6 +374,10 @@ func New(options Options) *Service {
 		}
 	}
 	service.contextMode.Store(&mode)
+	if err := service.SetSummarizeMode(options.SummarizeMode); err != nil {
+		slog.Warn("ignoring invalid summarize mode", "mode", options.SummarizeMode, "error", err)
+		_ = service.SetSummarizeMode("")
+	}
 	// Summarization machinery is initialised regardless of the boot mode: the
 	// dashboard can switch the pipeline on at runtime, and a nil summarizer at
 	// that moment would silently skip straight to trimming.
@@ -403,6 +410,45 @@ const (
 	ContextModeSafe       = "safe"
 	ContextModeAggressive = "aggressive"
 )
+
+// How the pipeline reclaims room once the cheap stages are not enough.
+//
+// llm sends the older backlog to a model and replaces it with the summary: it keeps the
+// arc of the conversation, and it costs an upstream call — measured at 15-35s on a
+// six-figure-token backlog, which is most of the latency of a large turn.
+//
+// trim drops whole turns from the middle instead, keeping the opening turn and the recent
+// ones (see contextguard.TrimOldestTurns). Milliseconds rather than tens of seconds, at
+// the price of the dropped middle; the model is told with a trim notice so it asks instead
+// of inventing the gap. Compaction requests always take this path regardless — see
+// isCompactTurn.
+const (
+	SummarizeModeLLM  = "llm"
+	SummarizeModeTrim = "trim"
+)
+
+// SummarizeMode reports how the pipeline reclaims room, as currently in force.
+func (s *Service) SummarizeMode() string {
+	if value := s.summarizeMode.Load(); value != nil {
+		return *value
+	}
+	return SummarizeModeLLM
+}
+
+// SetSummarizeMode changes it on a running gateway. Empty restores the default.
+func (s *Service) SetSummarizeMode(mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = SummarizeModeLLM
+	}
+	switch mode {
+	case SummarizeModeLLM, SummarizeModeTrim:
+		s.summarizeMode.Store(&mode)
+		return nil
+	default:
+		return fmt.Errorf("summarize mode must be llm or trim")
+	}
+}
 
 // ContextMode reports the pipeline mode currently in force.
 func (s *Service) ContextMode() string {
@@ -746,6 +792,16 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 			err = s.guardContext(ctx, candidate)
 		}
 		if err != nil {
+			lastErr = err
+			// Same rule as the streaming chain: a turn too large for this candidate may
+			// still fit a later one, and this path used to abandon on any prepare error
+			// without even advancing.
+			if errors.Is(err, contextguard.ErrBudgetExceeded) {
+				_, window, _ := s.contextLimitsFor(ctx, model)
+				if s.laterCandidateHoldsMore(ctx, chain[index+1:], window) {
+					continue
+				}
+			}
 			return provider.Response{}, err
 		}
 		sentRequest = prepared
@@ -1011,7 +1067,17 @@ func (s *Service) prepareContextStages(ctx context.Context, request provider.Req
 	// so an empty one there means no summary is possible at all. Every subagent lands
 	// here — its only non-tool_result user message is the opening task — and used to
 	// pay for five full probes before the same fallback ran anyway.
-	if s.summarizer == nil || len(contextguard.SummaryMessages(prepared.Request.Messages, 1, policy.BoundaryQuantum)) == 0 {
+	// A compaction request is a payload whose entire purpose is to be summarized by the
+	// model it is sent to, so summarizing it here first is work done twice — and the model
+	// then summarizes a summary. Measured on one turn of this session: the LLM pass took
+	// 35.2s to go from 645,471 tokens to 63,059, while the deterministic trim took 1.1s to
+	// reach 154,651, which already fits. Two summarize rounds per compaction is most of why
+	// a compact sat at 95% for minutes.
+	//
+	// The trade is real and worth stating: trim drops the oldest turn-units outright, so the
+	// summary the client ends up with covers less of the beginning than a compressed-then-
+	// summarized history would. Latency was the priority; reverting is deleting one clause.
+	if s.summarizer == nil || isCompactTurn(ctx) || s.SummarizeMode() == SummarizeModeTrim || len(contextguard.SummaryMessages(prepared.Request.Messages, 1, policy.BoundaryQuantum)) == 0 {
 		if contextguard.ExceedsHardLimit(prepared, policy) {
 			return s.trimStage(prepared.Request, limits, policy, outcome)
 		}

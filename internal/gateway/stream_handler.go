@@ -1036,12 +1036,14 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 		o.sentEffort = candidate.Effort
 		if err != nil {
 			o.lastErr = err
-			if !errors.Is(err, contextguard.ErrBudgetExceeded) {
-				continue
+			if errors.Is(err, contextguard.ErrBudgetExceeded) {
+				_, window, _ := s.contextLimitsFor(ctx, model)
+				if !o.service.laterCandidateHoldsMore(ctx, o.models[o.index:], window) {
+					o.index = len(o.models)
+					return nil, err
+				}
 			}
-			// Every candidate shares the same context budget, so retrying cannot help.
-			o.index = len(o.models)
-			return nil, err
+			continue
 		}
 		// After preparation, not before: prepareStreamCandidate rebuilds the candidate
 		// from the unified request whenever context work is enabled, which restores the

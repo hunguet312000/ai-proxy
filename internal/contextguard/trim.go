@@ -18,12 +18,18 @@ const trimMarker = "[literouter:trim-v1"
 const trimNotice = trimMarker + "] Older conversation turns were removed to fit the" +
 	" context window. Ask the user to restate anything you need that is no longer visible."
 
-// TrimOldestTurns drops whole leading conversation turns until the request fits
-// budget. It is the deterministic fallback for when summarization fails or times
-// out: dropping complete turns is lossy but keeps the request servable, which a
-// hard rejection does not. Tool chains stay intact because summaryUnits only
-// splits on user turns that are not tool results, so a tool_use never loses its
-// matching tool_result.
+// TrimOldestTurns drops whole conversation turns until the request fits budget. It is
+// the deterministic alternative to summarization: dropping complete turns is lossy but
+// keeps the request servable, which a hard rejection does not, and it costs milliseconds
+// where an LLM summary of the same backlog costs tens of seconds. Tool chains stay intact
+// because summaryUnits only splits on user turns that are not tool results, so a tool_use
+// never loses its matching tool_result.
+//
+// The opening turn is kept for as long as possible, and that is the whole reason this is
+// usable in place of a summary. A plain front-to-back trim drops it first, and the opening
+// turn is where the task, the constraints and the file paths were stated — losing it is the
+// most damaging single thing this function can do to answer quality, and keeping it costs
+// nothing. So the middle goes first: oldest-but-one, forward.
 func TrimOldestTurns(request provider.Request, budget int) (provider.Request, bool) {
 	if budget <= 0 || len(request.Messages) == 0 {
 		return request, false
@@ -33,11 +39,23 @@ func TrimOldestTurns(request provider.Request, budget int) (provider.Request, bo
 	}
 	units := summaryUnits(request.Messages)
 	dropped := 0
+	fits := func(candidate provider.Request) bool { return EstimateRequest(candidate) <= budget }
+
+	// Keep index 0, drop index 1 repeatedly: the middle of the conversation shrinks while
+	// both ends survive. Stops with the opening turn and the latest turn still present.
+	for len(units) > 2 {
+		units = append(units[:1], units[2:]...)
+		dropped++
+		if candidate := trimmedRequest(request, units, dropped); fits(candidate) {
+			return candidate, true
+		}
+	}
+	// The opening turn plus the latest one is still too large, so the opening turn has to
+	// go too. Being servable beats being well-grounded; a rejected turn is worth nothing.
 	for len(units) > 1 {
 		units = units[1:]
 		dropped++
-		candidate := trimmedRequest(request, units, dropped)
-		if EstimateRequest(candidate) <= budget {
+		if candidate := trimmedRequest(request, units, dropped); fits(candidate) {
 			return candidate, true
 		}
 	}

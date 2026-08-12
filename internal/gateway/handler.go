@@ -32,6 +32,23 @@ func withForcedEffort(ctx context.Context, effort string) context.Context {
 	return context.WithValue(ctx, forcedEffortKey{}, effort)
 }
 
+type compactTurnKey struct{}
+
+// withCompactTurn marks a turn as Claude Code's own compaction request, so the context
+// pipeline can stop compressing a payload whose only purpose is to be compressed.
+//
+// Set from the detection directly rather than from the routing decision: whether a compact
+// model happens to be configured says nothing about what this request is, and the pipeline's
+// choice should not depend on an unrelated setting being filled in.
+func withCompactTurn(ctx context.Context) context.Context {
+	return context.WithValue(ctx, compactTurnKey{}, true)
+}
+
+func isCompactTurn(ctx context.Context) bool {
+	value, _ := ctx.Value(compactTurnKey{}).(bool)
+	return value
+}
+
 func forcedEffort(ctx context.Context) string {
 	value, _ := ctx.Value(forcedEffortKey{}).(string)
 	return value
@@ -122,6 +139,9 @@ func (s *Service) messagesHandler(c echo.Context) error {
 	// len(raw) rather than a token count on purpose: routing only needs to know whether
 	// the turn is large, and counting properly means translating the whole history, which
 	// is the dominant per-turn cost once a session is big — the exact turns this decides.
+	if isCompactRequest(request, len(raw)) {
+		c.SetRequest(c.Request().WithContext(withCompactTurn(c.Request().Context())))
+	}
 	decision, routeErr := s.routeModel(c.Request().Context(), request, len(raw))
 	if routeErr != nil {
 		// invalid_request_error rather than an api_error: the request as sent cannot be

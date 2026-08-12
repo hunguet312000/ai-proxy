@@ -187,6 +187,13 @@ func run() int {
 			gatewayService.SetFallbackModel(stored)
 		}
 	}
+	if _, envSet := os.LookupEnv("LITEROUTER_CONTEXT_SUMMARIZE"); !envSet {
+		if stored, storedErr := store.GetSetting(context.Background(), "context.summarize"); storedErr == nil {
+			if modeErr := gatewayService.SetSummarizeMode(stored); modeErr != nil {
+				logger.Warn("ignoring stored summarize mode", "mode", stored, "error", modeErr)
+			}
+		}
+	}
 	// The context mode needs both envs unset before a stored value may apply:
 	// enabled=false and mode=off express the same thing, so a deployment that pins
 	// either one must not be half-overridden by a stale dashboard row.
@@ -620,6 +627,15 @@ func run() int {
 			}
 			gatewayService.SetPlanModel(model)
 			return nil
+		},
+		GetSummarizeMode: func(context.Context) (string, error) {
+			return gatewayService.SummarizeMode(), nil
+		},
+		SetSummarizeMode: func(ctx context.Context, mode string) error {
+			if err := gatewayService.SetSummarizeMode(mode); err != nil {
+				return err
+			}
+			return store.SetSetting(ctx, "context.summarize", mode)
 		},
 		GetFallbackModel: func(context.Context) (string, error) {
 			// Same contract as GetPlanModel: the in-force value, already carrying the
@@ -1201,6 +1217,7 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 		},
 		ContextEnabled: cfg.Context.Enabled,
 		ContextMode:    cfg.Context.Mode,
+		SummarizeMode:  cfg.Context.Summarize,
 		ContextGuard:   cfg.Context.GuardEnabled,
 		ContextLimits:  contextguard.Limits{Default: cfg.Context.DefaultWindow, Models: cfg.Context.ModelWindows},
 		ContextWindow: func(_ context.Context, model string) (int, error) {

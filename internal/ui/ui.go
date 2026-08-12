@@ -177,6 +177,11 @@ type SettingsHooks struct {
 	// off, safe, or aggressive. Applied to the running gateway.
 	GetContextMode func(context.Context) (string, error)
 	SetContextMode func(context.Context, string) error
+	// GetSummarizeMode and SetSummarizeMode expose how the pipeline reclaims room once
+	// the cheap stages are not enough: llm summarizes the older backlog through a model,
+	// trim drops whole turns from the middle. Same live-gateway contract.
+	GetSummarizeMode func(context.Context) (string, error)
+	SetSummarizeMode func(context.Context, string) error
 	// GetLongContext and SetLongContext expose the router's long-context rule: the model
 	// a turn is handed to, and the share of the serving model's window that triggers it.
 	// Also LiteRouter's own routing, applied to a running gateway.
@@ -333,6 +338,7 @@ type viewData struct {
 	CompactModel       string
 	FallbackModel      string
 	ContextMode        string
+	SummarizeMode      string
 	LongContextModel   string
 	LongContextPercent int
 	ImageModel         string
@@ -1324,6 +1330,11 @@ func (s *Service) pageData(c echo.Context, tab string) viewData {
 		if s.settings.GetContextMode != nil {
 			if mode, modeErr := s.settings.GetContextMode(c.Request().Context()); modeErr == nil {
 				data.ContextMode = mode
+			}
+		}
+		if s.settings.GetSummarizeMode != nil {
+			if mode, modeErr := s.settings.GetSummarizeMode(c.Request().Context()); modeErr == nil {
+				data.SummarizeMode = mode
 			}
 		}
 		// Endpoint defaults to the LiteRouter instance serving this UI. Persisted
@@ -2333,29 +2344,35 @@ func (s *Service) routingHandler(c echo.Context) error {
 	if s.settings.SetPlanModel == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "routing settings unavailable")
 	}
-	planModel, err := routingModelValue(c, "plan_model")
+	planModel, planModelSet, err := routingModelValue(c, "plan_model")
 	if err != nil {
 		return err
 	}
-	compactModel, err := routingModelValue(c, "compact_model")
+	compactModel, compactModelSet, err := routingModelValue(c, "compact_model")
 	if err != nil {
 		return err
 	}
-	fallbackModel, err := routingModelValue(c, "fallback_model")
+	fallbackModel, fallbackModelSet, err := routingModelValue(c, "fallback_model")
 	if err != nil {
 		return err
 	}
 	contextMode := strings.ToLower(strings.TrimSpace(c.FormValue("context_mode")))
+	summarizeMode := strings.ToLower(strings.TrimSpace(c.FormValue("summarize_mode")))
+	switch summarizeMode {
+	case "", "llm", "trim":
+	default:
+		return echo.NewHTTPError(http.StatusBadRequest, "summarize mode must be llm or trim")
+	}
 	switch contextMode {
 	case "", "off", "safe", "aggressive":
 	default:
 		return echo.NewHTTPError(http.StatusBadRequest, "proxy compaction mode must be off, safe, or aggressive")
 	}
-	longModel, err := routingModelValue(c, "long_context_model")
+	longModel, longModelSet, err := routingModelValue(c, "long_context_model")
 	if err != nil {
 		return err
 	}
-	imageModel, err := routingModelValue(c, "image_model")
+	imageModel, imageModelSet, err := routingModelValue(c, "image_model")
 	if err != nil {
 		return err
 	}
@@ -2374,15 +2391,17 @@ func (s *Service) routingHandler(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusBadRequest, "long context threshold must be between 1 and 99 percent")
 		}
 	}
-	if err := s.settings.SetPlanModel(c.Request().Context(), planModel); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	if planModelSet {
+		if err := s.settings.SetPlanModel(c.Request().Context(), planModel); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
 	}
-	if s.settings.SetCompactModel != nil {
+	if compactModelSet && s.settings.SetCompactModel != nil {
 		if err := s.settings.SetCompactModel(c.Request().Context(), compactModel); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
 	}
-	if s.settings.SetFallbackModel != nil {
+	if fallbackModelSet && s.settings.SetFallbackModel != nil {
 		if err := s.settings.SetFallbackModel(c.Request().Context(), fallbackModel); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
@@ -2394,12 +2413,18 @@ func (s *Service) routingHandler(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
 	}
-	if s.settings.SetLongContext != nil {
+	// An absent field means the form predates the control; only an explicit value applies.
+	if summarizeMode != "" && s.settings.SetSummarizeMode != nil {
+		if err := s.settings.SetSummarizeMode(c.Request().Context(), summarizeMode); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+	}
+	if longModelSet && s.settings.SetLongContext != nil {
 		if err := s.settings.SetLongContext(c.Request().Context(), longModel, percent); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
 	}
-	if s.settings.SetImageRoute != nil {
+	if imageModelSet && s.settings.SetImageRoute != nil {
 		if err := s.settings.SetImageRoute(c.Request().Context(), imageModel, textOnly); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
@@ -2447,12 +2472,27 @@ func (s *Service) routingHandler(c echo.Context) error {
 }
 
 // routingModelValue reads and checks one model field from the routing form.
-func routingModelValue(c echo.Context, field string) (string, error) {
-	value := strings.TrimSpace(c.FormValue(field))
-	if strings.ContainsAny(value, "\x00\r\n") || len(value) > 128 {
-		return "", echo.NewHTTPError(http.StatusBadRequest, field+" contains invalid characters or is too long")
+// routingModelValue reports the submitted value and whether the field was submitted at all.
+//
+// The distinction is load-bearing and was missing: every model override was written
+// unconditionally from FormValue, which returns "" both for "the user cleared this box" and
+// for "this field was not in the request". So any POST that did not carry the whole form —
+// a partial update, a script setting one option, a form from an older build — silently wiped
+// the overrides it never mentioned. It happened for real: a one-field POST setting the
+// summarize mode cleared the plan, compact and fallback models.
+func routingModelValue(c echo.Context, field string) (string, bool, error) {
+	form, err := c.FormParams()
+	if err != nil {
+		return "", false, echo.NewHTTPError(http.StatusBadRequest, "malformed form")
 	}
-	return value, nil
+	if _, ok := form[field]; !ok {
+		return "", false, nil
+	}
+	value := strings.TrimSpace(form.Get(field))
+	if strings.ContainsAny(value, "\x00\r\n") || len(value) > 128 {
+		return "", false, echo.NewHTTPError(http.StatusBadRequest, field+" contains invalid characters or is too long")
+	}
+	return value, true, nil
 }
 
 func (s *Service) deleteHandler(c echo.Context) error {

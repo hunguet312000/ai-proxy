@@ -241,3 +241,77 @@ func TestTrimReportsFailureWhenTheHeadAloneCannotFit(t *testing.T) {
 		t.Fatal("expected failure with nothing droppable")
 	}
 }
+
+// Trimming is only an acceptable substitute for a summary if it keeps the opening turn.
+// That turn states the task, the constraints and the paths; a front-to-back trim dropped it
+// first, so the model kept the transcript of how the work was done and lost what the work
+// was. The middle is what goes.
+func TestTrimKeepsTheOpeningTurnAndDropsTheMiddle(t *testing.T) {
+	filler := strings.Repeat("chi tiết ở giữa cuộc hội thoại ", 400)
+	request := provider.Request{
+		Model: "model",
+		Messages: []provider.Message{
+			{Role: "user", Content: []provider.Content{{Type: "text", Text: "NHIỆM VỤ: sửa hàm parse trong internal/x/y.go"}}},
+			{Role: "assistant", Content: []provider.Content{{Type: "text", Text: "ok"}}},
+			{Role: "user", Content: []provider.Content{{Type: "text", Text: "giữa 1 " + filler}}},
+			{Role: "assistant", Content: []provider.Content{{Type: "text", Text: "giữa 1 trả lời " + filler}}},
+			{Role: "user", Content: []provider.Content{{Type: "text", Text: "giữa 2 " + filler}}},
+			{Role: "assistant", Content: []provider.Content{{Type: "text", Text: "giữa 2 trả lời " + filler}}},
+			{Role: "user", Content: []provider.Content{{Type: "text", Text: "LƯỢT MỚI NHẤT: chạy lại test"}}},
+		},
+	}
+	full := EstimateRequest(request)
+	trimmed, ok := TrimOldestTurns(request, full/2)
+	if !ok {
+		t.Fatal("TrimOldestTurns reported failure on a trimmable request")
+	}
+	if got := EstimateRequest(trimmed); got > full/2 {
+		t.Fatalf("trimmed to %d, over the budget of %d", got, full/2)
+	}
+
+	var text strings.Builder
+	for _, message := range trimmed.Messages {
+		for _, block := range message.Content {
+			text.WriteString(block.Text)
+		}
+	}
+	body := text.String()
+	if !strings.Contains(body, "NHIỆM VỤ") {
+		t.Error("the opening turn was dropped; the model no longer knows what it was asked to do")
+	}
+	if !strings.Contains(body, "LƯỢT MỚI NHẤT") {
+		t.Error("the latest turn was dropped")
+	}
+	if strings.Contains(body, "giữa 1") {
+		t.Error("the oldest middle turn survived, so nothing useful was reclaimed")
+	}
+	// And the model is told, so it asks rather than inventing the gap.
+	var system strings.Builder
+	for _, block := range trimmed.System {
+		system.WriteString(block.Text)
+	}
+	if !strings.Contains(system.String(), trimMarker) {
+		t.Error("no trim notice reached the system prompt")
+	}
+}
+
+// When even the opening turn plus the latest one will not fit, being servable wins: the
+// opening turn is given up rather than the request refused.
+func TestTrimGivesUpTheOpeningTurnRatherThanFailing(t *testing.T) {
+	filler := strings.Repeat("nội dung rất dài ", 800)
+	request := provider.Request{
+		Model: "model",
+		Messages: []provider.Message{
+			{Role: "user", Content: []provider.Content{{Type: "text", Text: "mở đầu " + filler}}},
+			{Role: "user", Content: []provider.Content{{Type: "text", Text: "mới nhất " + filler}}},
+		},
+	}
+	budget := EstimateRequest(request) * 2 / 3
+	trimmed, ok := TrimOldestTurns(request, budget)
+	if !ok {
+		t.Fatal("TrimOldestTurns refused a request it could have made fit")
+	}
+	if got := EstimateRequest(trimmed); got > budget {
+		t.Fatalf("trimmed to %d, over the budget of %d", got, budget)
+	}
+}
