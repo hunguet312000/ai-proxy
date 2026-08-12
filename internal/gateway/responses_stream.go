@@ -46,7 +46,7 @@ func (s *Service) responsesStream(c echo.Context, request translator.ResponsesRe
 			}
 			// Already streaming: complete the response instead of emitting an error
 			// frame, which clients report as a mid-response server failure.
-			s.recordUsage(UsageEvent{Provider: s.providerNameFor(state.response.Model), Model: state.response.Model, Endpoint: "/v1/responses", Status: streamErrorStatus(readErr)})
+			s.recordUsage(UsageEvent{Provider: s.providerNameFor(state.response.Model), Model: state.response.Model, Endpoint: "/v1/responses", Status: streamErrorStatus(readErr), Effort: opener.sentEffort})
 			return state.finish(c)
 		}
 		if !delivered {
@@ -69,6 +69,7 @@ func (s *Service) responsesStream(c echo.Context, request translator.ResponsesRe
 			CachedTokens:          usage.PromptTokensDetails.CachedTokens,
 			PromptTokensEstimated: promptEstimated, CompletionTokensEstimated: completionEstimated,
 			CachedTokensReported: usage.PromptTokensDetails.CachedTokensReported,
+			Effort:               opener.sentEffort,
 		})
 		return nil
 	}

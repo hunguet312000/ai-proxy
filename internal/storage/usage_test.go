@@ -16,6 +16,7 @@ func TestUsageEventsSummary(t *testing.T) {
 			Provider:  "codex", Model: "cx/gpt-5.6-sol", Endpoint: "/v1/chat/completions", Status: "ok",
 			PromptTokens: 100, CompletionTokens: 50, CachedTokens: 10, CostUSD: 0.01,
 			PromptTokensEstimated: i == 0, CachedTokensReported: i != 1,
+			Effort: "max",
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -32,6 +33,11 @@ func TestUsageEventsSummary(t *testing.T) {
 	}
 	if !sum.Recent[0].PromptTokensEstimated || !sum.Recent[0].CachedTokensReported || sum.Recent[1].CachedTokensReported {
 		t.Fatalf("usage provenance = %+v", sum.Recent)
+	}
+	// The effort has to survive the round trip, because it is the only record of what a
+	// turn was actually sent at — the dashboard's column reads straight off this row.
+	if sum.Recent[0].Effort != "max" {
+		t.Fatalf("recorded effort = %q, want max", sum.Recent[0].Effort)
 	}
 }
 

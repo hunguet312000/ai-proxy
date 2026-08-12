@@ -232,7 +232,7 @@ func run() int {
 			Provider: ev.Provider, Model: ev.Model, Endpoint: ev.Endpoint, Status: ev.Status,
 			PromptTokens: ev.PromptTokens, CompletionTokens: ev.CompletionTokens, CachedTokens: ev.CachedTokens,
 			PromptTokensEstimated: ev.PromptTokensEstimated, CompletionTokensEstimated: ev.CompletionTokensEstimated,
-			CachedTokensReported: ev.CachedTokensReported,
+			CachedTokensReported: ev.CachedTokensReported, Effort: ev.Effort,
 		})
 	})
 	// Synced from local 9router /v1/models (codex=cx, xai). Claude not present there; keep Anthropic defaults.

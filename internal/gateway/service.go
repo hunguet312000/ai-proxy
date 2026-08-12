@@ -531,6 +531,10 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 	// for: the chain can hand the turn to an alias or to the router's fallback model, and
 	// either can belong to a different provider than the requested id does.
 	served := request.Model
+	// The effort that candidate was actually sent at. Nothing on the response can be used
+	// to derive it — it comes from the route, the per-model override, or the client's own
+	// ask, and only this loop knows which one won — so it is captured as the turn is won.
+	sentEffort := request.Effort
 	// Indexed rather than ranged so an output-cap rejection can rewind onto the same
 	// candidate, exactly as the streaming and Anthropic paths do.
 	clampAttempts := map[string]int{}
@@ -616,7 +620,7 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 			}
 		}
 		lastErr = nil
-		served = model
+		served, sentEffort = model, candidate.Effort
 		break
 	}
 	if lastErr != nil {
@@ -645,6 +649,7 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 		CachedTokens:          usage.PromptTokensDetails.CachedTokens,
 		CachedTokensReported:  usage.PromptTokensDetails.CachedTokensReported,
 		PromptTokensEstimated: promptEst, CompletionTokensEstimated: completionEst,
+		Effort: sentEffort,
 	})
 	return response, nil
 }
@@ -951,6 +956,10 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		CachedTokens:          usage.PromptTokensDetails.CachedTokens,
 		CachedTokensReported:  usage.PromptTokensDetails.CachedTokensReported,
 		PromptTokensEstimated: promptEst, CompletionTokensEstimated: completionEst,
+		// sentRequest is the winning attempt's own payload, so its effort is the one that
+		// went up — not the caller's ask, which a route or a per-model override may have
+		// replaced.
+		Effort: sentRequest.Effort,
 	})
 	return response, nil
 }
