@@ -2,14 +2,19 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"literouter/internal/contextguard"
 	"literouter/internal/provider"
+	"literouter/internal/storage"
 	"literouter/internal/translator"
 )
 
@@ -258,5 +263,85 @@ func TestProbeTimeoutIsShortButStaysAboveTheRealCost(t *testing.T) {
 	// And the smallest probes are not made to wait on the per-token term alone.
 	if probeTimeout(1) < probeBaseTimeout {
 		t.Fatal("a tiny probe got less than the base deadline")
+	}
+}
+
+// A model belonging to a custom provider has to be probed through that provider. Sent to
+// the OAuth pool it finds no account, and to a built-in client an unknown model — so every
+// size came back "refused" in a few hundred milliseconds while the plain Test button on the
+// same card reported OK. Sizes refused faster than the prompt could be uploaded are not
+// refusals.
+func TestProbeReachesCustomProviderModels(t *testing.T) {
+	var seen struct {
+		calls int
+		model string
+		words int
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		seen.calls++
+		seen.model = body.Model
+		for _, message := range body.Messages {
+			seen.words += len(strings.Fields(message.Content))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":%d}}`, seen.words)
+	}))
+	defer upstream.Close()
+
+	registry := NewCustomProviderRegistry(upstream.Client())
+	// A provider with no keys is skipped by Reload, so the fixture needs one to be claimed
+	// at all.
+	if err := registry.Reload([]storage.CustomProvider{{
+		ID: "fpt", Prefix: "fpt-ai", Name: "FPT AI", BaseURL: upstream.URL,
+		APIType: "chat", Enabled: true,
+		Keys: []storage.CustomProviderKey{{
+			ID: "k1", ProviderID: "fpt", Label: "test", Enabled: true, Weight: 1, Secret: "secret",
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	oauth := &sizedUpstream{limit: 1 << 30}
+	service := New(Options{OAuthInference: oauth, CustomProviders: registry})
+
+	probe := service.ProbeContextWindow(context.Background(), "fpt-ai/GLM-5.2", 40_000)
+
+	if !probe.Accepted || probe.Error != "" {
+		t.Fatalf("probe = %+v", probe)
+	}
+	if seen.calls != 1 {
+		t.Fatalf("custom upstream calls = %d, want 1", seen.calls)
+	}
+	if oauth.calls != 0 {
+		t.Fatalf("the OAuth pool was asked about a custom-provider model %d times", oauth.calls)
+	}
+	// The prefix is stripped before the request leaves, and the prompt is full size.
+	if seen.model != "GLM-5.2" {
+		t.Fatalf("upstream received model %q, want the unprefixed id", seen.model)
+	}
+	if seen.words < 20_000 {
+		t.Fatalf("upstream received only %d words; the probe was not sent at full size", seen.words)
+	}
+}
+
+// A cost that was not paid must not be reported as one. Every attempt of one observed
+// search failed before reaching any upstream, and the result still claimed 628,000 tokens.
+func TestSpentTokensExcludeAttemptsThatNeverReachedTheUpstream(t *testing.T) {
+	service := New(Options{}) // no OAuth pool, no client: nothing can be reached
+	result := service.SearchContextWindow(context.Background(), "cx/gpt-5.6-luna", 100_000, 200_000)
+
+	if result.TokensSpent != 0 {
+		t.Fatalf("claimed %d tokens spent while nothing left the process: %+v", result.TokensSpent, result.Steps)
+	}
+	for _, step := range result.Steps {
+		if step.Reached {
+			t.Fatalf("step %+v claims it reached an upstream", step)
+		}
 	}
 }

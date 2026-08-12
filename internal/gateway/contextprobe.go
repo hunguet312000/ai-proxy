@@ -50,7 +50,12 @@ type ContextProbe struct {
 	// which is exactly the stretch where a person most wants to know what it is doing.
 	Started bool `json:"started,omitempty"`
 	// Attempt numbers the retry within one size, since a refusal is probed twice.
-	Attempt  int    `json:"attempt,omitempty"`
+	Attempt int `json:"attempt,omitempty"`
+	// Reached records whether the prompt got as far as the upstream. It is what makes the
+	// reported cost honest: a probe that failed before sending — an unknown model, a
+	// misconfigured provider — spent nothing, and counting its intended size claimed
+	// 628,000 tokens for a search whose every attempt failed in under a second.
+	Reached  bool   `json:"reached,omitempty"`
 	Error    string `json:"error,omitempty"`
 	Duration string `json:"duration,omitempty"`
 }
@@ -137,10 +142,16 @@ func (s *Service) ProbeContextWindow(ctx context.Context, model string, tokens i
 	probe.Duration = time.Since(start).Round(time.Millisecond).String()
 	defer func() { logProbe(model, probe) }()
 	if err != nil {
+		// An upstream that answers at all — even to refuse — has read the prompt, so the
+		// tokens were sent. A timeout on a large prompt has sent them too. Anything else
+		// failed before the wire.
+		var providerErr *provider.ProviderError
+		probe.Reached = errors.As(err, &providerErr)
 		// A deadline is not a refusal. Reporting it as one would tell the search that this
 		// size is too large and quietly install a ceiling that nothing measured.
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			probe.TimedOut = true
+			probe.Reached = true
 			probe.Error = fmt.Sprintf("no answer within %s", deadline.Round(time.Second))
 			return probe
 		}
@@ -148,6 +159,7 @@ func (s *Service) ProbeContextWindow(ctx context.Context, model string, tokens i
 		return probe
 	}
 	probe.Accepted = true
+	probe.Reached = true
 	if response.Usage.PromptTokens > 0 {
 		probe.Reported = response.Usage.PromptTokens
 	}
@@ -199,6 +211,25 @@ func (s *Service) sendProbe(ctx context.Context, model string, tokens int) (tran
 	upstream, err := translator.ToOpenAIRequest(request)
 	if err != nil {
 		return translator.OpenAIResponse{}, err
+	}
+	// A model claimed by a custom provider goes to that upstream and nowhere else, the same
+	// rule the serving paths follow. Without this the probe fell through to the OAuth pool,
+	// which has no account for a prefixed model, and then to the built-in OpenAI client,
+	// which does not know the model either — so every size came back refused in a few
+	// hundred milliseconds while the plain Test button on the same card said OK. Sizes
+	// "refused" faster than a 22k prompt can be uploaded are not refusals.
+	if target, ok := s.resolveCustomProvider(model); ok {
+		path, pathErr := customUpstreamPath(target.APIType)
+		if pathErr != nil {
+			return translator.OpenAIResponse{}, pathErr
+		}
+		upstream.Model = target.Model
+		var response translator.OpenAIResponse
+		if err := target.Client.DoJSON(ctx, path, upstream, &response); err != nil {
+			return translator.OpenAIResponse{}, err
+		}
+		s.touchCustomProviderKey(target.KeyID)
+		return response, nil
 	}
 	if s.oauthInference != nil {
 		response, oauthErr := s.oauthInference.DoJSON(ctx, upstream, "")
@@ -364,10 +395,14 @@ func (s *Service) probeWithConfirmation(ctx context.Context, model string, size 
 }
 
 // effective is the size to credit this probe with: what the upstream counted when it said
-// so, else what the filler was aimed at.
+// so, else what the filler was aimed at — and nothing at all when the prompt never left,
+// because a cost that was not paid must not be reported as one.
 func (probe ContextProbe) effective() int {
 	if probe.Reported > 0 {
 		return probe.Reported
+	}
+	if !probe.Reached {
+		return 0
 	}
 	return probe.Tokens
 }
