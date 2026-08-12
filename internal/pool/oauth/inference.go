@@ -584,6 +584,13 @@ func openAIToCodexRequest(request translator.OpenAIRequest, model string) map[st
 	if len(request.ResponseFormat) > 0 {
 		payload["text"] = map[string]any{"format": request.ResponseFormat}
 	}
+	// Forwarded when the caller sets one, but do not reach for it as a way to raise the
+	// cache hit rate. Measured 2026-07-29 over 725M prompt tokens: prompt_cache_key was
+	// 5.1% against 3.0% across six A/B rounds, and a Codex-CLI-shaped session id gave
+	// exactly 62.5% both on and off. Hits on this backend are binary — 0% or 78-98%,
+	// the signature of instance routing — and the same fixture in the same hour swung
+	// between them while a prefix-hash detector proved the payload never changed. The
+	// only lever that moves from here is sending less conversation.
 	if request.PromptCacheKey != "" {
 		payload["prompt_cache_key"] = request.PromptCacheKey
 	}

@@ -175,20 +175,6 @@ func oauthSessionKey(request translator.OpenAIRequest, conversationID, prefix st
 	return ""
 }
 
-// codexSessionID formats the conversation key as a UUID, which is the shape the
-// Codex CLI sends. The backend appears to route on it, and routing is what decides
-// whether the prompt cache can be reused: a request that lands on an instance with
-// a cold cache re-pays for the entire prefix.
-func codexSessionID(request translator.OpenAIRequest, conversationID string) string {
-	seed := oauthSessionKey(request, conversationID, "")
-	if seed == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte("codex-session\x00" + seed))
-	hexed := hex.EncodeToString(sum[:16])
-	return hexed[0:8] + "-" + hexed[8:12] + "-" + hexed[12:16] + "-" + hexed[16:20] + "-" + hexed[20:32]
-}
-
 func antigravityCallID(sessionID, name string, args []byte, signature string) string {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(sessionID))

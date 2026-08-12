@@ -48,30 +48,23 @@ Never invent or claim unfinished work completed. Distinguish verified facts from
 	if len(batches) == 0 {
 		return "", fmt.Errorf("summarizer received no messages")
 	}
-	summaries := make([]string, 0, len(batches))
-	for _, batch := range batches {
-		text, err := client.summarizeBatch(ctx, model, instruction, batch, input.MaxTokens)
-		if err != nil {
-			return "", err
-		}
-		summaries = append(summaries, text)
+	summaries, err := client.summarizeBatches(ctx, model, instruction, batches, input.MaxTokens)
+	if err != nil {
+		return "", err
 	}
 	for len(summaries) > 1 {
 		messages := make([]provider.Message, len(summaries))
 		for index, summary := range summaries {
 			messages[index] = provider.Message{Role: "user", Content: []provider.Content{{Type: "text", Text: summary}}}
 		}
-		next := make([]string, 0, len(summaries))
 		reductionBatches, err := contextguard.SummaryBatches(messages, budget)
 		if err != nil {
 			return "", err
 		}
-		for _, batch := range reductionBatches {
-			text, err := client.summarizeBatch(ctx, model, instruction+" Merge these partial summaries without dropping unique facts.", batch, input.MaxTokens)
-			if err != nil {
-				return "", err
-			}
-			next = append(next, text)
+		next, err := client.summarizeBatches(ctx, model,
+			instruction+" Merge these partial summaries without dropping unique facts.", reductionBatches, input.MaxTokens)
+		if err != nil {
+			return "", err
 		}
 		if len(next) >= len(summaries) {
 			return strings.Join(next, "\n"), nil
@@ -81,10 +74,56 @@ Never invent or claim unfinished work completed. Distinguish verified facts from
 	return summaries[0], nil
 }
 
+// maxConcurrentSummaryBatches bounds how many summarization calls are in flight at once.
+// Small, because they all land on the same account: the point is to stop the map phase
+// from costing the sum of its batches, not to saturate the upstream.
+const maxConcurrentSummaryBatches = 3
+
+// summarizeBatches compresses every batch and returns the results in batch order.
+//
+// The batches are independent by construction, and running them one after another meant
+// the whole map phase had to finish inside a single summaryTimeout — so a backlog needing
+// more than one batch spent the timeout and got trimmed anyway. Concurrently, the phase
+// costs about what its slowest batch costs.
+func (client summaryClient) summarizeBatches(ctx context.Context, model, instruction string,
+	batches [][]provider.Message, maxTokens int) ([]string, error) {
+	texts := make([]string, len(batches))
+	failures := make([]error, len(batches))
+	slots := make(chan struct{}, min(len(batches), maxConcurrentSummaryBatches))
+	var pending sync.WaitGroup
+	for index, batch := range batches {
+		pending.Add(1)
+		go func() {
+			defer pending.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			texts[index], failures[index] = client.summarizeBatch(ctx, model, instruction, batch, maxTokens)
+		}()
+	}
+	pending.Wait()
+	// One failed batch means the summary would silently lose that slice of the
+	// conversation, so the whole attempt fails and the caller falls back to trimming.
+	if err := errors.Join(failures...); err != nil {
+		return nil, err
+	}
+	return texts, nil
+}
+
+// summaryEffort is the reasoning effort every summarization call is sent at.
+//
+// It has to be stated. A summary request carries no Effort of its own, and the Codex
+// payload builder defaults an absent effort to "high", so each batch was a
+// quarter-million-token call to a reasoning model at full effort — which is where the
+// flat 60s on time-to-first-token came from, and why the gate below gave up on
+// summarizing at all rather than pay it. Compressing a transcript is not a reasoning
+// task: the instruction says what to preserve, and the model has only to rewrite what
+// is in front of it.
+const summaryEffort = "low"
+
 func (client summaryClient) summarizeBatch(ctx context.Context, model, instruction string, messages []provider.Message, maxTokens int) (string, error) {
 	temperature := 0.0
 	request := provider.Request{
-		Model: model, MaxTokens: maxTokens, Temperature: &temperature,
+		Model: model, MaxTokens: maxTokens, Temperature: &temperature, Effort: summaryEffort,
 		System: []provider.Content{{Type: "text", Text: instruction}}, Messages: messages,
 	}
 	upstreamRequest, err := translator.ToOpenAIRequest(request)
@@ -148,7 +187,14 @@ func (s *Service) summaryInputBudget(model string, maxTokens int) int {
 	if window <= 0 {
 		window = s.contextLimits.Window(model)
 	}
-	return max(window-max(maxTokens, 8_000)-max(window/20, 2_048), 1_024)
+	// The output reserve is a floor of 8k so a real summary has room to be written, but a
+	// floor has to stay smaller than the thing it is carved out of: against a 12k window
+	// it took two thirds of the budget, leaving batches so small the backlog shattered
+	// into dozens of them. Cap it at an eighth of the window so small models degrade
+	// proportionally instead of collapsing. Nothing changes above ~64k, which is every
+	// model actually in use here.
+	reserve := max(maxTokens, min(8_000, window/8))
+	return max(window-reserve-max(window/20, 2_048), 1_024)
 }
 
 type Service struct {
@@ -958,7 +1004,7 @@ func (s *Service) prepareContextStages(ctx context.Context, request provider.Req
 	// call cannot succeed — it just burns the whole summary timeout before the
 	// deterministic trim runs anyway, which showed up as a flat 60s added to
 	// time-to-first-token on every oversized turn.
-	if !s.summaryInputFits(older, model, limits, policy) {
+	if !s.summaryInputFits(older, model) {
 		if contextguard.ExceedsHardLimit(prepared, policy) {
 			slog.Warn("summary backlog exceeds the context window; trimming oldest turns without summarizing",
 				"model", prepared.Request.Model, "summary_model", model, "backlog_messages", len(older))
@@ -1010,15 +1056,30 @@ func (s *Service) resolveSummaryModel(requestModel string) string {
 	return requestModel
 }
 
-// summaryInputFits reports whether the backlog plus the summary's own output
-// still fits the window the summarization request would be sent under.
-func (s *Service) summaryInputFits(older []provider.Message, model string, limits contextguard.Limits, policy contextguard.Policy) bool {
-	window := limits.Window(model)
-	if window <= 0 {
-		return true
+// maxSummaryBatches bounds how large a backlog is worth summarizing. Three covers a
+// conversation roughly three times its own window, which is every overflow seen in the
+// logs; past that the summary costs more than the session it is trying to save, and the
+// deterministic trim is the better answer.
+const maxSummaryBatches = 3
+
+// summaryInputFits reports whether this backlog is worth attempting to summarize.
+//
+// It used to ask whether the backlog fit a single window. That was the right question for
+// a single-shot summarizer and the wrong one here: Summarize map-reduces through
+// SummaryBatches, so it handles a backlog of any size, and the check switched it off in
+// exactly the cases it exists for. Every trim in the production log came through this
+// gate — eight trims, eight refusals to summarize, no summary ever attempted.
+//
+// What does need bounding is the work, which is why this counts batches instead of
+// allowing everything. The batches run concurrently and at low effort now, so the bound
+// is about cost rather than the timeout it used to be about.
+func (s *Service) summaryInputFits(older []provider.Message, model string) bool {
+	budget := s.summaryInputBudget(model, s.summaryMaxTokens)
+	if budget <= 0 {
+		return false
 	}
 	tokens := contextguard.EstimateRequest(provider.Request{Model: model, Messages: older})
-	return tokens+s.summaryMaxTokens+policy.ReserveTokens <= window
+	return tokens <= budget*maxSummaryBatches
 }
 
 // trimStage runs the deterministic trim and stamps the outcome accordingly.

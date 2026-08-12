@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -325,6 +326,46 @@ func TestServiceSummarizesNearLimitOnceAndCaches(t *testing.T) {
 	}
 }
 
+// A backlog larger than one window used to be refused outright. That was the right rule
+// for a single-shot summarizer and the wrong one for this summarizer, which map-reduces
+// through SummaryBatches and handles any size — so the refusal fired in exactly the cases
+// batching exists for. In the production log it fired on all eight trims: eight refusals,
+// no summary ever attempted, 726 messages dropped instead.
+func TestServiceSummarizesABacklogLargerThanOneWindow(t *testing.T) {
+	client := &fakeClient{}
+	summarizer := &fakeSummarizer{text: "preserved facts"}
+	service := New(Options{
+		OpenAI: client, ContextEnabled: true,
+		ContextLimits: contextguard.Limits{Default: 12_000},
+		ContextPolicy: contextguard.Policy{
+			SoftRatio: 0.50, SummarizeRatio: 0.60, HardRatio: 0.95, KeepRecentTurns: 1,
+		},
+		Summarizer: summarizer, SummaryMaxTokens: 321, SummaryTimeout: time.Second,
+	})
+	// ~15.5k estimated tokens of backlog against a 12k window: more than one batch,
+	// comfortably fewer than maxSummaryBatches.
+	request := translator.OpenAIRequest{Model: "model", Messages: []translator.OpenAIMessage{
+		{Role: "user", Content: strings.Repeat("older fact ", 3000)},
+		{Role: "assistant", Content: strings.Repeat("older response ", 900)},
+		{Role: "user", Content: "latest instruction"},
+	}}
+	if _, err := service.Chat(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+
+	if summarizer.calls != 1 {
+		t.Fatalf("summarizer calls = %d, want the oversized backlog summarized", summarizer.calls)
+	}
+	// And the turn actually carries the summary rather than a hole where the history was.
+	last := client.last.Messages
+	if len(last) == 0 || last[len(last)-1].Content != "latest instruction" {
+		t.Fatalf("upstream messages = %#v", last)
+	}
+	if text, _ := last[0].Content.(string); !strings.Contains(text, "preserved facts") {
+		t.Fatalf("summary missing from the upstream request: %#v", last[0])
+	}
+}
+
 func TestServiceSkipsSummaryWhenBacklogExceedsWindow(t *testing.T) {
 	client := &fakeClient{}
 	// A summarizer that would block for the whole timeout if it were ever called.
@@ -379,6 +420,88 @@ func TestSummaryClientUsesOAuthInference(t *testing.T) {
 	}
 	if oauth.last.Model != "gpt-5.6-sol" {
 		t.Fatalf("OAuth model = %q", oauth.last.Model)
+	}
+	// A summary request that names no effort is sent at "high" by the Codex payload
+	// builder, which turned every batch into a full-effort reasoning call over a
+	// quarter-million tokens. Compression is not a reasoning task.
+	if oauth.last.Effort != summaryEffort {
+		t.Fatalf("summary effort = %q, want %q", oauth.last.Effort, summaryEffort)
+	}
+}
+
+// concurrentOAuthInference answers slowly enough that overlapping calls are observable,
+// and echoes back a marker from the batch it was given so ordering can be checked.
+type concurrentOAuthInference struct {
+	mu       sync.Mutex
+	calls    int
+	inFlight int
+	peak     int
+}
+
+func (fake *concurrentOAuthInference) DoJSON(_ context.Context, request translator.OpenAIRequest, _ string) (translator.OpenAIResponse, error) {
+	fake.mu.Lock()
+	fake.calls++
+	fake.inFlight++
+	fake.peak = max(fake.peak, fake.inFlight)
+	fake.mu.Unlock()
+	time.Sleep(20 * time.Millisecond)
+	fake.mu.Lock()
+	fake.inFlight--
+	fake.mu.Unlock()
+
+	marker := "unknown"
+	for _, message := range request.Messages {
+		text := fmt.Sprintf("%v", message.Content)
+		if index := strings.Index(text, "batch-"); index >= 0 {
+			marker = text[index : index+7]
+			break
+		}
+	}
+	return translator.OpenAIResponse{Choices: []translator.OpenAIChoice{
+		{Message: translator.OpenAIMessage{Role: "assistant", Content: marker}}}}, nil
+}
+
+func (fake *concurrentOAuthInference) DoStream(context.Context, translator.OpenAIRequest, string) (io.ReadCloser, error) {
+	return nil, errors.New("unused")
+}
+func (fake *concurrentOAuthInference) SupportsAnthropicPassthrough(string) bool { return false }
+func (fake *concurrentOAuthInference) DoAnthropicStream(context.Context, []byte, string, string, string) (io.ReadCloser, error) {
+	return nil, errors.New("unused")
+}
+
+// The map phase used to run its batches one after another, so a backlog needing more than
+// one batch had to fit the whole chain inside a single summaryTimeout — and mostly did
+// not, which is half of why summarizing was refused outright. They are independent calls,
+// so they overlap; the results still have to come back in batch order or the summary
+// reassembles the conversation out of sequence.
+func TestSummaryBatchesRunConcurrentlyAndKeepTheirOrder(t *testing.T) {
+	oauth := &concurrentOAuthInference{}
+	service := New(Options{OAuthInference: oauth, ContextLimits: contextguard.Limits{Default: 2_000}})
+	batches := make([][]provider.Message, 4)
+	for index := range batches {
+		batches[index] = []provider.Message{{Role: "user", Content: []provider.Content{
+			{Type: "text", Text: fmt.Sprintf("batch-%d contents", index)}}}}
+	}
+
+	texts, err := (summaryClient{service: service}).summarizeBatches(
+		context.Background(), "gpt-5.6-sol", "instruction", batches, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if oauth.calls != 4 {
+		t.Fatalf("upstream calls = %d, want one per batch", oauth.calls)
+	}
+	if oauth.peak < 2 {
+		t.Fatalf("peak concurrent calls = %d; the batches ran one after another", oauth.peak)
+	}
+	if oauth.peak > maxConcurrentSummaryBatches {
+		t.Fatalf("peak concurrent calls = %d, over the bound of %d", oauth.peak, maxConcurrentSummaryBatches)
+	}
+	for index, text := range texts {
+		if want := fmt.Sprintf("batch-%d", index); text != want {
+			t.Fatalf("texts[%d] = %q, want %q", index, text, want)
+		}
 	}
 }
 
