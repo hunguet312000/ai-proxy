@@ -240,10 +240,13 @@ func (inference *Inference) openWithExcluded(ctx context.Context, request transl
 		var providerErr *provider.ProviderError
 		switch {
 		case errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusTooManyRequests:
+			// DecodeProviderError already read Retry-After off the response; passing it on
+			// is what turns the selector's fixed 30s/1m/2m ladder into the wait the
+			// upstream actually asked for.
 			if selected.Account.Provider == "antigravity" {
-				inference.selector.ReportModelRateLimit(selected.Account.ID, selected.ResolvedModel)
+				inference.selector.ReportModelRateLimitAfter(selected.Account.ID, selected.ResolvedModel, providerErr.RetryAfter)
 			} else {
-				inference.selector.ReportRateLimit(selected.Account.ID)
+				inference.selector.ReportRateLimitAfter(selected.Account.ID, providerErr.RetryAfter)
 			}
 		case retiresAccount(err):
 			inference.selector.ReportError(selected.Account.ID)

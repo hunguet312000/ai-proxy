@@ -96,7 +96,7 @@ func (inference *Inference) openAnthropic(ctx context.Context, payload []byte, m
 		}
 		var providerErr *provider.ProviderError
 		if errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusTooManyRequests {
-			inference.selector.ReportRateLimit(selected.Account.ID)
+			inference.selector.ReportRateLimitAfter(selected.Account.ID, providerErr.RetryAfter)
 		} else {
 			inference.selector.ReportError(selected.Account.ID)
 		}

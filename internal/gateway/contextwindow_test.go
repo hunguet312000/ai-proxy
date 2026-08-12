@@ -108,6 +108,56 @@ func TestObservedPromptRaisesWindowAboveCatalogGuess(t *testing.T) {
 	}
 }
 
+// The floor only ever rises when a served prompt beats the current belief — but the guard
+// shrinks every request to fit that belief before sending it, so once the belief is too
+// low nothing large enough to correct it is ever sent again. Live consequence: 845 turns
+// had been served above a catalogued 256,000, the largest at 372,860, and the catalogue
+// still read 256,000 because all of them predated the guard. Seeding is the way out; the
+// evidence was already in usage_events and nothing read it.
+func TestSeededFloorCorrectsAWindowTheGuardCanNoLongerDisprove(t *testing.T) {
+	catalogued := New(Options{
+		ContextWindow: func(context.Context, string) (int, error) { return 256_000, nil },
+	})
+	if window := catalogued.resolveContextWindow(context.Background(), "cx/gpt-5.6-luna"); window != 256_000 {
+		t.Fatalf("without seeding: got %d, want the catalogued 256000", window)
+	}
+
+	seeded := New(Options{
+		ContextWindow:   func(context.Context, string) (int, error) { return 256_000, nil },
+		ObservedPrompts: map[string]int{"cx/gpt-5.6-luna": 372_860},
+	})
+	if window := seeded.resolveContextWindow(context.Background(), "cx/gpt-5.6-luna"); window != 372_860 {
+		t.Fatalf("seeded floor: got %d, want 372860", window)
+	}
+}
+
+// A floor is a claim about one model, and it may only raise a belief. Anything that could
+// lower one would strangle a model on start-up, which is worse than the guess it replaced.
+func TestSeededFloorsOnlyRaiseAndIgnoreImplausibleEntries(t *testing.T) {
+	service := New(Options{
+		ContextWindow: func(context.Context, string) (int, error) { return 400_000, nil },
+		ObservedPrompts: map[string]int{
+			"kept":   500_000,
+			"under":  120_000, // below the catalogue: must not lower it
+			"tiny":   1_024,   // below what a window may plausibly be
+			"":       900_000,
+			"other":  0,
+			"raised": 260_000,
+		},
+	})
+	cases := map[string]int{"kept": 500_000, "under": 400_000, "tiny": 400_000, "other": 400_000, "raised": 400_000}
+	for model, want := range cases {
+		if window := service.resolveContextWindow(context.Background(), model); window != want {
+			t.Fatalf("%s window = %d, want %d", model, window, want)
+		}
+	}
+	// And a later observation still wins over a seeded one, exactly as within a run.
+	service.recordUsage(UsageEvent{Model: "raised", PromptTokens: 610_000})
+	if window := service.resolveContextWindow(context.Background(), "raised"); window != 610_000 {
+		t.Fatalf("observation after seeding = %d, want 610000", window)
+	}
+}
+
 func TestObservationOverridesMisreadCeiling(t *testing.T) {
 	service := New(Options{})
 	service.recordContextWindow("custom/model", 20_000)

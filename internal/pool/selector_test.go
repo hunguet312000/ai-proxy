@@ -182,6 +182,55 @@ func TestSelectorRateLimitAndCircuitBreaker(t *testing.T) {
 	}
 }
 
+// The ladder is a guess about an upstream that just answered the question. Waiting longer
+// than asked idles an account that is ready; waiting less earns another 429 and pushes the
+// guess further out. Both bounds exist because one malformed header must not be able to
+// park the only account for hours, or to switch the cooldown off entirely.
+func TestRateLimitCooldownPrefersTheUpstreamsOwnWait(t *testing.T) {
+	base := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		retryAfter time.Duration
+		want       time.Duration
+	}{
+		{"upstream said nothing, ladder applies", 0, 30 * time.Second},
+		{"shorter than the ladder", 5 * time.Second, 5 * time.Second},
+		{"longer than the ladder", 4 * time.Minute, 4 * time.Minute},
+		{"absurdly long is capped", 6 * time.Hour, maxUpstreamRetryAfter},
+		{"sub-second is floored", 10 * time.Millisecond, minUpstreamRetryAfter},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			now := base
+			selector := NewSelector(New([]Account{
+				{ID: "a", Provider: "codex", Enabled: true, Weight: 1},
+				{ID: "b", Provider: "codex", Enabled: true, Weight: 1},
+			}), StrategySmart, nil)
+			selector.now = func() time.Time { return now }
+			selector.ReportRateLimitAfter("a", testCase.retryAfter)
+
+			// Still cooling down a hair before the deadline...
+			now = base.Add(testCase.want - time.Millisecond)
+			if result, err := selector.Select(SelectRequest{Provider: "codex"}); err != nil || result.Account.ID != "b" {
+				t.Fatalf("before the deadline: selected %#v, %v; want the other account", result, err)
+			}
+			// ...and available again once it passes.
+			now = base.Add(testCase.want)
+			seen := map[string]bool{}
+			for range 4 {
+				result, err := selector.Select(SelectRequest{Provider: "codex"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				seen[result.Account.ID] = true
+			}
+			if !seen["a"] {
+				t.Fatalf("account still cooling down after %s", testCase.want)
+			}
+		})
+	}
+}
+
 // A circuit-broken account is still held back whenever anything else can serve — that is
 // the whole point of the breaker, and it must not be weakened by the last-account rule.
 func TestSelectorPrefersAHealthyPeerOverACircuitBrokenAccount(t *testing.T) {

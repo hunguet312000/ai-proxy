@@ -211,14 +211,33 @@ func (s *Selector) ReportSuccess(accountID string, tokens int) {
 }
 
 func (s *Selector) ReportRateLimit(accountID string) {
-	s.reportRateLimit(accountID, "")
+	s.reportRateLimit(accountID, "", 0)
+}
+
+// ReportRateLimitAfter is ReportRateLimit for callers holding the upstream's own answer
+// to "how long". Zero means it did not say, and the ladder applies.
+func (s *Selector) ReportRateLimitAfter(accountID string, retryAfter time.Duration) {
+	s.reportRateLimit(accountID, "", retryAfter)
 }
 
 func (s *Selector) ReportModelRateLimit(accountID, model string) {
-	s.reportRateLimit(accountID, model)
+	s.reportRateLimit(accountID, model, 0)
 }
 
-func (s *Selector) reportRateLimit(accountID, model string) {
+// ReportModelRateLimitAfter is ReportModelRateLimit with the upstream's stated wait.
+func (s *Selector) ReportModelRateLimitAfter(accountID, model string, retryAfter time.Duration) {
+	s.reportRateLimit(accountID, model, retryAfter)
+}
+
+// Bounds on a wait the upstream asked for. The floor stops a zero or sub-second value
+// from turning the cooldown off, and the ceiling stops one malformed header from parking
+// an account for hours — which matters most when it is the only account there is.
+const (
+	minUpstreamRetryAfter = time.Second
+	maxUpstreamRetryAfter = 15 * time.Minute
+)
+
+func (s *Selector) reportRateLimit(accountID, model string, retryAfter time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UTC()
@@ -229,6 +248,12 @@ func (s *Selector) reportRateLimit(accountID, model string) {
 		backoff = time.Minute
 	} else if state.consecutive429s >= 3 {
 		backoff = 2 * time.Minute
+	}
+	// The ladder is a guess about an upstream that has just told us the answer. Prefer
+	// what it said, in either direction: waiting longer than asked idles an account that
+	// is ready, and waiting less earns another 429 and pushes the guess further out.
+	if retryAfter > 0 {
+		backoff = min(max(retryAfter, minUpstreamRetryAfter), maxUpstreamRetryAfter)
 	}
 	if model != "" {
 		s.modelCooldown[accountID+"\x00"+model] = now.Add(backoff)

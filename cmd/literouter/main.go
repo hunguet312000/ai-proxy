@@ -1031,6 +1031,14 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 			slog.Info("seeded tokenizer calibrations from previous runs", "models", len(learnedCalibrations))
 		}
 	}
+	// The largest prompt each model has actually been served, as the upstream counted it.
+	// Same contract again: losing it only means the guard starts from the catalogue's
+	// figure, which is where it started before this existed.
+	observedPrompts, err := store.LargestServedPrompts(context.Background())
+	if err != nil {
+		slog.Warn("load largest served prompts", "error", err)
+		observedPrompts = nil
+	}
 	return gateway.New(gateway.Options{
 		OpenAI: openAIClient, XAI: xaiClient, OpenAIStream: openAIStream, XAIStream: xaiStream,
 		OAuthInference:  oauthInference,
@@ -1053,6 +1061,7 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 		MaxOutputTokens:     cfg.Router.MaxOutputTokens,
 		LearnedOutputTokens: learnedOutputTokens,
 		LearnedCalibrations: learnedCalibrations,
+		ObservedPrompts:     observedPrompts,
 		OnCalibration: func(cal gateway.TokenCalibration) {
 			// Runs on the request path; the in-memory scale is already in effect, so
 			// this write only decides whether the next start remembers it.

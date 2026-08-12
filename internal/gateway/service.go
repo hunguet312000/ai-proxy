@@ -287,10 +287,23 @@ type Options struct {
 	// context window, so the catalog can be corrected. Same contract as OnOutputLimit:
 	// it runs on the request path and must not block.
 	//
-	// Learned windows need no seeding counterpart. They are persisted into the same
-	// catalog column ContextWindow already reads, so the next boot picks them up as
-	// ordinary catalog data.
+	// A ceiling learned this way needs no seeding counterpart: it is persisted into the
+	// same catalog column ContextWindow already reads, so the next boot picks it up as
+	// ordinary catalog data. The floor is the half that does — see ObservedPrompts.
 	OnContextWindow func(model string, window int)
+	// ObservedPrompts seeds, per model, the largest prompt the upstream counted itself
+	// and answered. It is a floor under that model's window: resolveContextWindow raises
+	// a belief to meet it and never lowers one, so a wrong entry cannot strangle a model.
+	//
+	// Seeding this is what breaks a trap the runtime path cannot escape on its own. The
+	// floor only rises when a served prompt exceeds the current belief, but the guard
+	// compacts every request down to fit that belief before sending it — so once the
+	// belief is too low, no prompt large enough to correct it is ever sent again, and the
+	// mistake becomes permanent. Measured here: 845 turns had been served with
+	// upstream-counted prompts above the catalogued 256,000 for cx/gpt-5.6-*, the largest
+	// 372,860, and the catalogue still read 256,000 because every one of those turns
+	// predated the guard. The evidence was already in usage_events; nothing was reading it.
+	ObservedPrompts map[string]int
 	// LearnedCalibrations seeds the per-model tokenizer scales measured by previous
 	// runs, so budget math starts from evidence instead of the conventional guesses
 	// and re-earns nothing after a restart.
@@ -343,6 +356,7 @@ func New(options Options) *Service {
 	service.SetLongContext(options.LongContextModel, options.LongContextPercent)
 	service.SetImageRoute(options.ImageModel, options.TextOnlyModels)
 	service.seedTokenScales(options.LearnedCalibrations)
+	service.seedObservedPrompts(options.ObservedPrompts)
 	mode := ContextModeOff
 	if options.ContextEnabled {
 		mode = strings.ToLower(strings.TrimSpace(options.ContextMode))

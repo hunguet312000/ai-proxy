@@ -182,6 +182,38 @@ func (s *Service) observeContextWindow(model string, promptTokens int) bool {
 	return true
 }
 
+// seedObservedPrompts installs the per-model floors earlier runs established, applying the
+// same admission rule the live path uses so a seeded floor and an observed one mean exactly
+// the same thing.
+//
+// Only ever raises. The map arrives from storage, and a floor is a claim that a prompt of
+// this size was answered — merging by max keeps that reading correct no matter what order
+// the entries arrive in or what a later restart adds.
+func (s *Service) seedObservedPrompts(observed map[string]int) {
+	if len(observed) == 0 {
+		return
+	}
+	s.learnedMu.Lock()
+	defer s.learnedMu.Unlock()
+	if s.observedWindows == nil {
+		s.observedWindows = map[string]int{}
+	}
+	seeded := 0
+	for model, promptTokens := range observed {
+		if model == "" || promptTokens <= minLearnableContextWindow {
+			continue
+		}
+		if existing, ok := s.observedWindows[model]; ok && existing >= promptTokens {
+			continue
+		}
+		s.observedWindows[model] = promptTokens
+		seeded++
+	}
+	if seeded > 0 {
+		slog.Info("seeded served-prompt floors from previous runs", "models", seeded)
+	}
+}
+
 // contextWindowStepDown is how far the believed window drops when an upstream refuses on
 // context without naming its limit.
 //

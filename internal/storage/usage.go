@@ -150,6 +150,36 @@ WHERE id IN (
 	return deleted, nil
 }
 
+// LargestServedPrompts reports, per model, the biggest prompt the upstream both counted
+// itself and answered. That is a floor under the model's real context window, and it is
+// already sitting in this database — nothing has to be spent to learn it again.
+//
+// The two filters are what make the number trustworthy, and both were paid for. Rows
+// carrying LiteRouter's own estimate are excluded because the estimator was measured
+// reading 633,361 for a prompt the upstream counted as 350,018; and rows for turns that
+// did not succeed are excluded because failed turns are recorded with an estimated prompt
+// size too, which is how apparent successes past 600k once appeared in this table.
+func (s *Store) LargestServedPrompts(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT model, MAX(prompt_tokens) FROM usage_events
+WHERE status = 'ok' AND prompt_estimated = 0 AND prompt_tokens > 0 AND model <> ''
+GROUP BY model`)
+	if err != nil {
+		return nil, fmt.Errorf("largest served prompts: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[string]int)
+	for rows.Next() {
+		var model string
+		var tokens int
+		if err := rows.Scan(&model, &tokens); err != nil {
+			return nil, fmt.Errorf("scan largest served prompt: %w", err)
+		}
+		result[model] = tokens
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) UsageSummary(ctx context.Context, since time.Time, recentLimit int) (UsageSummary, error) {
 	if recentLimit <= 0 {
 		recentLimit = 30
