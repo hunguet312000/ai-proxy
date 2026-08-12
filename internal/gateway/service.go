@@ -7,14 +7,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/labstack/echo/v4"
+
 	"literouter/internal/cache"
 	"literouter/internal/contextguard"
 	"literouter/internal/provider"
+	"literouter/internal/toolstore"
 	"literouter/internal/translator"
 )
 
@@ -243,6 +247,45 @@ type Service struct {
 	summaryMaxTokens int
 	summaryTimeout   time.Duration
 	onUsage          func(UsageEvent)
+	// toolStore holds full tool-result bodies elided by aggressive truncation, keyed
+	// by content hash so a truncated marker can point at them. Served through
+	// GET /ref/:id; nil disables the endpoint and keeps truncation hintless.
+	toolStore *toolstore.Store
+}
+
+// SetToolStore wires the reference store that truncation captures into, and that
+// GET /ref/:id serves from. Reconfigurable at runtime; a nil store disables capture
+// and the endpoint.
+func (s *Service) SetToolStore(store *toolstore.Store) {
+	if s != nil {
+		s.toolStore = store
+	}
+}
+
+// ToolStore returns the wired reference store, or nil when the feature is disabled.
+func (s *Service) ToolStore() *toolstore.Store {
+	if s == nil {
+		return nil
+	}
+	return s.toolStore
+}
+
+// refHandler serves the full body of an elided tool result by content hash. The
+// marker points the model here ("or fetch the full output"), so a truncated block can
+// be recovered without re-running the tool.
+func (s *Service) refHandler(c echo.Context) error {
+	if s.toolStore == nil {
+		return echo.NewHTTPError(http.StatusNotFound, "tool reference store is disabled")
+	}
+	body, ok := s.toolStore.Get(c.Param("id"))
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotFound, "tool reference not found")
+	}
+	// text/plain, not application/octet-stream: the consumer is the model reading the
+	// body back into context, and tool output is text.
+	c.Response().Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, err := c.Response().Write([]byte(body))
+	return err
 }
 
 type Options struct {
@@ -310,6 +353,10 @@ type Options struct {
 	// 372,860, and the catalogue still read 256,000 because every one of those turns
 	// predated the guard. The evidence was already in usage_events; nothing was reading it.
 	ObservedPrompts map[string]int
+	// ToolStore wires the reference store that aggressive truncation captures elided
+	// tool-result bodies into, and that GET /ref/:id serves back. Nil disables the
+	// feature (truncation keeps its re-run hint only).
+	ToolStore *toolstore.Store
 	// LearnedCalibrations seeds the per-model tokenizer scales measured by previous
 	// runs, so budget math starts from evidence instead of the conventional guesses
 	// and re-earns nothing after a restart.
@@ -357,7 +404,8 @@ func New(options Options) *Service {
 		customProviders: options.CustomProviders, touchCustomKey: options.TouchCustomKey,
 		summarizer: options.Summarizer, summaryCache: options.SummaryCache, summaryModel: options.SummaryModel,
 		summaryMaxTokens: options.SummaryMaxTokens, summaryTimeout: options.SummaryTimeout,
-		onUsage: options.OnUsage,
+		onUsage:   options.OnUsage,
+		toolStore: options.ToolStore,
 	}
 	service.SetPlanModel(options.PlanModel)
 	service.SetCompactModel(options.CompactModel)
@@ -485,6 +533,11 @@ func (s *Service) activeContextPolicy() contextguard.Policy {
 	}
 	if s.ContextMode() == ContextModeAggressive {
 		policy = contextguard.AggressivePolicy(policy)
+	}
+	// Aggressive truncation gets a reference store to capture elided bodies into,
+	// so a cut is retrievable instead of gone. Only wired when a store exists.
+	if store := s.toolStore; store != nil {
+		policy.StoreResult = store.Put
 	}
 	return policy
 }

@@ -291,11 +291,30 @@ func recoveryHint(call resultSource) string {
 	return "re-run " + call.name + " with " + compacted.String()
 }
 
+// fetchHint is the reference-store alternative to re-running the tool. It returns
+// empty when no store is wired (re-running stays the only path), so the note's bytes
+// are unchanged for every caller that does not use the feature.
+func fetchHint(policy Policy, call resultSource, fullID string) string {
+	if policy.StoreResult == nil || fullID == "" {
+		return ""
+	}
+	command := call.name
+	if command == "" {
+		command = "the tool"
+	}
+	// The URL is a best-effort pointer, not a contract: the store is per-process and
+	// evicts under pressure, so the hint always pairs it with the re-run path.
+	return " (or fetch the full output: GET /ref/" + fullID + " — the result of " + command + ")"
+}
+
 // truncateToolResult shrinks one old bulky tool result: structure-aware
 // compression first (diff hunks, grep matches, log highlights survive), then a
 // line-aligned head/tail cap. The head keeps the file paths and line numbers
 // that lead tool output; the tail keeps exit status and final errors. The marker
-// tells the model to re-run the tool rather than guess at elided content.
+// tells the model to re-run the tool rather than guess at elided content, and —
+// when the policy carries a result store — records the content-hash under which
+// the full body can be fetched back, turning the lossy cut into practically
+// lossless retrieval.
 func truncateToolResult(call resultSource, toolUseID, text string, isError bool, policy Policy) (string, bool) {
 	head, tail, threshold := policy.truncateSizes()
 	if isError {
@@ -326,9 +345,16 @@ func truncateToolResult(call resultSource, toolUseID, text string, isError bool,
 			body, spec.contiguous = result.Compressed, false
 		}
 	}
+	// fullID is computed lazily and only when a store is wired, so callers that do not
+	// use the feature pay nothing. The marker always carries the shortened hash; the
+	// reference store needs the full one, which is what the fetch hint addresses.
+	var fullID string
+	if policy.StoreResult != nil {
+		fullID = sha256Hex(text)
+	}
 	switch {
 	case len(body) > head+tail:
-		body = headTailByBytes(body, head, tail, recoveryHint(call), spec)
+		body = headTailByBytes(body, head, tail, recoveryHint(call)+fetchHint(policy, call, fullID), spec)
 	case len(body) < len(text):
 		// Compression alone met the cap, so headTailByBytes never ran — and it was carrying
 		// the note. Seen on a real transcript: a 274-line file read collapsed to 143 bytes
@@ -341,14 +367,27 @@ func truncateToolResult(call resultSource, toolUseID, text string, isError bool,
 		// first, next to the header, it is the frame for everything that follows.
 		body = fmt.Sprintf(
 			"[... %s elided by the proxy to fit the context window; %s if you need the full output ...]\n%s",
-			spec.describeCompressed(body, len(text)), recoveryHint(call), body)
+			spec.describeCompressed(body, len(text)), recoveryHint(call)+fetchHint(policy, call, fullID), body)
 	}
 	replacement := fmt.Sprintf("%s tool_use_id=%s original_bytes=%d hash=%s]\n%s",
 		truncateMarker, toolUseID, len(text), shortHash(sha256.Sum256([]byte(text))), body)
 	if len(replacement) >= len(text) {
 		return "", false
 	}
+	if policy.StoreResult != nil {
+		// Only capture when the cut is real (the shortened form is strictly smaller,
+		// which is what the length check above decided). The full hash, not the marker's
+		// shortened one, is the key: it is collision-safe and is what a fetch endpoint
+		// would address. The store is fire-and-forget — the request path must not stall
+		// on a body it is already eliding.
+		policy.StoreResult(sha256Hex(text), call.name, toolUseID, text)
+	}
 	return replacement, true
+}
+
+func sha256Hex(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }
 
 // truncateSizes resolves the head/tail/threshold knobs, falling back to package

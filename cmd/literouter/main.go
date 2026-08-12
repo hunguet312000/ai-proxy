@@ -34,12 +34,19 @@ import (
 	"literouter/internal/recommendation"
 	"literouter/internal/secret"
 	"literouter/internal/storage"
+	"literouter/internal/toolstore"
 	"literouter/internal/translator"
 	"literouter/internal/ui"
 	"literouter/internal/usage"
 )
 
-const healthcheckTimeout = 2 * time.Second
+const (
+	healthcheckTimeout = 2 * time.Second
+	// toolstoreDefaultMaxBytes caps how much elided tool output the reference store
+	// holds in memory (64 MiB). Enough for the bulk of a long coding session's
+	// truncated reads while never becoming a second copy of the whole conversation.
+	toolstoreDefaultMaxBytes = 64 << 20
+)
 
 func main() {
 	os.Exit(run())
@@ -1128,6 +1135,12 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 	if cfg.Cache.ResponseMaxEntries > 0 {
 		responseCache = cache.NewResponseCache(cfg.Cache.ResponseMaxEntries, cfg.Cache.ResponseTTL)
 	}
+	// Reference store for tool results elided by aggressive context truncation. The
+	// full bodies are kept in memory (capped), addressed by content hash, and served
+	// back through GET /ref/<hash> so the model can recover a truncated block without
+	// re-running the tool. Always-on: it is small, bounded, and the fetch path is the
+	// only consumer.
+	toolRefStore := toolstore.New(toolstoreDefaultMaxBytes)
 	// Output caps discovered by earlier runs. A failure here only costs the gateway the
 	// one rejection it takes to rediscover them, so it must not stop startup.
 	learnedOutputTokens, err := store.CatalogMaxOutputTokens(context.Background())
@@ -1172,6 +1185,7 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 		CompressionMode: cache.CompressionMode(cfg.Cache.CompressionMode), PromptMinBytes: cfg.Cache.PromptCacheMinBytes,
 		XAIPromptCache: cfg.Cache.XAIPromptCache,
 		Models:         models, Aliases: cfg.Router.ModelAliases,
+		ToolStore:           toolRefStore,
 		PlanModel:           cfg.Router.PlanModel,
 		CompactModel:        cfg.Router.CompactModel,
 		FallbackModel:       cfg.Router.FallbackModel,

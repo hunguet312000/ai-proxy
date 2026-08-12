@@ -15,6 +15,7 @@ import (
 
 	"literouter/internal/contextguard"
 	"literouter/internal/provider"
+	"literouter/internal/toolstore"
 	"literouter/internal/translator"
 )
 
@@ -285,6 +286,64 @@ func TestCompactTurnTooLargeForTheWindowTrims(t *testing.T) {
 	}
 	if outcome.stage != "trim" {
 		t.Fatalf("stage = %q, want trim", outcome.stage)
+	}
+}
+
+// The reference-store capture must survive the trip through the real production shape:
+// aggressive mode, summarize=trim, a window big enough that compact (with truncation)
+// fits the request without dropping turns — so the truncate marker that carries /ref/
+// is exactly what is forwarded upstream, not a casualty of a later trim.
+func TestAggressiveTruncateCaptureSurvivesTrimModeForwarding(t *testing.T) {
+	store := toolstore.New(0)
+	service := New(Options{
+		ContextEnabled: true, ContextMode: ContextModeAggressive, SummarizeMode: SummarizeModeTrim,
+		ContextLimits: contextguard.Limits{Default: 30_000},
+		ContextPolicy: contextguard.Policy{
+			SoftRatio: 0.20, TruncateRatio: 0.25, SummarizeRatio: 0.30, HardRatio: 0.95, KeepRecentTurns: 1,
+		},
+		ToolStore: store,
+	})
+	body := strings.Repeat("old tool result line that should be preserved\n", 900)
+	var messages []provider.Message
+	messages = append(messages,
+		provider.Message{Role: "assistant", Content: []provider.Content{{Type: "tool_use", ToolUseID: "call-old", Name: "Bash", Input: []byte(`{"command":"make"}`)}}},
+		provider.Message{Role: "user", Content: []provider.Content{{Type: "tool_result", ToolUseID: "call-old", Text: body}}},
+		provider.Message{Role: "user", Content: []provider.Content{{Type: "text", Text: "latest instruction"}}},
+	)
+	request := provider.Request{Model: "model", Messages: messages, MaxTokens: 100}
+
+	prepared, outcome, err := service.prepareContextStages(context.Background(), request)
+	if err != nil {
+		t.Fatalf("prepareContextStages() = %v", err)
+	}
+	// The request must be forwarded (compact enough to fit), not trimmed — trimming would
+	// drop the very turn whose truncation we are trying to prove.
+	if outcome.stage == "trim" {
+		t.Fatal("a compactable request was trimmed; the truncate capture is moot")
+	}
+	before := contextguard.EstimateRequest(request)
+	after := contextguard.EstimateRequest(prepared)
+	if after >= before {
+		t.Fatalf("aggressive compact did not shrink the request: %d -> %d", before, after)
+	}
+	// The marker with the /ref/ reference must be what is actually forwarded.
+	var marker string
+	for _, message := range prepared.Messages {
+		for _, block := range message.Content {
+			if strings.HasPrefix(block.Text, "[literouter:truncate-v1") {
+				marker = block.Text
+			}
+		}
+	}
+	if marker == "" {
+		t.Fatal("the forwarded request carries no truncate marker")
+	}
+	hash := toolstore.ID(body)
+	if _, ok := store.Get(hash); !ok {
+		t.Fatal("the truncated body was not captured into the reference store")
+	}
+	if !strings.Contains(marker, "/ref/"+hash) {
+		t.Fatalf("forwarded marker lacks the fetch reference: %q", marker[:min(len(marker), 200)])
 	}
 }
 

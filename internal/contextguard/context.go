@@ -25,6 +25,11 @@ type Policy struct {
 	// and SummarizeRatio so mechanical truncation gets a chance before the LLM
 	// summary does.
 	TruncateRatio float64
+	// StoreResult, when non-nil, receives the full body of every tool result this
+	// stage truncates, keyed by the same content hash the marker records. It lets
+	// truncation stay aggressive while the elided output remains fetchable — the
+	// marker's "re-run the tool" hint gains a "or fetch id=…" alternative.
+	StoreResult func(id, tool, toolUseID, body string)
 	// TruncateThresholdBytes is the size below which an old tool result is never
 	// truncated; TruncateHeadBytes/TruncateTailBytes are what survives of a larger
 	// one. Zero values fall back to the package defaults.

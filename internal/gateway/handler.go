@@ -92,6 +92,9 @@ func (s *Service) Register(e *echo.Echo) {
 	e.POST("/v1/responses/*", s.responsesUnsupported)
 	e.GET("/v1/models", s.modelsHandler)
 	e.GET("/v1/models/:id", s.modelHandler)
+	// Full bodies of tool results elided by aggressive truncation, addressed by the
+	// content hash a truncation marker records. Disabled when no store is wired.
+	e.GET("/ref/:id", s.refHandler)
 }
 
 func (s *Service) chatHandler(c echo.Context) error {

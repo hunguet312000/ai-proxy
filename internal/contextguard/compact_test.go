@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"literouter/internal/provider"
+	"literouter/internal/toolstore"
 )
 
 func toolExchange(id, name, input, result string, isError bool) []provider.Message {
@@ -230,6 +231,53 @@ func TestTruncateKeepsErrorResultsIntact(t *testing.T) {
 	}
 	if !strings.HasPrefix(replacement, truncateMarker) {
 		t.Fatalf("marker missing: %q", replacement[:80])
+	}
+}
+
+func TestTruncateCapturesFullBodyWhenStoreIsWired(t *testing.T) {
+	var captured map[string]string
+	policy := Policy{StoreResult: func(id, tool, toolUseID, body string) {
+		captured = map[string]string{"id": id, "tool": tool, "use": toolUseID, "body": body}
+	}}
+	var lines []string
+	for index := range 500 {
+		lines = append(lines, fmt.Sprintf("line %d: payload", index))
+	}
+	text := strings.Join(lines, "\n")
+	replacement, ok := truncateToolResult(resultSource{name: "Bash"}, "use-captured", text, false, policy)
+	if !ok {
+		t.Fatalf("large unique result was not truncated")
+	}
+	if captured == nil {
+		t.Fatal("StoreResult was not called on a real truncation")
+	}
+	if captured["body"] != text {
+		t.Fatal("captured body is not the full original tool result")
+	}
+	if len(captured["id"]) != 64 || captured["id"] != toolstore.ID(text) {
+		t.Fatalf("captured id = %q, want the full content hash", captured["id"])
+	}
+	if captured["use"] != "use-captured" || captured["tool"] != "Bash" {
+		t.Fatalf("captured provenance = %q/%q", captured["tool"], captured["use"])
+	}
+	// The hint must make the reference discoverable from the marker itself.
+	if !strings.Contains(replacement, "/ref/"+captured["id"]) {
+		t.Fatalf("marker does not carry the fetch reference: %q", replacement[:200])
+	}
+}
+
+func TestTruncateWithoutStoreStaysHintless(t *testing.T) {
+	text := strings.Repeat("plain unique line\n", 400)
+	policy := Policy{}
+	replacement, ok := truncateToolResult(resultSource{name: "Bash"}, "use-1", text, false, policy)
+	if !ok {
+		t.Fatal("large unique result was not truncated")
+	}
+	if strings.Contains(replacement, "/ref/") {
+		t.Fatal("a store-less truncation gained a fetch hint it cannot satisfy")
+	}
+	if !strings.Contains(replacement, "re-run Bash") {
+		t.Fatal("the re-run hint is the fallback when no store exists")
 	}
 }
 
