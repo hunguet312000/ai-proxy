@@ -510,7 +510,7 @@ sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
                 <option value="max"{{if eq .ClaudeSetup.Effort "max"}} selected{{end}}>max</option>
               </select>
             </label>
-            <label class="model-field-label"><span class="field-hint" title="The real context window of the models above, in tokens. Without it Claude Code assumes 200k — or 1M if /model picked a [1m] variant, a client-side marker LiteRouter never sees — so it compacts far too late and the compaction itself overflows. auto uses the smallest window LiteRouter knows for the models above, including any it learned from an upstream rejection. Written as CLAUDE_CODE_MAX_CONTEXT_TOKENS, plus an auto-compact percentage so compaction starts while it still fits. Ignored by Claude Code for claude-* model ids.">Max context</span>
+            <label class="model-field-label"><span class="field-hint" title="The real context window of the models above, in tokens. Without it Claude Code assumes 200k — or 1M if /model picked a [1m] variant, a client-side marker LiteRouter never sees — so it compacts far too late and the compaction itself overflows. auto uses the smallest window LiteRouter knows for the models above, including what it has learned at runtime: a ceiling an upstream named when it refused a prompt, and a floor set by the largest prompt it actually served. Written as CLAUDE_CODE_MAX_CONTEXT_TOKENS, plus an auto-compact percentage so compaction starts while it still fits. Ignored by Claude Code for claude-* model ids.">Max context</span>
               <input class="field" name="max_context" value="{{.ClaudeSetup.MaxContext}}" list="max-context-options" placeholder="auto · recommended">
               <datalist id="max-context-options">
                 <option value="auto"></option>
@@ -766,6 +766,10 @@ wire_api = "responses"</pre>
       <summary title="Context window and reasoning effort">
         <span>Context</span>
         <strong>{{formatContextWindow .ContextWindow}}</strong>
+        {{$window := index $.ModelWindows .ID}}
+        {{if and (gt $window.Effective 0) (ne $window.Effective .ContextWindow)}}
+        <em class="model-window-live" title="Every request for this model is budgeted against {{$window.Effective}} tokens, not the {{.ContextWindow}} stored here.{{if gt $window.Served 0}} That number is the largest prompt this model has actually served — {{$window.Served}} tokens, counted by the upstream itself on a turn it answered — which proves the stored figure too low.{{end}}{{if gt $window.Refused 0}} An upstream rejection also named {{$window.Refused}} as a limit.{{end}} Save the measured value to make the two agree.">using {{formatContextWindow $window.Effective}}</em>
+        {{end}}
         {{if gt .MaxOutputTokens 0}}<span title="Output cap learned from an upstream rejection">· out {{formatContextWindow .MaxOutputTokens}}</span>{{end}}
         {{if and .Effort (honoursEffort .Provider)}}<em class="model-effort-chip" title="Reasoning effort is forced to {{.Effort}} for this model, whatever the client asks for">{{.Effort}}</em>{{end}}
       </summary>
@@ -773,9 +777,17 @@ wire_api = "responses"</pre>
         <input type="hidden" name="provider" value="{{.Provider}}">
         <label>
           <span>Context window (tokens)</span>
-          <input class="field" type="number" name="context_window" min="1000" max="10000000" step="1000" value="{{.ContextWindow}}" required>
+          <input class="field" type="number" name="context_window" min="1000" max="10000000" step="1" value="{{.ContextWindow}}" required>
         </label>
         <button class="btn primary sm" type="submit">Save</button>
+      </form>
+      <form class="model-context-form" data-measure-form data-measure-model="{{.ID}}" data-measure-provider="{{.Provider}}">
+        <label>
+          <span class="field-hint" title="Leave blank to search for the largest prompt this model will answer, starting from the largest it has already served. Enter a number to ask one question — is this exact size accepted — which costs a single request. The window is only ever raised: an accepted probe proves the model serves that size, so a result below what is already recorded is kept as-is.">Measure against the upstream (tokens, blank = search)</span>
+          <input class="field" type="number" name="probe_tokens" min="1000" max="10000000" step="1" placeholder="search">
+        </label>
+        <button class="btn sm" type="submit">Measure</button>
+        <p class="model-probe-status" hidden></p>
       </form>
       {{if honoursEffort .Provider}}
       <form class="model-context-form" hx-post="/ui/models/{{urlquery .ID}}/effort" hx-target="#model-catalog" hx-swap="innerHTML">
@@ -815,7 +827,7 @@ wire_api = "responses"</pre>
     </label>
     <label class="add-model-field context-field">
       <span>Context window</span>
-      <input class="field" name="context_window" type="number" min="1000" max="10000000" step="1000" placeholder="auto / e.g. 256000">
+      <input class="field" name="context_window" type="number" min="1000" max="10000000" step="1" placeholder="auto / e.g. 256000">
     </label>
     <button class="btn secondary" type="button" data-test-add-model title="Test model before saving">
       <svg viewBox="0 0 20 20" width="14" height="14" fill="none" aria-hidden="true">
@@ -824,8 +836,17 @@ wire_api = "responses"</pre>
       </svg>
       Test
     </button>
+    <button class="btn secondary" type="button" data-measure-add-model
+            title="Ask the upstream what this model actually accepts and put the answer in the Context window field. Leave the field blank to search, or type a size to test just that one. Uploads real prompts and is billed as ordinary usage. Nothing is recorded until you Save.">
+      <svg viewBox="0 0 20 20" width="14" height="14" fill="none" aria-hidden="true">
+        <rect x="2.5" y="6.5" width="15" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M6 6.5v3M10 6.5v4M14 6.5v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      Measure
+    </button>
   </div>
   <div id="add-model-test-status" class="model-test-status" hidden></div>
+  <p id="add-model-probe-status" class="model-probe-status" hidden></p>
   <div class="btn-row">
     <button class="btn primary" type="submit">Save</button>
     <button class="btn ghost" type="button" data-close-add-model>Cancel</button>

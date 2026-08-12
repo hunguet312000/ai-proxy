@@ -542,13 +542,22 @@ func TestRequestContextWindow(t *testing.T) {
 // The whole point of autoCompactPercent: the client compacts at min(window × pct,
 // window − 13000) and the compaction request costs roughly twice the conversation, so
 // the threshold has to leave room for its own request to fit.
+// The rule that connects the two halves: LiteRouter picks the window, the client picks
+// when to compact from that number alone, and the compaction request costs about twice
+// what it compacts. Asserted through CompactRequestFits rather than re-derived here, so
+// there is one copy of the rule to edit — raising autoCompactPercent to 50 looks harmless
+// and puts the compaction request back over the ceiling, which is the failure that got a
+// correct 400,000 window hand-lowered to 256,000.
 func TestAutoCompactPercentLeavesRoomForTheCompactionItself(t *testing.T) {
-	const observedCompactionFactor = 2.06
-	for _, window := range []int{200_000, 272_000, 400_000, 1_000_000} {
-		threshold := min(window*autoCompactPercent/100, window-13_000)
-		if cost := float64(threshold) * observedCompactionFactor; cost > float64(window) {
-			t.Fatalf("window %d: compacting at %d costs ~%.0f tokens, over the window",
-				window, threshold, cost)
+	windows := []int{
+		minManagedContextWindow, 64_000, 128_000, 200_000, 256_000,
+		272_000, 350_018, 372_860, 400_000, 1_000_000,
+	}
+	for _, window := range windows {
+		if !CompactRequestFits(window) {
+			threshold := ClientCompactThreshold(window)
+			t.Fatalf("window %d: compacts at %d, so the compaction request is ~%.0f and does not fit",
+				window, threshold, float64(threshold)*compactRequestMultiplier)
 		}
 	}
 }
@@ -604,4 +613,94 @@ func claudeEnv(t *testing.T, home string) map[string]string {
 		t.Fatalf("decode settings: %v", err)
 	}
 	return settings.Env
+}
+
+// And the guard is real, not vacuous: the client's own threshold — which is what applies
+// when no percentage override is written — does not satisfy it at any usable size. This
+// is what the override exists to prevent.
+func TestTheClientsOwnThresholdWouldNotFit(t *testing.T) {
+	for _, window := range []int{200_000, 256_000, 400_000} {
+		bare := window - clientCompactFloor
+		if float64(bare)*compactRequestMultiplier <= float64(window) {
+			t.Fatalf("window %d: compacting at the client's own %d would have fit, so the override is unnecessary",
+				window, bare)
+		}
+	}
+}
+
+// A window small enough that the two rules cross over must be reported as not fitting
+// rather than silently producing a negative or zero threshold.
+func TestCompactRequestFitsRejectsUnusableWindows(t *testing.T) {
+	for _, window := range []int{0, -1, clientCompactFloor, clientCompactFloor - 1} {
+		if CompactRequestFits(window) {
+			t.Fatalf("window %d reported as fitting", window)
+		}
+	}
+}
+
+// There are four ways a Claude Code configuration is written or reverted — the
+// downloadable apply script, the direct apply, the downloadable reset script, the direct
+// reset — and they have to agree about which keys LiteRouter owns. They did not: the
+// apply script wrote no context keys at all, and the reset script reverted every key
+// except those two, so a user who applied and then reset by script was left with a
+// window and a compact percentage that nothing in the file explained.
+func TestEveryClaudePathAgreesOnTheManagedKeys(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 unavailable")
+	}
+	request := Request{
+		Tool: ToolClaude, Action: Apply, BaseURL: "http://127.0.0.1:8317", Token: "secret",
+		Model: "cx/gpt-5.6-luna", MaxContext: "auto", CatalogContextWindow: 372_860,
+	}
+
+	scripted := t.TempDir()
+	apply, err := Generate(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runScript(t, scripted, apply.Content)
+	scriptEnv := claudeEnv(t, scripted)
+
+	direct := t.TempDir()
+	if _, err := applyClaude(direct, request); err != nil {
+		t.Fatal(err)
+	}
+	directEnv := claudeEnv(t, direct)
+
+	// The window has to reach the client whichever way the configuration was applied.
+	for _, env := range []map[string]string{scriptEnv, directEnv} {
+		if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "372860" {
+			t.Fatalf("max context = %v, want 372860", env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"])
+		}
+		if env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] != "45" {
+			t.Fatalf("compact pct = %v, want 45", env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"])
+		}
+	}
+	for key, value := range directEnv {
+		if scriptEnv[key] != value {
+			t.Fatalf("key %q: script wrote %v, direct apply wrote %v", key, scriptEnv[key], value)
+		}
+	}
+	for key := range scriptEnv {
+		if _, ok := directEnv[key]; !ok {
+			t.Fatalf("script wrote %q, direct apply did not", key)
+		}
+	}
+
+	// And reset has to take all of them back out, by either route.
+	reset, err := Generate(Request{Tool: ToolClaude, Action: Reset})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runScript(t, scripted, reset.Content)
+	if _, err := resetClaude(direct); err != nil {
+		t.Fatal(err)
+	}
+	for _, env := range []map[string]string{claudeEnv(t, scripted), claudeEnv(t, direct)} {
+		for _, key := range claudeManagedEnv() {
+			if _, ok := env[key]; ok {
+				t.Fatalf("reset left %q behind: %v", key, env)
+			}
+		}
+	}
 }

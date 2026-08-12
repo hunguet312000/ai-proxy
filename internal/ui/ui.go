@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -89,6 +90,61 @@ type ModelHooks struct {
 	SetEffort        func(context.Context, string, string, string) error
 	Delete           func(context.Context, string, string) error
 	Test             func(context.Context, string) (ModelTestResult, error)
+	// ProbeContext measures a model's real context window by sending it a prompt of a
+	// known size. tokens > 0 tries exactly that size and reports whether it was served;
+	// tokens == 0 searches for the largest size the model will take.
+	//
+	// It is the only source of a context window that is not a guess, which is why it
+	// exists: the curated table, the catalogue sync and the client all disagreed about
+	// cx/gpt-5.6-*, and each disagreement cost either refused turns or context thrown
+	// away for nothing.
+	// onStep, when not nil, is called as each attempt finishes so the caller can report
+	// progress. A search runs for minutes; without it the dashboard can only say
+	// "measuring" and hope.
+	ProbeContext func(ctx context.Context, provider, id string, tokens int, onStep func(ContextProbeStep)) (ContextProbeResult, error)
+	// Window reports the window in force for a model and the evidence behind it.
+	Window func(ctx context.Context, id string) ModelWindow
+}
+
+// ModelWindow is the context window actually in force for a model, and the evidence for
+// it. Catalogue is what the row says; Effective is what every request is budgeted
+// against; Served is the largest prompt the upstream has answered. They disagree often
+// enough that showing only the first was misleading.
+type ModelWindow struct {
+	Effective int
+	Served    int
+	Refused   int
+}
+
+// ContextProbeStep is one attempt, reported while the search is still running.
+type ContextProbeStep struct {
+	Tokens   int  `json:"tokens"`
+	Reported int  `json:"reported,omitempty"`
+	Accepted bool `json:"accepted"`
+	TimedOut bool `json:"timed_out,omitempty"`
+	// Started marks the event sent when an attempt begins, not when it ends. Without it
+	// the dashboard has nothing to show until the first attempt returns, which can be two
+	// minutes of an apparently frozen button.
+	Started  bool   `json:"started,omitempty"`
+	Attempt  int    `json:"attempt,omitempty"`
+	Duration string `json:"duration,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// ContextProbeResult is what a probe found, as the dashboard needs it.
+type ContextProbeResult struct {
+	Model string `json:"model"`
+	// Window is the largest prompt the upstream actually answered — a floor under the
+	// real limit rather than the limit itself, because the gap between the largest
+	// accepted and the smallest refused size cannot be closed without paying for more
+	// requests than the precision is worth.
+	Window          int    `json:"window"`
+	LargestAccepted int    `json:"largest_accepted"`
+	SmallestRefused int    `json:"smallest_refused,omitempty"`
+	Steps           int    `json:"steps"`
+	TokensSpent     int    `json:"tokens_spent"`
+	Saved           bool   `json:"saved"`
+	Error           string `json:"error,omitempty"`
 }
 
 type ModelTestResult struct {
@@ -254,6 +310,7 @@ type viewData struct {
 	APIKeys              []storage.APIKey
 	CreatedKey           *storage.APIKey
 	CatalogModels        []storage.CatalogModel
+	ModelWindows         map[string]ModelWindow
 	ModelGroups          []ModelGroup
 	Providers            []ProviderInfo
 	Provider             *ProviderInfo
@@ -1105,6 +1162,7 @@ func (s *Service) Register(e *echo.Echo) error {
 	e.GET("/ui/models", s.modelsHandler)
 	e.POST("/ui/models", s.addModelHandler)
 	e.POST("/ui/models/:id/context", s.updateModelContextHandler)
+	e.POST("/ui/models/:id/context-probe", s.probeModelContextHandler)
 	e.POST("/ui/models/:id/effort", s.updateModelEffortHandler)
 	e.GET("/ui/models/advice", s.compactionAdviceHandler)
 	e.POST("/ui/models/advice/apply", s.applyCompactionAdviceHandler)
@@ -1226,6 +1284,7 @@ func (s *Service) pageData(c echo.Context, tab string) viewData {
 	// CLI picker uses full catalog grouped by provider; provider detail only shows that provider's models.
 	if data.Tab == "cli" {
 		data.CatalogModels = s.loadCatalogModels(c.Request().Context(), "")
+		data.ModelWindows = s.modelWindows(c.Request().Context(), data.CatalogModels)
 		data.ModelGroups = groupCatalogModels(data.CatalogModels)
 		// Two sources, in this order. What the host client currently has is the truth
 		// about what is live, so it wins. When that is stock — nothing applied, or Reset
@@ -1323,6 +1382,7 @@ func (s *Service) pageData(c echo.Context, tab string) viewData {
 			data.Provider = &info
 		}
 		data.CatalogModels = s.loadCatalogModels(c.Request().Context(), data.Provider.ID)
+		data.ModelWindows = s.modelWindows(c.Request().Context(), data.CatalogModels)
 	}
 	return data
 }
@@ -1618,6 +1678,89 @@ func (s *Service) updateModelContextHandler(c echo.Context) error {
 	return s.renderModelCatalog(c, provider)
 }
 
+// probeModelContextHandler measures a model's context window against the upstream and
+// records what it finds.
+//
+// Synchronous on purpose, and bounded because of it: one sized request can take a minute
+// on a large prompt, so the search is kept to a few steps and seeded from the largest
+// prompt already served. A blank size means "search"; a number means "try exactly this",
+// which is the cheap and precise option — one request, one answer.
+func (s *Service) probeModelContextHandler(c echo.Context) error {
+	if !sameOrigin(c.Request()) {
+		return echo.NewHTTPError(http.StatusForbidden, "cross-origin request denied")
+	}
+	if s.modelsHook.ProbeContext == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "context probing unavailable")
+	}
+	provider := normalizeProviderID(c.FormValue("provider"))
+	id, err := url.PathUnescape(c.Param("id"))
+	if err != nil || strings.TrimSpace(id) == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "model id is required")
+	}
+	// persist=0 measures without recording. It is what the add-model form needs: the model
+	// has no catalogue row yet, so there is nothing to write to — the number goes into the
+	// form field and the row is created when the operator saves. A provider is only needed
+	// when the result will be stored.
+	persist := strings.TrimSpace(c.FormValue("persist")) != "0"
+	if persist && provider == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "provider is required to record a measurement")
+	}
+	tokens := 0
+	if raw := strings.TrimSpace(c.FormValue("probe_tokens")); raw != "" {
+		tokens, err = strconv.Atoi(raw)
+		if err != nil || tokens < 1_000 || tokens > 10_000_000 {
+			return echo.NewHTTPError(http.StatusBadRequest, "probe size must be between 1,000 and 10,000,000 tokens")
+		}
+	}
+	// Streamed rather than answered in one go. A search is minutes of silence otherwise,
+	// and the one case that most needs explaining — an upstream that neither accepts nor
+	// refuses, measured sitting out two full two-minute deadlines — looks identical to a
+	// hung dashboard until the very end.
+	if c.QueryParam("format") == "sse" {
+		response := c.Response()
+		response.Header().Set(echo.HeaderContentType, "text/event-stream")
+		response.Header().Set("Cache-Control", "no-cache")
+		response.Header().Set("X-Accel-Buffering", "no")
+		response.WriteHeader(http.StatusOK)
+		response.Flush()
+		emit := func(event string, payload any) {
+			encoded, encodeErr := json.Marshal(payload)
+			if encodeErr != nil {
+				return
+			}
+			fmt.Fprintf(response, "event: %s\ndata: %s\n\n", event, encoded)
+			response.Flush()
+		}
+		result, probeErr := s.modelsHook.ProbeContext(c.Request().Context(), providerFor(provider, persist), id, tokens,
+			func(step ContextProbeStep) { emit("step", step) })
+		if probeErr != nil {
+			emit("done", ContextProbeResult{Model: id, Error: probeErr.Error()})
+			return nil
+		}
+		emit("done", result)
+		return nil
+	}
+	result, err := s.modelsHook.ProbeContext(c.Request().Context(), providerFor(provider, persist), id, tokens, nil)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadGateway, err.Error())
+	}
+	if c.QueryParam("format") == "json" {
+		return c.JSON(http.StatusOK, result)
+	}
+	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
+	return s.renderModelCatalog(c, provider)
+}
+
+// providerFor blanks the provider when the caller asked not to record the result, which is
+// how the hook is told to measure only. Passing the provider through with a flag beside it
+// invites the two to disagree.
+func providerFor(provider string, persist bool) string {
+	if !persist {
+		return ""
+	}
+	return provider
+}
+
 // updateModelEffortHandler pins the reasoning effort for one model.
 //
 // Claude Code carries a single session-wide effortLevel and drives it with /effort, so
@@ -1815,11 +1958,26 @@ func (s *Service) renderModelCatalog(c echo.Context, provider string) error {
 		CatalogModels: s.loadCatalogModels(c.Request().Context(), provider),
 		Models:        s.modelIDs(c.Request().Context()),
 	}
+	data.ModelWindows = s.modelWindows(c.Request().Context(), data.CatalogModels)
 	if provider != "" {
 		info := providerInfoByID(provider)
 		data.Provider = &info
 	}
 	return s.tab.ExecuteTemplate(c.Response(), "model-catalog", data)
+}
+
+// modelWindows resolves, for each catalogued model, the window actually in force. Built
+// alongside the model list wherever it is loaded, because every place that renders a card
+// needs it and a card that reports only the stored figure hides the number the guard uses.
+func (s *Service) modelWindows(ctx context.Context, models []storage.CatalogModel) map[string]ModelWindow {
+	if s.modelsHook.Window == nil || len(models) == 0 {
+		return nil
+	}
+	windows := make(map[string]ModelWindow, len(models))
+	for _, model := range models {
+		windows[model.ID] = s.modelsHook.Window(ctx, model.ID)
+	}
+	return windows
 }
 
 func (s *Service) loadCatalogModels(ctx context.Context, provider string) []storage.CatalogModel {

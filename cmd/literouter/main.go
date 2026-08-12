@@ -365,6 +365,37 @@ func run() int {
 			if err == nil {
 				err = refreshContextWindows(ctx)
 			}
+			// A model nobody has a figure for is the one case worth spending tokens on
+			// unasked: the alternative is the conservative hybrid fallback, which is a
+			// guess, and a wrong window is paid for on every turn afterwards — too low
+			// compacts sessions that would have been served, too high lets them grow past
+			// the point where any compaction fits. When the curated table or the operator
+			// supplied a number, that number stands and the card's Measure button is there
+			// for whoever wants to check it.
+			//
+			// Detached from the request so adding a model stays instant; a search uploads
+			// real prompts and takes as long as they take.
+			if err == nil && model.ContextWindow <= 0 {
+				go func() {
+					probeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+					defer cancel()
+					found := gatewayService.SearchContextWindow(probeCtx, id, 0, 0)
+					if found.Window <= 0 {
+						slog.Warn("could not measure the context window of a newly added model",
+							"model", id, "error", found.Error)
+						return
+					}
+					if setErr := store.SetCatalogContextWindow(probeCtx, providerName, id, found.Window); setErr != nil {
+						slog.Warn("persist measured context window", "model", id, "error", setErr)
+						return
+					}
+					if refreshErr := refreshContextWindows(probeCtx); refreshErr != nil {
+						slog.Warn("refresh context windows after measuring", "model", id, "error", refreshErr)
+					}
+					slog.Info("measured the context window of a newly added model",
+						"model", id, "context_window", found.Window, "tokens_spent", found.TokensSpent)
+				}()
+			}
 			return model, err
 		},
 		SetEffort: func(ctx context.Context, providerName, id, effort string) error {
@@ -378,6 +409,80 @@ func run() int {
 				return err
 			}
 			return refreshContextWindows(ctx)
+		},
+		Window: func(ctx context.Context, id string) ui.ModelWindow {
+			window, served, refused := gatewayService.ContextWindowEvidence(ctx, id)
+			return ui.ModelWindow{Effective: window, Served: served, Refused: refused}
+		},
+		ProbeContext: func(ctx context.Context, providerName, id string, tokens int, onStep func(ui.ContextProbeStep)) (ui.ContextProbeResult, error) {
+			report := func(step gateway.ContextProbe) {
+				if onStep == nil {
+					return
+				}
+				onStep(ui.ContextProbeStep{
+					Tokens: step.Tokens, Reported: step.Reported, Accepted: step.Accepted,
+					TimedOut: step.TimedOut, Started: step.Started, Attempt: step.Attempt,
+					Duration: step.Duration, Error: step.Error,
+				})
+			}
+			out := ui.ContextProbeResult{Model: id}
+			if tokens > 0 {
+				// One size, one answer. The cheap option, and the only honest way to
+				// settle "does this model take N tokens" — everything else is inference.
+				// Announced before it is sent, for the same reason the search does: one
+				// sized probe against a large window is seconds of silence otherwise.
+				report(gateway.ContextProbe{Tokens: tokens, Started: true, Attempt: 1})
+				probe := gatewayService.ProbeContextWindow(ctx, id, tokens)
+				report(probe)
+				out.Steps, out.TokensSpent, out.Error = 1, tokens, probe.Error
+				if !probe.Accepted {
+					out.SmallestRefused = tokens
+					return out, nil
+				}
+				// The upstream's own count, not the size aimed at. They differ — filler
+				// never tokenizes exactly like the traffic the calibration was learned
+				// from — and only one of them is a fact about this request.
+				out.Window, out.LargestAccepted = tokens, tokens
+				if probe.Reported > 0 {
+					out.Window, out.LargestAccepted, out.TokensSpent = probe.Reported, probe.Reported, probe.Reported
+				}
+			} else {
+				found := gatewayService.SearchContextWindowStreaming(ctx, id, 0, 0, report)
+				out.Window, out.LargestAccepted = found.Window, found.LargestAccepted
+				out.SmallestRefused, out.Steps = found.SmallestRefused, len(found.Steps)
+				out.TokensSpent, out.Error = found.TokensSpent, found.Error
+			}
+			// Writing it back is the point: a number the dashboard reports but the guard
+			// does not budget against is worse than no number, because it reads as
+			// settled. The gateway already holds it as a floor; this makes it survive a
+			// restart and puts it where the CLI setup card reads from.
+			//
+			// Only ever upward. What an accepted probe proves is "at least this much",
+			// never "no more than this" — and the two are easy to confuse, because the
+			// upstream reports the size it actually counted, which is smaller than the
+			// size the filler was aimed at. Measured live: a probe aimed at 300,000 was
+			// served and counted as 237,766, and writing that back unconditionally
+			// lowered a catalogued 256,000 on the strength of a request that had
+			// succeeded. A refusal is what bounds a window from above, and a refusal
+			// never reaches this branch.
+			// An empty provider means "measure only": the add-model form asks before the
+			// catalogue row exists, so there is nothing to write to and the number is for
+			// the form field.
+			if out.Window > 0 && providerName != "" {
+				if believed := gatewayService.ContextWindowFor(ctx, id); out.Window <= believed {
+					out.Error = fmt.Sprintf("kept the existing %d: the probe only proves %d was served",
+						believed, out.Window)
+					return out, nil
+				}
+				if err := store.SetCatalogContextWindow(ctx, providerName, id, out.Window); err != nil {
+					return out, err
+				}
+				if err := refreshContextWindows(ctx); err != nil {
+					return out, err
+				}
+				out.Saved = true
+			}
+			return out, nil
 		},
 		Delete: func(ctx context.Context, providerName, id string) error {
 			if err := store.DeleteCatalogModel(ctx, providerName, id); err != nil {

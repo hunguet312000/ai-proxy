@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
+	"sort"
 	"strings"
 )
 
@@ -129,39 +129,9 @@ func applyClaude(home string, request Request) (string, error) {
 	if env == nil {
 		env = map[string]any{}
 	}
-	env["ANTHROPIC_BASE_URL"] = normalizeBase(request.BaseURL, false)
-	env["ANTHROPIC_AUTH_TOKEN"] = request.Token
-	env["ANTHROPIC_MODEL"] = request.Model
-	// Subagent model is deliberately not defaulted to request.Model the way Codex
-	// does: Claude Code treats CLAUDE_CODE_SUBAGENT_MODEL as the highest-priority
-	// override, so writing it unconditionally would silently void every agent's own
-	// `model:` frontmatter.
-	//
-	// Telling the client the real window is the whole fix for a non-Anthropic model:
-	// left to itself it either assumes 200k, or — with the [1m] suffix, which is a
-	// client-side marker the proxy never sees — assumes 1M, and compacts far too late
-	// either way. Both keys move together because the window alone is not enough: at
-	// window − 13,000 the compaction request is already twice the window. See
-	// autoCompactPercent.
-	//
-	// Only for non-claude-* ids, and not by choice: the client consults
-	// CLAUDE_CODE_MAX_CONTEXT_TOKENS only when the model id does not start with
-	// "claude-", so writing it for one of those is a no-op that would still leave the
-	// percentage override in force against a window it never applied to.
-	maxContext, autoCompactPct := "", ""
-	if window := request.ContextWindow(); window > 0 && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(request.Model)), "claude-") {
-		maxContext = strconv.Itoa(window)
-		autoCompactPct = strconv.Itoa(autoCompactPercent)
-	}
-	for key, value := range map[string]string{
-		"CLAUDE_CODE_SUBAGENT_MODEL":      request.SubagentModel,
-		"ANTHROPIC_DEFAULT_FABLE_MODEL":   request.FableModel,
-		"ANTHROPIC_DEFAULT_OPUS_MODEL":    request.OpusModel,
-		"ANTHROPIC_DEFAULT_SONNET_MODEL":  request.SonnetModel,
-		"ANTHROPIC_DEFAULT_HAIKU_MODEL":   request.HaikuModel,
-		"CLAUDE_CODE_MAX_CONTEXT_TOKENS":  maxContext,
-		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": autoCompactPct,
-	} {
+	// Same map the downloadable script writes — see claudeManagedEnv, which is the one
+	// place that decides these. An empty value means the key is removed.
+	for key, value := range claudeEnvFor(request) {
 		if strings.TrimSpace(value) != "" {
 			env[key] = value
 		} else {
@@ -187,12 +157,17 @@ func applyClaude(home string, request Request) (string, error) {
 
 // claudeManagedEnv lists the settings.json env keys LiteRouter owns. Reset touches
 // only these; anything else in the file belongs to the user.
-var claudeManagedEnv = []string{
-	"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
-	"CLAUDE_CODE_SUBAGENT_MODEL",
-	"ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
-	"ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-	"CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+//
+// Derived from the map apply writes rather than repeated, so a key cannot be added to
+// one and forgotten in the other — which would leave reset silently stranding whatever
+// the new key configured.
+func claudeManagedEnv() []string {
+	keys := make([]string, 0, len(claudeEnvFor(Request{})))
+	for key := range claudeEnvFor(Request{}) {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // resetClaude puts Claude Code back on stock behaviour: the LiteRouter env keys are
@@ -239,7 +214,7 @@ func resetClaude(home string) (string, error) {
 	}
 
 	if env, _ := current["env"].(map[string]any); env != nil {
-		for _, key := range claudeManagedEnv {
+		for _, key := range claudeManagedEnv() {
 			if value, existed := originalEnv[key]; existed {
 				env[key] = value
 			} else {

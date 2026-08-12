@@ -284,6 +284,22 @@ func (s *Service) learnContextWindow(model string, sent int, err error) {
 	s.recordContextWindowGuess(model, stepped)
 }
 
+// contextLimitsFor is how every budget decision gets its window. Both the guard and the
+// context pipeline need the same thing — the resolved window for this one model, in the
+// shape contextguard takes — and each had its own copy of the conversion, which is how
+// two paths that must agree acquire a way to disagree.
+//
+// The error is returned rather than handled because the two callers want different things
+// from it: the guard logs it and carries on against the fallback window, while the
+// pipeline has nothing useful to say about it. The window is serviceable either way.
+func (s *Service) contextLimitsFor(ctx context.Context, model string) (contextguard.Limits, int, error) {
+	window, err := s.resolveContextWindowErr(ctx, model)
+	if window <= 0 {
+		return s.contextLimits, s.contextLimits.Window(model), err
+	}
+	return contextguard.Limits{Default: window, Models: map[string]int{model: window}}, window, err
+}
+
 // baseContextWindow is the window before any runtime evidence: configuration and the
 // catalog only. It is what the step-down floor is measured against, since a value a human
 // or the curated table supplied is the only one here that was not inferred.
@@ -316,6 +332,14 @@ func (s *Service) learnedContextBounds(model string) (ceiling, floor int) {
 // hold for whichever of them serves a turn, so the smallest is the only safe answer:
 // handing over the largest would leave every other model compacting too late, which is
 // exactly the failure the setting exists to prevent.
+//
+// Each model contributes its resolved window, which means both kinds of runtime evidence
+// — a ceiling an upstream named in a rejection, and a floor a served prompt established.
+// A floor makes the number larger, which reads like the unsafe direction, and is not: it
+// is a size that model has demonstrably answered, and the minimum across models still
+// binds. Handing the client less than a model can take is not free either — it compacts
+// sooner, and every compaction costs about twice the conversation it compacts. The
+// client-side half of that trade lives in clisetup.CompactRequestFits.
 func (s *Service) SmallestContextWindow(ctx context.Context, models []string) int {
 	smallest := 0
 	for _, model := range models {

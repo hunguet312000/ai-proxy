@@ -22,6 +22,30 @@ document.addEventListener("click", function (event) {
     testModel(modelId, testBtn, status);
     return;
   }
+  var measureAdd = event.target.closest("[data-measure-add-model]");
+  if (measureAdd) {
+    event.preventDefault();
+    var addForm = document.getElementById("add-model-form");
+    if (!addForm) return;
+    var idField = addForm.querySelector('input[name="id"]');
+    var windowField = addForm.querySelector('input[name="context_window"]');
+    var addId = idField ? idField.value.trim() : "";
+    if (!addId) {
+      if (idField) idField.focus();
+      return;
+    }
+    measureModelContext(
+      addId,
+      "",                                       // measure only: there is no row to record into yet
+      windowField ? windowField.value.trim() : "",
+      measureAdd,
+      document.getElementById("add-model-probe-status"),
+      null,
+      windowField
+    );
+    return;
+  }
+
   var testAdd = event.target.closest("[data-test-add-model]");
   if (testAdd) {
     event.preventDefault();
@@ -171,6 +195,21 @@ document.addEventListener("input", function (event) {
     filterModelPicker(event.target.value);
   }
 });
+document.addEventListener("submit", function (event) {
+  var measureForm = event.target.closest("form[data-measure-form]");
+  if (!measureForm) return;
+  event.preventDefault();
+  var tokens = measureForm.querySelector('input[name="probe_tokens"]');
+  measureModelContext(
+    measureForm.getAttribute("data-measure-model") || "",
+    measureForm.getAttribute("data-measure-provider") || "",
+    tokens ? tokens.value.trim() : "",
+    measureForm.querySelector("button[type=submit]"),
+    measureForm.querySelector(".model-probe-status"),
+    measureForm.closest(".model-chip")
+  );
+});
+
 document.addEventListener("submit", async function (event) {
   var form = event.target.closest("form[data-download-form], form[data-cli-setup-form]");
   if (!form) return;
@@ -808,3 +847,206 @@ document.addEventListener("change", function (event) {
   if (!toggle || toggle.type !== "checkbox" || !toggle.closest(".toggle-form")) return;
   if (toggle.form && typeof toggle.form.requestSubmit === "function") toggle.form.requestSubmit();
 });
+
+// measureModelContext asks the upstream what it will actually take, and reports the
+// answer next to the button that asked.
+//
+// Reported in place rather than by re-rendering the catalogue. The first version swapped
+// the whole list, which collapsed the Context section the button lives in and threw the
+// answer away with it — press, wait, and nothing appears to have happened. A measurement
+// can take a minute, so it also has to say that it is working.
+//
+// It says what it found, not only what it saved: an accepted probe proves the model
+// serves that size, which is a floor, so a result below what is already recorded is
+// correct and is deliberately not written. "Kept the existing N" is the difference
+// between that and a button that looks broken.
+function measureModelContext(modelId, provider, tokens, button, statusEl, chip, targetField) {
+  if (!modelId) return;
+  // An empty provider is the signal to measure without recording, which is what the
+  // add-model form needs: the catalogue row does not exist until Save.
+  var persist = !!provider;
+  var what = tokens
+    ? "Ask " + modelId + " whether it accepts a " + formatTokens(tokens) + " prompt?"
+    : "Measure the context window of " + modelId + "?";
+  if (!window.confirm(
+    what + "\n\n" +
+    "This uploads a real prompt and is billed as ordinary usage. " +
+    (persist ? "" : "Nothing is recorded — the answer goes into the Context window field. ") +
+    (tokens
+      ? "One request."
+      : "It starts from the largest prompt this model has already served, so it usually costs one request.")
+  )) return;
+  if (button) {
+    button.disabled = true;
+    button.classList.add("is-loading");
+  }
+  if (statusEl) {
+    statusEl.hidden = false;
+    statusEl.className = "model-probe-status is-pending";
+    statusEl.textContent = "Measuring… uploading a large prompt, this can take a minute.";
+  }
+  var body = new URLSearchParams();
+  body.set("provider", provider);
+  if (!persist) body.set("persist", "0");
+  if (tokens) body.set("probe_tokens", tokens);
+  // The server bounds each attempt and the search as a whole; this is the browser's own
+  // stop, a little longer than the server's, so a connection that dies in between still
+  // ends with a message instead of a spinner that never resolves.
+  var abort = new AbortController();
+  var giveUp = setTimeout(function () { abort.abort(); }, 8 * 60 * 1000);
+  var startedAt = Date.now();
+  var spent = 0;
+  var lines = [];
+  // The elapsed counter is the difference between "this is slow" and "this is stuck".
+  var ticking = setInterval(function () { render(null); }, 1000);
+
+  function render(finalText) {
+    if (!statusEl) return;
+    var elapsed = Math.round((Date.now() - startedAt) / 1000);
+    var head = finalText !== null && finalText !== undefined
+      ? finalText
+      : "Measuring… " + elapsed + "s" + (spent ? " · sent " + formatTokens(spent) : "");
+    statusEl.hidden = false;
+    statusEl.textContent = lines.length ? head + "\n" + lines.join("\n") : head;
+  }
+  render(null);
+
+  function describe(step) {
+    var attempt = step.attempt > 1 ? " (retry)" : "";
+    if (step.started) return "· sending " + formatTokens(step.tokens) + attempt + "…";
+    var size = formatTokens(step.reported || step.tokens);
+    if (step.timed_out) return "· " + size + attempt + " — no answer in " + (step.duration || "?") + ", not a refusal";
+    if (step.accepted) return "· " + size + " accepted in " + (step.duration || "?");
+    return "· " + formatTokens(step.tokens) + attempt + " refused in " + (step.duration || "?");
+  }
+
+  function finish(data, failure) {
+    clearInterval(ticking);
+    clearTimeout(giveUp);
+    if (button) {
+      button.disabled = false;
+      button.classList.remove("is-loading");
+    }
+    if (!statusEl) return;
+    if (failure) {
+      statusEl.className = "model-probe-status is-bad";
+      render(failure);
+      return;
+    }
+    data = data || {};
+    var cost = data.tokens_spent ? " · spent " + formatTokens(data.tokens_spent) : "";
+    if (data.saved) {
+      statusEl.className = "model-probe-status is-ok";
+      render("Measured " + formatTokens(data.window) + cost + (persist ? " · saved" : " · Save to record it"));
+      setCardContextWindow(chip, data.window);
+      fillMeasured(chip, targetField, data.window);
+      return;
+    }
+    if (data.window) {
+      statusEl.className = "model-probe-status is-ok";
+      render("Served " + formatTokens(data.window) + cost + " · " +
+        (data.error || "kept the existing window") + " · the field above now holds it, Save to use it");
+      fillMeasured(chip, targetField, data.window);
+      return;
+    }
+    statusEl.className = "model-probe-status is-bad";
+    var headline = data.smallest_refused
+      ? "Refused at " + formatTokens(data.smallest_refused)
+      : "Could not measure";
+    render(headline + cost + (data.error ? " · " + data.error : ""));
+  }
+
+  fetch("/ui/models/" + encodeURIComponent(modelId) + "/context-probe?format=sse", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "text/event-stream"
+    },
+    body: body.toString(),
+    credentials: "same-origin",
+    signal: abort.signal
+  }).then(function (res) {
+    if (!res.ok || !res.body) {
+      return res.text().then(function (text) { finish(null, "Failed · " + (text || ("HTTP " + res.status))); });
+    }
+    var reader = res.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = "";
+    var done = false;
+    function pump() {
+      return reader.read().then(function (chunk) {
+        if (chunk.done) {
+          if (!done) finish(null, "The connection closed before the measurement finished.");
+          return;
+        }
+        buffer += decoder.decode(chunk.value, { stream: true });
+        var blocks = buffer.split("\n\n");
+        buffer = blocks.pop();
+        blocks.forEach(function (block) {
+          var event = /event:\s*(\S+)/.exec(block);
+          var payload = /data:\s*(.*)/.exec(block);
+          if (!event || !payload) return;
+          var parsed = {};
+          try { parsed = JSON.parse(payload[1]); } catch (e) { return; }
+          if (event[1] === "step") {
+            // A start line is a placeholder for an attempt in flight; its result replaces
+            // it rather than being appended beside it.
+            if (parsed.started) {
+              lines.push(describe(parsed));
+            } else {
+              spent += parsed.reported || parsed.tokens || 0;
+              if (lines.length) lines[lines.length - 1] = describe(parsed);
+              else lines.push(describe(parsed));
+            }
+            statusEl.className = "model-probe-status is-pending";
+            render(null);
+            return;
+          }
+          if (event[1] === "done") {
+            done = true;
+            finish(parsed, null);
+          }
+        });
+        return pump();
+      });
+    }
+    return pump();
+  }).catch(function (err) {
+    finish(null, err && err.name === "AbortError"
+      ? "Gave up waiting — the upstream never answered. Try a smaller size."
+      : "Failed · " + (err && err.message ? err.message : "network error"));
+  });
+}
+
+// setCardContextWindow updates the number in the card header without re-rendering it, so
+// the section the user is reading stays open.
+// fillMeasured puts the measurement into whichever field the caller named — the card's
+// own field, or the add-model form's — so acting on it is one click rather than retyping a
+// six-digit number out of a status line.
+//
+// A proposal, not a decision. The server only ever raises the window by itself, because an
+// accepted probe proves a size was served and says nothing about the size above it.
+// Lowering is a judgement — compacting earlier than the model requires is a legitimate
+// choice and an expensive one to make by accident — so it stays behind the Save button
+// with the current value named in the status line.
+function fillMeasured(chip, targetField, window) {
+  if (!window) return;
+  var field = targetField || (chip && chip.querySelector('.model-context-editor input[name="context_window"]'));
+  if (!field) return;
+  field.value = window;
+  field.classList.add("is-proposed");
+  setTimeout(function () { field.classList.remove("is-proposed"); }, 4000);
+}
+
+function setCardContextWindow(chip, window) {
+  if (!chip || !window) return;
+  var shown = chip.querySelector(".model-context-editor > summary > strong");
+  if (shown) shown.textContent = formatTokens(window);
+}
+
+function formatTokens(value) {
+  var n = Number(value) || 0;
+  if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 === 0 ? 0 : 1) + "M";
+  if (n >= 1000) return Math.round(n / 1000) + "k";
+  return String(n);
+}

@@ -893,8 +893,7 @@ func cloneProviderRequest(request provider.Request) provider.Request {
 }
 
 func (s *Service) guardContext(ctx context.Context, request provider.Request) error {
-	limits := s.contextLimits
-	window, err := s.resolveContextWindowErr(ctx, request.Model)
+	limits, window, err := s.contextLimitsFor(ctx, request.Model)
 	if err != nil {
 		// This check cannot do anything but log — it defers every real decision to the
 		// upstream tokenizer — and the lookup hands back a serviceable window from
@@ -903,9 +902,6 @@ func (s *Service) guardContext(ctx context.Context, request provider.Request) er
 		// session, over a number this function was only ever going to warn about.
 		slog.Warn("context window lookup failed; guarding against the fallback window",
 			"model", request.Model, "fallback_window", window, "error", err)
-	}
-	if window > 0 {
-		limits = contextguard.Limits{Default: window, Models: map[string]int{request.Model: window}}
 	}
 	result, err := contextguard.Check(request, limits, s.requestContextPolicy(request.Model))
 	if err != nil {
@@ -972,11 +968,10 @@ func (s *Service) prepareContext(ctx context.Context, request provider.Request) 
 
 func (s *Service) prepareContextStages(ctx context.Context, request provider.Request) (provider.Request, contextPrepOutcome, error) {
 	policy := s.requestContextPolicy(request.Model)
-	limits := s.contextLimits
-	if window := s.resolveContextWindow(ctx, request.Model); window > 0 {
-		limits = contextguard.Limits{Default: window, Models: map[string]int{request.Model: window}}
-	}
-	outcome := contextPrepOutcome{window: limits.Window(request.Model)}
+	// Same resolution the guard uses. A lookup failure is not actionable here — the
+	// window handed back is serviceable and the pipeline has nothing to say about it.
+	limits, window, _ := s.contextLimitsFor(ctx, request.Model)
+	outcome := contextPrepOutcome{window: window}
 	prepared, err := contextguard.Prepare(request, limits, policy)
 	outcome.beforeTokens, outcome.afterTokens = prepared.BeforeTokens, prepared.AfterTokens
 	if err != nil {
