@@ -972,6 +972,75 @@ func TestAnthropicTransientFailureReplaysSingleCandidate(t *testing.T) {
 	}
 }
 
+// openErrorThenBodyClient refuses to open the first stream, then serves body.
+type openErrorThenBodyClient struct {
+	err   error
+	body  string
+	calls int
+}
+
+func (c *openErrorThenBodyClient) DoStream(_ context.Context, _ string, _ any) (io.ReadCloser, error) {
+	c.calls++
+	if c.calls == 1 {
+		return nil, c.err
+	}
+	return io.NopCloser(strings.NewReader(c.body)), nil
+}
+
+// The same overload, refused a moment earlier. Read from an open stream it is replayed;
+// raised while opening the stream it used to fall straight out of the candidate loop,
+// because a model with no alias chain is out of candidates on its first fault. Whether a
+// temporary upstream condition killed the turn came down to timing.
+func TestAnthropicTransientFailureAtOpenReplaysSingleCandidate(t *testing.T) {
+	overloaded := &provider.ProviderError{Provider: "codex OAuth", StatusCode: 502,
+		Code: "server_is_overloaded", Message: "Our servers are currently overloaded."}
+	real := `data: {"id":"two","model":"m","choices":[{"index":0,"delta":{"content":"recovered"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"
+	client := &openErrorThenBodyClient{err: overloaded, body: real}
+	service := New(Options{OpenAIStream: client})
+	e := echo.New()
+	service.Register(e)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"cx/gpt-5.6-luna","messages":[{"role":"user","content":"hi"}],"max_tokens":100,"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "recovered") {
+		t.Fatalf("replay result not delivered: %q", recorder.Body.String())
+	}
+	if client.calls != 2 {
+		t.Fatalf("upstream attempts = %d, want the single candidate replayed once", client.calls)
+	}
+}
+
+// The open path must not replay an oversized prompt either: transient accepts any 5xx,
+// and re-sending the payload the upstream just measured cannot change its size.
+func TestAnthropicOversizedPromptAtOpenIsNotReplayed(t *testing.T) {
+	refused := &provider.ProviderError{Provider: "codex OAuth", StatusCode: 500,
+		Code: "server_error", Message: "prompt is too long: 719000 tokens > 256000 maximum"}
+	client := &openErrorThenBodyClient{err: refused, body: "data: [DONE]\n\n"}
+	service := New(Options{OpenAIStream: client})
+	e := echo.New()
+	service.Register(e)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"cx/gpt-5.6-luna","messages":[{"role":"user","content":"hi"}],"max_tokens":100,"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	start := time.Now()
+	e.ServeHTTP(recorder, request)
+
+	if client.calls != 1 {
+		t.Fatalf("upstream attempts = %d, want the refused prompt sent once", client.calls)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("request spent %v, which means it backed off and replayed", elapsed)
+	}
+}
+
 // alwaysFailingStreamClient fails every read with the same error.
 type alwaysFailingStreamClient struct {
 	err   error

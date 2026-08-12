@@ -936,6 +936,35 @@ func transientUpstreamError(err error) bool {
 // handing the agent an empty turn, which reads as end_turn and stops the session.
 const maxEmptyTurnReplays = 2
 
+// replayAfterTransientOpen backs off and rewinds when the upstream refused to open the
+// stream for a reason it called temporary and there is no other candidate to move to.
+//
+// Without it a fault was fatal or survivable purely by when it arrived. A 502 read from
+// an open stream reaches the replay branch in messagesStream; the identical 502 raised
+// while opening one falls out of the candidate loop, and since the model the operator
+// actually uses has no alias chain, "no candidates left" is true on its very first fault.
+// That asymmetry is most of the hard stream failures in the usage table.
+//
+// The overflow guard is the same one the read path carries: transient means any 5xx, so
+// an oversized prompt refused with a 5xx satisfies it, and re-sending the identical
+// payload cannot do anything but fail again more slowly.
+func (o *streamOpener) replayAfterTransientOpen(ctx context.Context, model string, err error) bool {
+	if !o.exhausted() || isContextOverflow(err) || !transientUpstreamError(err) {
+		return false
+	}
+	if ctx.Err() != nil || !o.replayCurrent() {
+		return false
+	}
+	delay := time.Duration(o.replays) * transientRetryBackoff
+	slog.Warn("upstream was temporarily unavailable at open; retrying the same candidate after backoff",
+		"endpoint", "/v1/messages", "model", model, "attempt", o.replays, "backoff", delay, "error", err)
+	select {
+	case <-time.After(delay):
+	case <-ctx.Done():
+	}
+	return true
+}
+
 // replayCurrent rewinds the opener so the candidate that just produced nothing is
 // attempted again. It reports false once the allowance is spent.
 func (o *streamOpener) replayCurrent() bool {
@@ -1038,6 +1067,7 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 				o.index = len(o.models)
 				return nil, streamErr
 			}
+			o.replayAfterTransientOpen(c.Request().Context(), model, streamErr)
 			continue
 		}
 		var body io.ReadCloser
@@ -1071,6 +1101,7 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 			o.index = len(o.models)
 			return nil, err
 		}
+		o.replayAfterTransientOpen(c.Request().Context(), model, err)
 	}
 	if o.lastErr == nil {
 		o.lastErr = ErrProviderUnavailable

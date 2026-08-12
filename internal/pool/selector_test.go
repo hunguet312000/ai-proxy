@@ -168,12 +168,131 @@ func TestSelectorRateLimitAndCircuitBreaker(t *testing.T) {
 	for range 5 {
 		selector.ReportError("a")
 	}
-	if _, err := selector.Select(SelectRequest{}); !errors.Is(err, ErrNoAccount) {
-		t.Fatalf("open-circuit Select() error = %v", err)
+	// The breaker exists to steer traffic to a healthier peer. With no peer there is
+	// nothing to steer to, and refusing here would take the whole provider offline for
+	// three minutes — see TestSelectorKeepsTheLastAccountWhenItsCircuitOpens. The 429
+	// cooldown above still refuses, because that wait was the upstream's instruction
+	// rather than this process's guess.
+	if _, err := selector.Select(SelectRequest{}); err != nil {
+		t.Fatalf("open-circuit Select() on the only account = %v", err)
 	}
 	now = now.Add(3 * time.Minute)
 	if _, err := selector.Select(SelectRequest{}); err != nil {
 		t.Fatalf("post-circuit Select() error = %v", err)
+	}
+}
+
+// A circuit-broken account is still held back whenever anything else can serve — that is
+// the whole point of the breaker, and it must not be weakened by the last-account rule.
+func TestSelectorPrefersAHealthyPeerOverACircuitBrokenAccount(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	selector := NewSelector(New([]Account{
+		{ID: "broken", Provider: "codex", Enabled: true, Weight: 1},
+		{ID: "healthy", Provider: "codex", Enabled: true, Weight: 1},
+	}), StrategySmart, nil)
+	selector.now = func() time.Time { return now }
+	for range 5 {
+		selector.ReportError("broken")
+	}
+	for attempt := range 3 {
+		result, err := selector.Select(SelectRequest{Provider: "codex"})
+		if err != nil || result.Account.ID != "healthy" {
+			t.Fatalf("attempt %d selected %#v, %v; want the healthy account", attempt, result, err)
+		}
+	}
+}
+
+// Five faults used to empty the pool for three minutes, and every request in that window
+// failed with "no eligible account". The codex provider currently runs on one enabled
+// account, so this is the difference between a degraded session and a dead one.
+func TestSelectorKeepsTheLastAccountWhenItsCircuitOpens(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	selector := NewSelector(New([]Account{{ID: "only", Provider: "codex", Enabled: true, Weight: 1}}), StrategySmart, nil)
+	selector.now = func() time.Time { return now }
+	for range 5 {
+		selector.ReportError("only")
+	}
+	result, err := selector.Select(SelectRequest{Provider: "codex"})
+	if err != nil || result.Account.ID != "only" {
+		t.Fatalf("Select() = %#v, %v; want the last account served anyway", result, err)
+	}
+	// A disabled account is a different matter: those credentials were refused, and
+	// serving them would only produce another refusal.
+	selector.pool.SetDisabled("only", true, "credentials rejected")
+	if _, err := selector.Select(SelectRequest{Provider: "codex"}); !errors.Is(err, ErrNoAccount) {
+		t.Fatalf("disabled account Select() error = %v, want ErrNoAccount", err)
+	}
+}
+
+// One fault used to move a session permanently. The retry excludes the account that just
+// failed, sticky_soft finds its binding unusable and rebinds to the replacement, and the
+// next turn — with nothing excluded any more — finds the new account bound and stays
+// there. The session's warm prompt cache is stranded on an account it never returns to,
+// and the replacement re-reads the whole history at full price.
+func TestStickySoftKeepsItsBindingThroughATransientExclusion(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	selector := NewSelector(New([]Account{
+		{ID: "a", Provider: "codex", Enabled: true, Weight: 1},
+		{ID: "b", Provider: "codex", Enabled: true, Weight: 1},
+	}), StrategyStickySoft, nil)
+	selector.now = func() time.Time { return now }
+	request := SelectRequest{Provider: "codex", ConversationID: "conversation-1"}
+
+	first, err := selector.Select(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := first.Account.ID
+
+	// The turn faults, so the retry asks for anyone but the account that just failed.
+	retry := request
+	retry.ExcludeIDs = map[string]struct{}{bound: {}}
+	second, err := selector.Select(retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Account.ID == bound {
+		t.Fatalf("retry returned the excluded account %q", bound)
+	}
+
+	// Next turn, nothing excluded: the session belongs back where its context is cached.
+	third, err := selector.Select(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Account.ID != bound {
+		t.Fatalf("session moved to %q permanently after one fault; want %q", third.Account.ID, bound)
+	}
+}
+
+// The binding is only worth keeping while the account can come back. Once its credentials
+// are refused the account is disabled for good, and holding the session there would send
+// every later turn to a fallback while the binding pointed at something dead.
+func TestStickySoftRebindsWhenItsAccountIsDisabled(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	selector := NewSelector(New([]Account{
+		{ID: "a", Provider: "codex", Enabled: true, Weight: 1},
+		{ID: "b", Provider: "codex", Enabled: true, Weight: 1},
+	}), StrategyStickySoft, nil)
+	selector.now = func() time.Time { return now }
+	request := SelectRequest{Provider: "codex", ConversationID: "conversation-1"}
+
+	first, err := selector.Select(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector.pool.SetDisabled(first.Account.ID, true, "credentials rejected")
+
+	second, err := selector.Select(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Account.ID == first.Account.ID {
+		t.Fatalf("selected the disabled account %q", second.Account.ID)
+	}
+	// And the move is permanent: the binding now names the account actually serving.
+	if got := selector.affinity[affinityKey(request)].accountID; got != second.Account.ID {
+		t.Fatalf("binding = %q, want it rebound to %q", got, second.Account.ID)
 	}
 }
 

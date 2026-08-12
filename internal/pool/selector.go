@@ -3,6 +3,7 @@ package pool
 import (
 	"errors"
 	"hash/fnv"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -151,7 +152,7 @@ func (s *Selector) Select(request SelectRequest) (SelectResult, error) {
 		if len(eligible) == 0 {
 			continue
 		}
-		account := s.pick(eligible, request, now)
+		account := s.pick(eligible, accounts, request, now)
 		state := s.state(account.ID)
 		state.lastUsed = now
 		s.nextReservation++
@@ -247,8 +248,19 @@ func (s *Selector) ReportError(accountID string) {
 	}
 }
 
+// eligible lists the accounts that may serve this provider/model right now.
+//
+// Every exclusion here is something the upstream imposed — disabled credentials, a 429
+// cooldown, an exhausted quota, a configured rate limit — except one. The circuit breaker
+// is this process's own guess that an account is unwell, and applying it like the rest
+// meant five faults could take the last account out and leave the pool empty for three
+// minutes, failing every request with "no eligible account". That is worse than the
+// condition it protects against, and it is the live configuration: the codex provider is
+// down to a single enabled account. So circuit-broken accounts are held back only while
+// something else can serve.
 func (s *Selector) eligible(accounts []Account, provider, model string, excluded map[string]struct{}, now time.Time) []Account {
 	eligible := make([]Account, 0, len(accounts))
+	var circuitBroken []Account
 	for _, account := range accounts {
 		if _, skip := excluded[account.ID]; skip {
 			continue
@@ -259,7 +271,7 @@ func (s *Selector) eligible(accounts []Account, provider, model string, excluded
 		if !account.Enabled || (provider != "" && account.Provider != provider) || !supportsModel(account.Models, model) {
 			continue
 		}
-		if now.Before(state.cooldownUntil) || now.Before(state.circuitUntil) {
+		if now.Before(state.cooldownUntil) {
 			continue
 		}
 		if cooldownUntil := s.modelCooldown[account.ID+"\x00"+model]; now.Before(cooldownUntil) {
@@ -278,13 +290,26 @@ func (s *Selector) eligible(accounts []Account, provider, model string, excluded
 		if account.MaxTokensPerHour > 0 && state.tokensHour.sum(now, time.Hour) >= int64(account.MaxTokensPerHour) {
 			continue
 		}
+		// Last, so that an account failing any check above never reaches the fallback.
+		if now.Before(state.circuitUntil) {
+			circuitBroken = append(circuitBroken, account)
+			continue
+		}
 		eligible = append(eligible, account)
+	}
+	if len(eligible) == 0 && len(circuitBroken) > 0 {
+		slog.Warn("serving from a circuit-broken account because no other account can take the request",
+			"provider", provider, "model", model, "accounts", len(circuitBroken))
+		eligible = circuitBroken
 	}
 	sort.Slice(eligible, func(i, j int) bool { return eligible[i].ID < eligible[j].ID })
 	return eligible
 }
 
-func (s *Selector) pick(accounts []Account, request SelectRequest, now time.Time) Account {
+// pick chooses among the accounts that may serve this request. all is every account in
+// the pool, eligible or not — sticky_soft needs it to tell an account that is merely
+// unavailable this instant from one that is gone for good.
+func (s *Selector) pick(accounts, all []Account, request SelectRequest, now time.Time) Account {
 	switch s.strategy {
 	case StrategyRoundRobin:
 		account := accounts[s.rr%uint64(len(accounts))]
@@ -305,7 +330,7 @@ func (s *Selector) pick(accounts []Account, request SelectRequest, now time.Time
 		}
 		return s.pickSmart(accounts, now)
 	case StrategyStickySoft:
-		return s.pickStickySoft(accounts, request, now)
+		return s.pickStickySoft(accounts, all, request, now)
 	case StrategyFailover:
 		best := accounts[0]
 		for _, account := range accounts[1:] {
@@ -435,7 +460,7 @@ func findAccount(accounts []Account, id string) (Account, bool) {
 // pickStickySoft keeps a session on one account while it stays healthy, then
 // migrates affinity to a healthier peer under pressure. Hard ineligibility is
 // handled by eligible(); this path only sees accounts already allowed to serve.
-func (s *Selector) pickStickySoft(accounts []Account, request SelectRequest, now time.Time) Account {
+func (s *Selector) pickStickySoft(accounts, all []Account, request SelectRequest, now time.Time) Account {
 	s.pruneAffinity(now)
 	key := affinityKey(request)
 	if key == "" {
@@ -457,6 +482,18 @@ func (s *Selector) pickStickySoft(accounts []Account, request SelectRequest, now
 			}
 			s.touchAffinity(key, preferred.ID, now, false)
 			return preferred
+		}
+		// The bound account cannot serve this instant. When it still exists and is enabled
+		// that is temporary — excluded after a fault on this very turn, in a 429 cooldown,
+		// at its per-minute limit — and moving the binding would be permanent: the next
+		// turn finds the new account bound and never comes back. A whole session's warm
+		// prompt cache is then stranded on an account it will not use again, and the
+		// upstream re-reads the entire history at full price on the account it moved to.
+		// Serve this one turn elsewhere and leave the binding where it is.
+		if preferred, exists := findAccount(all, bound.accountID); exists && preferred.Enabled {
+			fallback := s.pickLeastPressured(accounts, now)
+			s.touchAffinity(key, bound.accountID, now, false)
+			return fallback
 		}
 	}
 	chosen := s.pickLeastPressured(accounts, now)
