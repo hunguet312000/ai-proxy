@@ -167,7 +167,13 @@ func (s *Service) messagesHandler(c echo.Context) error {
 			slog.Info("router model override", "from", request.Model, "to", target,
 				"reason", decision.Reason, "request_bytes", len(raw))
 		}
-		if decision.StripImages {
+		if decision.TranscribeImages {
+			// The build-image-prompt toggle: replace every image with a text transcription
+			// from the vision model, so the text-only task model reads the picture as text.
+			// Like strip, this rewrites only the parsed request — raw keeps the caller's
+			// bytes for the passthrough path, which cannot be reached here.
+			request, _ = s.transcribeImages(c.Request().Context(), request)
+		} else if decision.StripImages {
 			// Only the parsed request is rewritten. raw keeps the caller's bytes for the
 			// passthrough path, which cannot be reached here: a model declared text-only is
 			// not an Anthropic-native one, so that path never claims this turn.

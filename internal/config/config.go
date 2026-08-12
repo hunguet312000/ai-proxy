@@ -104,6 +104,11 @@ type RouterConfig struct {
 	// a wrong guess here either breaks working image turns or silently downgrades good
 	// models. Whoever adds a text-only upstream already knows.
 	TextOnlyModels []string `yaml:"text_only_models"`
+	// BuildImagePrompt, when true, transcribes every image in a prompt to text via the
+	// vision model named in ImageModel before the turn is sent to a text-only model,
+	// instead of rerouting the turn to the vision model or stripping the images. The
+	// text-only model stays in charge of the task and reads the image as text.
+	BuildImagePrompt bool `yaml:"build_image_prompt"`
 	// MaxOutputTokens caps the max_tokens LiteRouter forwards, per model, keyed by
 	// exact id or model prefix like context.model_windows. Claude Code asks for tens
 	// of thousands of output tokens on every turn; a model with a smaller cap rejects
@@ -290,6 +295,13 @@ func applyEnv(cfg *Config) error {
 	}
 	if value, ok := os.LookupEnv("LITEROUTER_ROUTER_TEXT_ONLY_MODELS"); ok {
 		cfg.Router.TextOnlyModels = splitModelList(value)
+	}
+	if value, ok := os.LookupEnv("LITEROUTER_ROUTER_BUILD_IMAGE_PROMPT"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("parse LITEROUTER_ROUTER_BUILD_IMAGE_PROMPT: %w", err)
+		}
+		cfg.Router.BuildImagePrompt = parsed
 	}
 	integers := []struct {
 		name   string

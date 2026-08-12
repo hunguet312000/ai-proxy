@@ -218,12 +218,18 @@ type Service struct {
 	fallbackModel   atomic.Pointer[string]
 	longContext     longContextPointer
 	imageRoute      atomic.Pointer[imageRoute]
-	outputLimits    map[string]int
-	learnedLimits   map[string]int
-	learnedWindows  map[string]int
-	observedWindows map[string]int
-	tokenScales     map[string]tokenScale
-	warnedInflated  map[string]bool
+	// buildImagePrompt, when true, transcribes images to text (via the vision model)
+	// for text-only serving models instead of rerouting or stripping them.
+	buildImagePrompt atomic.Pointer[bool]
+	// transcriptionCache remembers vision-model text for repeated images.
+	transcriptionCache *transcriptionCache
+	transcriptionMu    sync.Mutex
+	outputLimits       map[string]int
+	learnedLimits      map[string]int
+	learnedWindows     map[string]int
+	observedWindows    map[string]int
+	tokenScales        map[string]tokenScale
+	warnedInflated     map[string]bool
 	// modelEfforts overrides the reasoning effort per model. Held as a pointer so a
 	// catalog edit is visible to in-flight requests without locking the hot path.
 	modelEfforts    atomic.Pointer[map[string]string]
@@ -323,6 +329,9 @@ type Options struct {
 	// TextOnlyModels names the models that cannot read images, by exact id or prefix. It
 	// has to be named because no vendor exposes it reliably and no model id carries it.
 	TextOnlyModels []string
+	// BuildImagePrompt transcribes images to text via ImageModel for text-only serving
+	// models instead of rerouting or stripping them.
+	BuildImagePrompt bool
 	// MaxOutputTokens caps max_tokens per model, keyed by exact id or model prefix.
 	// Explicit configuration: it wins over anything the gateway learns at runtime.
 	MaxOutputTokens map[string]int
@@ -412,6 +421,7 @@ func New(options Options) *Service {
 	service.SetFallbackModel(options.FallbackModel)
 	service.SetLongContext(options.LongContextModel, options.LongContextPercent)
 	service.SetImageRoute(options.ImageModel, options.TextOnlyModels)
+	service.SetBuildImagePrompt(options.BuildImagePrompt)
 	service.seedTokenScales(options.LearnedCalibrations)
 	service.seedObservedPrompts(options.ObservedPrompts)
 	mode := ContextModeOff

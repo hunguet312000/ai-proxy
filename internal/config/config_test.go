@@ -235,3 +235,28 @@ func setDefaultEnv(t *testing.T) {
 	t.Setenv("LITEROUTER_XAI_BASE_URL", defaultXAIBaseURL)
 	t.Setenv("LITEROUTER_LOG_LEVEL", defaultLogLevel)
 }
+
+func TestLoadBuildImagePromptFromEnv(t *testing.T) {
+	path := writeConfig(t, "router:\n  image_model: vision\n  text_only_models:\n    - text\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Router.BuildImagePrompt {
+		t.Fatal("BuildImagePrompt defaults on")
+	}
+
+	t.Setenv("LITEROUTER_ROUTER_BUILD_IMAGE_PROMPT", "true")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Router.BuildImagePrompt {
+		t.Fatal("LITEROUTER_ROUTER_BUILD_IMAGE_PROMPT=true not applied")
+	}
+
+	t.Setenv("LITEROUTER_ROUTER_BUILD_IMAGE_PROMPT", "not-a-bool")
+	if _, err := Load(path); err == nil {
+		t.Fatal("invalid LITEROUTER_ROUTER_BUILD_IMAGE_PROMPT accepted")
+	}
+}

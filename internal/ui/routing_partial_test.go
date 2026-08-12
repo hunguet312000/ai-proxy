@@ -73,3 +73,52 @@ func TestRoutingPostDoesNotWipeFieldsItDoesNotCarry(t *testing.T) {
 		t.Errorf("fallback model = %q, want it untouched", stored["fallback"])
 	}
 }
+
+// The build-image-prompt checkbox follows the same presence semantics: a partial POST
+// that never mentions it must not flip it, and an explicit checked/unchecked writes it.
+func TestRoutingBuildImagePromptPresenceSemantics(t *testing.T) {
+	buildPrompt := false
+	hooks := SettingsHooks{
+		// routingHandler requires SetPlanModel to be wired before it does anything.
+		SetPlanModel:        func(context.Context, string) error { return nil },
+		GetBuildImagePrompt: func(context.Context) (bool, error) { return buildPrompt, nil },
+		SetBuildImagePrompt: func(_ context.Context, v bool) error { buildPrompt = v; return nil },
+	}
+	service, err := New(pool.New(nil), "token", nil, nil, nil, nil, nil,
+		APIKeyHooks{}, ModelHooks{}, hooks, UsageHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := echo.New()
+	service.Register(e)
+
+	post := func(form url.Values) {
+		request := httptest.NewRequest(http.MethodPost, "/ui/routing", strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.Header.Set("Origin", "http://example.com")
+		request.Host = "example.com"
+		recorder := httptest.NewRecorder()
+		e.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body %q", recorder.Code, recorder.Body.String())
+		}
+	}
+
+	// A POST that never mentions the checkbox leaves it alone.
+	post(url.Values{"plan_model": {"cx/gpt-5.6-sol"}})
+	if buildPrompt {
+		t.Fatal("build_image_prompt flipped by a POST that did not carry it")
+	}
+
+	// Checking it writes true.
+	post(url.Values{"build_image_prompt": {"on"}})
+	if !buildPrompt {
+		t.Fatal("checked checkbox did not set build_image_prompt")
+	}
+
+	// Unchecking it (present with empty value) writes false.
+	post(url.Values{"build_image_prompt": {""}})
+	if buildPrompt {
+		t.Fatal("unchecked checkbox did not clear build_image_prompt")
+	}
+}

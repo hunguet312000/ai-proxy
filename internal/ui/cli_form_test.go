@@ -131,10 +131,22 @@ func TestSetupFormKeepsEveryFieldItUsedToSubmit(t *testing.T) {
 		"base_url", "model", "fable_model", "opus_model", "sonnet_model", "haiku_model",
 		"subagent_model", "effort", "max_context",
 		"plan_model", "long_context_model", "long_context_percent", "text_only_models", "image_model",
+		"build_image_prompt",
 	} {
 		if !strings.Contains(page, `name="`+field+`"`) {
 			t.Errorf("form no longer submits %q", field)
 		}
+	}
+}
+
+func TestSetupFormBuildImagePromptShowsCheckedState(t *testing.T) {
+	page := renderCLITab(t, viewData{ClaudeSetup: clisetup.Request{Model: "cx/a"}, BuildImagePrompt: true})
+	if !strings.Contains(page, `name="build_image_prompt" checked`) {
+		t.Error("checked build_image_prompt not reflected in the form")
+	}
+	unchecked := renderCLITab(t, viewData{ClaudeSetup: clisetup.Request{Model: "cx/a"}})
+	if strings.Contains(unchecked, `name="build_image_prompt" checked`) {
+		t.Error("unchecked build_image_prompt rendered as checked")
 	}
 }
 

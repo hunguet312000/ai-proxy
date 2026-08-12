@@ -596,6 +596,10 @@ sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
                 <button class="btn secondary sm" type="button" data-open-model-picker="image_model" data-picker-title="Select model for image turns">Browse</button>
               </div>
             </label>
+            <label class="field-toggle">
+              <input type="checkbox" name="build_image_prompt" {{if .BuildImagePrompt}}checked{{end}}>
+              <span class="field-toggle-label" title="When on, every image in the prompt is transcribed to text by the model named above, and the turn stays on the text-only model it was headed for — instead of the whole turn being rerouted to the vision model or the images being dropped. Off (default) keeps today's behavior: image turns go to the vision model, history images become placeholders.">Build prompt from image — transcribe images to text for text-only models</span>
+            </label>
           </details>
           <div class="btn-row">
             <button class="btn primary sm" type="submit">Save routing</button>

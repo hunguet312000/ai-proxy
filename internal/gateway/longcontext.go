@@ -109,6 +109,16 @@ func (s *Service) routeModel(ctx context.Context, request translator.AnthropicRe
 		decision.Model = model
 	}
 	switch {
+	case s.BuildImagePrompt() && (vision != "" || strip) && s.servingModelTextOnly(serving):
+		// The build-image-prompt toggle wins: the text-only task model stays in charge,
+		// and every image is transcribed to text instead of the turn being rerouted to
+		// the vision model or the images being stripped.
+		decision.TranscribeImages = true
+		if decision.Reason == "" {
+			decision.Reason = "images transcribed to text for a text-only model"
+		} else {
+			decision.Reason += "; images transcribed to text for a text-only model"
+		}
 	case vision != "":
 		decision.Model, decision.Reason = vision, "image on a text-only model"
 	case strip:
@@ -120,6 +130,17 @@ func (s *Service) routeModel(ctx context.Context, request translator.AnthropicRe
 		}
 	}
 	return decision, nil
+}
+
+// servingModelTextOnly reports whether the model that will serve the turn is declared
+// unable to read images. It guards the transcription branch so a vision-capable model
+// never pays for image→text conversion ("model vừa đọc được cả ảnh cả text thì bỏ qua").
+func (s *Service) servingModelTextOnly(serving string) bool {
+	route := s.imageRoute.Load()
+	if route == nil {
+		return false
+	}
+	return route.isTextOnly(serving)
 }
 
 // routeDecision is what the routing rules concluded about one turn.
@@ -142,11 +163,15 @@ type routeDecision struct {
 	// history of a turn that is not about them — the second is what keeps a single screenshot
 	// from moving the whole rest of a session onto the vision model.
 	StripImages bool
+	// TranscribeImages means the turn is servable on the text-only serving model once every
+	// image is transcribed to text by the vision model (build-image-prompt toggle on). It
+	// replaces rerouting to the vision model or stripping, keeping the task model in charge.
+	TranscribeImages bool
 }
 
 // overrides reports whether the decision changes anything about the turn.
 func (decision routeDecision) overrides() bool {
-	return decision.Model != "" || decision.StripImages || decision.Effort != ""
+	return decision.Model != "" || decision.StripImages || decision.TranscribeImages || decision.Effort != ""
 }
 
 // sizePlanAndCompactRoute resolves the rules that pick between models any of which

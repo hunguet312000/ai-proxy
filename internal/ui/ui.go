@@ -191,6 +191,10 @@ type SettingsHooks struct {
 	// unable to read images. Also LiteRouter's own routing, applied to a running gateway.
 	GetImageRoute func(context.Context) (string, string, error)
 	SetImageRoute func(context.Context, string, string) error
+	// GetBuildImagePrompt and SetBuildImagePrompt expose the image→text transcription
+	// toggle for text-only models.
+	GetBuildImagePrompt func(context.Context) (bool, error)
+	SetBuildImagePrompt func(context.Context, bool) error
 	// GetCLIDraft and SetCLIDraft remember the CLI model selection independently of the
 	// host client's config, so Reset can return that client to stock without discarding
 	// what to re-apply.
@@ -343,6 +347,7 @@ type viewData struct {
 	LongContextPercent int
 	ImageModel         string
 	TextOnlyModels     string
+	BuildImagePrompt   bool
 	Tab                string
 	TabTitle           string
 	TabHeading         string
@@ -1310,6 +1315,11 @@ func (s *Service) pageData(c echo.Context, tab string) viewData {
 		if s.settings.GetImageRoute != nil {
 			if model, textOnly, imageErr := s.settings.GetImageRoute(c.Request().Context()); imageErr == nil {
 				data.ImageModel, data.TextOnlyModels = model, textOnly
+			}
+		}
+		if s.settings.GetBuildImagePrompt != nil {
+			if enabled, buildErr := s.settings.GetBuildImagePrompt(c.Request().Context()); buildErr == nil {
+				data.BuildImagePrompt = enabled
 			}
 		}
 		if s.settings.GetPlanModel != nil {
@@ -2429,6 +2439,15 @@ func (s *Service) routingHandler(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
 	}
+	// The checkbox is read with presence semantics: an absent field (an old form, or a
+	// partial POST) must not flip the toggle. Only an explicit checked/unchecked writes it.
+	if enabled, present, err := routingCheckbox(c, "build_image_prompt"); err != nil {
+		return err
+	} else if present && s.settings.SetBuildImagePrompt != nil {
+		if err := s.settings.SetBuildImagePrompt(c.Request().Context(), enabled); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+	}
 	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
 	c.Response().Header().Set("Cache-Control", "no-store")
 	parts := make([]string, 0, 4)
@@ -2493,6 +2512,22 @@ func routingModelValue(c echo.Context, field string) (string, bool, error) {
 		return "", false, echo.NewHTTPError(http.StatusBadRequest, field+" contains invalid characters or is too long")
 	}
 	return value, true, nil
+}
+
+// routingCheckbox reads a checkbox field with presence semantics: absent → present=false
+// (no write); present with any value → checked; present with empty value → unchecked.
+func routingCheckbox(c echo.Context, field string) (bool, bool, error) {
+	form, err := c.FormParams()
+	if err != nil {
+		return false, false, echo.NewHTTPError(http.StatusBadRequest, "malformed form")
+	}
+	values, ok := form[field]
+	if !ok {
+		return false, false, nil
+	}
+	// A checkbox that is submitted without the checked attribute carries an empty value;
+	// one that is checked carries "on". Both are a deliberate explicit state.
+	return len(values) > 0 && values[0] != "", true, nil
 }
 
 func (s *Service) deleteHandler(c echo.Context) error {

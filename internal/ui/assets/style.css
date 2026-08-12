@@ -920,6 +920,14 @@ select.field { appearance: none; }
 }
 .qt-btn.is-on .qt-toggle::after { transform: translateX(12px); }
 
+.field-toggle {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; line-height: 1.4; color: var(--text);
+  padding: 8px 0 2px; cursor: pointer;
+}
+.field-toggle input[type="checkbox"] { flex: 0 0 auto; width: 15px; height: 15px; accent-color: var(--brand); }
+.field-toggle-label { cursor: help; }
+
 .quota-summary {
   display: flex; align-items: center; gap: 7px;
   color: var(--muted); font-size: 12px; padding: 0 2px;

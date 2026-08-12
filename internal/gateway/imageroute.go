@@ -65,6 +65,27 @@ func (s *Service) SetImageRoute(model string, textOnly []string) {
 	s.imageRoute.Store(&imageRoute{model: strings.TrimSpace(model), textOnly: cleaned})
 }
 
+// SetBuildImagePrompt turns image→text transcription on or off. When on, a text-only
+// serving model gets every image in its prompt transcribed to text by the vision model
+// instead of the turn being rerouted to the vision model or the image stripped.
+func (s *Service) SetBuildImagePrompt(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.buildImagePrompt.Store(&enabled)
+}
+
+// BuildImagePrompt reports whether image→text transcription is enabled.
+func (s *Service) BuildImagePrompt() bool {
+	if s == nil {
+		return false
+	}
+	if value := s.buildImagePrompt.Load(); value != nil {
+		return *value
+	}
+	return false
+}
+
 // requestHasImage reports whether any message carries an image block.
 //
 // Walked on the parsed request rather than sniffed out of the raw bytes. Byte sniffing

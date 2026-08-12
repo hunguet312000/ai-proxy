@@ -234,6 +234,13 @@ func run() int {
 			gatewayService.SetImageRoute(model, strings.Split(textOnly, ","))
 		}
 	}
+	// Same precedence for the image-transcription toggle. It is meaningless without the
+	// image rule, but restored independently so a stored value is not paired with config's.
+	if _, envSet := os.LookupEnv("LITEROUTER_ROUTER_BUILD_IMAGE_PROMPT"); !envSet {
+		if stored, storedErr := store.GetSetting(context.Background(), "router.build_image_prompt"); storedErr == nil {
+			gatewayService.SetBuildImagePrompt(stored == "true")
+		}
+	}
 	gatewayService.SetOnUsage(func(ev gateway.UsageEvent) {
 		usageService.EnqueueGatewayUsage(storage.UsageEvent{
 			Provider: ev.Provider, Model: ev.Model, Endpoint: ev.Endpoint, Status: ev.Status,
@@ -739,6 +746,24 @@ func run() int {
 			gatewayService.SetImageRoute(model, strings.Split(textOnly, ","))
 			return nil
 		},
+		GetBuildImagePrompt: func(ctx context.Context) (bool, error) {
+			stored, err := store.GetSetting(ctx, "router.build_image_prompt")
+			if err != nil {
+				return false, nil
+			}
+			return stored == "true", nil
+		},
+		SetBuildImagePrompt: func(ctx context.Context, enabled bool) error {
+			value := "false"
+			if enabled {
+				value = "true"
+			}
+			if err := store.SetSetting(ctx, "router.build_image_prompt", value); err != nil {
+				return err
+			}
+			gatewayService.SetBuildImagePrompt(enabled)
+			return nil
+		},
 		ContextCeiling: gatewayService.ClientContextCeiling,
 	}, ui.UsageHooks{
 		Summary: usageService.UsageSummary,
@@ -844,6 +869,8 @@ func run() int {
 			result, err = oauthManager.StartClaude(c.Request().Context())
 		case "grok", "xai":
 			result, err = oauthManager.StartGrok(c.Request().Context())
+		case "antigravity":
+			result, err = oauthManager.StartAntigravity(c.Request().Context())
 		default:
 			return echo.NewHTTPError(http.StatusBadRequest, "provider must be codex, claude, xai, or antigravity")
 		}
@@ -1193,6 +1220,7 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 		LongContextPercent:  cfg.Router.LongContextPercent,
 		ImageModel:          cfg.Router.ImageModel,
 		TextOnlyModels:      cfg.Router.TextOnlyModels,
+		BuildImagePrompt:    cfg.Router.BuildImagePrompt,
 		MaxOutputTokens:     cfg.Router.MaxOutputTokens,
 		LearnedOutputTokens: learnedOutputTokens,
 		LearnedCalibrations: learnedCalibrations,
