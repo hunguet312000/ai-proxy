@@ -182,6 +182,11 @@ func run() int {
 			gatewayService.SetCompactModel(stored)
 		}
 	}
+	if _, envSet := os.LookupEnv("LITEROUTER_ROUTER_FALLBACK_MODEL"); !envSet {
+		if stored, storedErr := store.GetSetting(context.Background(), "router.fallback_model"); storedErr == nil {
+			gatewayService.SetFallbackModel(stored)
+		}
+	}
 	// The context mode needs both envs unset before a stored value may apply:
 	// enabled=false and mode=off express the same thing, so a deployment that pins
 	// either one must not be half-overridden by a stale dashboard row.
@@ -614,6 +619,18 @@ func run() int {
 				return err
 			}
 			gatewayService.SetPlanModel(model)
+			return nil
+		},
+		GetFallbackModel: func(context.Context) (string, error) {
+			// Same contract as GetPlanModel: the in-force value, already carrying the
+			// env-wins precedence applied at startup.
+			return gatewayService.FallbackModel(), nil
+		},
+		SetFallbackModel: func(ctx context.Context, model string) error {
+			if err := store.SetSetting(ctx, "router.fallback_model", model); err != nil {
+				return err
+			}
+			gatewayService.SetFallbackModel(model)
 			return nil
 		},
 		GetCompactModel: func(context.Context) (string, error) {
@@ -1141,6 +1158,7 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 		Models:         models, Aliases: cfg.Router.ModelAliases,
 		PlanModel:           cfg.Router.PlanModel,
 		CompactModel:        cfg.Router.CompactModel,
+		FallbackModel:       cfg.Router.FallbackModel,
 		LongContextModel:    cfg.Router.LongContextModel,
 		LongContextPercent:  cfg.Router.LongContextPercent,
 		ImageModel:          cfg.Router.ImageModel,

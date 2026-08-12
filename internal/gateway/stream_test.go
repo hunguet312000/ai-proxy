@@ -520,7 +520,12 @@ func TestAnthropicStreamingHandler(t *testing.T) {
 	body := recorder.Body.String()
 	for _, expected := range []string{
 		"event: message_start", "text_delta",
-		`"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":2,"input_tokens":7,"output_tokens":1}`,
+		// input_tokens is 5, not the upstream's prompt_tokens of 7: the client sums
+		// input + cache_read + cache_creation to size the conversation, so the 2 cached
+		// tokens belong on exactly one of those lines. Emitting 7 alongside 2 reported 9 for
+		// a 7-token prompt, and at session scale that inflation is what pulled auto-compact
+		// forward — measured at 1.24x to 1.99x depending on the upstream.
+		`"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":2,"input_tokens":5,"output_tokens":1}`,
 		"event: message_stop",
 	} {
 		if recorder.Code != http.StatusOK || !strings.Contains(body, expected) {

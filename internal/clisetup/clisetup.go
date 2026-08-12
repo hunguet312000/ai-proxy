@@ -130,58 +130,6 @@ const MaxContextAuto = "auto"
 // every turn and never make progress — a worse failure than the one this setting fixes.
 const minManagedContextWindow = 32768
 
-// autoCompactPercent is the share of the window Claude Code is told to compact at.
-//
-// It exists because a compaction request re-sends the whole conversation on top of the
-// summarization prompt, so it costs roughly twice what the conversation costs. Claude
-// Code's own threshold is window − 13,000, which for a 400k window means compacting at
-// 387k and issuing a ~774k request that cannot possibly fit. Compaction has to start
-// while the conversation is under half the window, and 45 rather than 50 leaves room for
-// the factor to be worse than the 2.06x observed.
-//
-// CLAUDE_AUTOCOMPACT_PCT_OVERRIDE is the right knob for it: the client takes
-// min(window × pct, window − 13,000), so this can only ever move compaction earlier,
-// never past the point where it stops working.
-//
-// The three constants below are one rule split across two processes — LiteRouter picks
-// the window, the client picks the moment — so the rule is written out as
-// CompactRequestFits rather than left as prose for whoever next edits a number.
-const autoCompactPercent = 45
-
-// clientCompactFloor is the client's own ceiling on when it will compact: it fires at
-// window − 13,000 whatever percentage it was given. Read out of the 2.1.220 binary
-// rather than documentation.
-const clientCompactFloor = 13_000
-
-// compactRequestMultiplier is what a compaction request costs relative to the
-// conversation it compacts. Measured: 249,205 tokens of history arrived as a
-// 513,800-token request, so 2.06x. Held as a number so the invariant is checkable.
-const compactRequestMultiplier = 2.06
-
-// ClientCompactThreshold reports the conversation size at which a client handed this
-// window will start compacting, mirroring the client's own min(window × pct, window −
-// 13,000).
-func ClientCompactThreshold(window int) int {
-	if window <= 0 {
-		return 0
-	}
-	return min(window*autoCompactPercent/100, window-clientCompactFloor)
-}
-
-// CompactRequestFits reports whether a client told it has this window will compact early
-// enough that the compaction request itself still fits inside it.
-//
-// This is the whole relationship between the two halves. LiteRouter resolves a model's
-// real ceiling and hands it to the client as the window; the client decides when to
-// compact from that number alone and then issues a request twice the size of what it is
-// compacting. If that product exceeds the ceiling there is no size at which the session
-// can be saved — which is the failure that made a correct 400,000 window look wrong and
-// got it hand-lowered to 256,000.
-func CompactRequestFits(window int) bool {
-	threshold := ClientCompactThreshold(window)
-	return threshold > 0 && float64(threshold)*compactRequestMultiplier <= float64(window)
-}
-
 // ContextWindow resolves MaxContext to the window to hand the client, or zero to leave
 // the client's own belief alone.
 func (r Request) ContextWindow() int {

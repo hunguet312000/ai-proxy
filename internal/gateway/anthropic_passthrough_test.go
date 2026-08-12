@@ -111,7 +111,9 @@ func TestAnthropicPassthroughRelaysUpstreamVerbatim(t *testing.T) {
 	}
 	select {
 	case event := <-usageEvents:
-		if event.Provider != "claude" || event.PromptTokens != 1200 || event.CompletionTokens != 7 || event.CachedTokens != 900 {
+		// 2100, not the 1200 Anthropic reported as input_tokens: PromptTokens is the whole
+		// prompt on every other provider, and the upstream sent 1200 uncached + 900 cached.
+		if event.Provider != "claude" || event.PromptTokens != 2100 || event.CompletionTokens != 7 || event.CachedTokens != 900 {
 			t.Fatalf("usage event = %#v", event)
 		}
 	case <-time.After(time.Second):

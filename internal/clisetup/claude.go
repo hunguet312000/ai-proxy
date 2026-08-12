@@ -16,21 +16,16 @@ import (
 // had resolved and compacted on its own 200k assumption. Nothing caught it, because the
 // test for those keys only exercised the direct path.
 func claudeEnvFor(request Request) map[string]string {
-	// Telling the client the real window is the whole fix for a non-Anthropic model:
-	// left to itself it either assumes 200k, or — with the [1m] suffix, which is a
-	// client-side marker the proxy never sees — assumes 1M, and compacts far too late
-	// either way. Both keys move together because the window alone is not enough: at
-	// window − 13,000 the compaction request is already twice the window. See
-	// autoCompactPercent and CompactRequestFits.
+	// Telling the client the real window is the whole fix for a non-Anthropic model: left
+	// to itself, Claude Code 2.1.228 enforces 200k for a model id it does not recognize, so
+	// a model measured at 370k would be compacted at 187k for no reason.
 	//
 	// Only for non-claude-* ids, and not by choice: the client consults
-	// CLAUDE_CODE_MAX_CONTEXT_TOKENS only when the model id does not start with
-	// "claude-", so writing it for one of those is a no-op that would still leave the
-	// percentage override in force against a window it never applied to.
-	maxContext, autoCompactPct := "", ""
+	// CLAUDE_CODE_MAX_CONTEXT_TOKENS only when the model id does not start with "claude-",
+	// so writing it for one of those is a no-op.
+	maxContext := ""
 	if window := request.ContextWindow(); window > 0 && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(request.Model)), "claude-") {
 		maxContext = strconv.Itoa(window)
-		autoCompactPct = strconv.Itoa(autoCompactPercent)
 	}
 	return map[string]string{
 		"ANTHROPIC_BASE_URL":   normalizeBase(request.BaseURL, false),
@@ -40,13 +35,33 @@ func claudeEnvFor(request Request) map[string]string {
 		// does: Claude Code treats CLAUDE_CODE_SUBAGENT_MODEL as the highest-priority
 		// override, so writing it unconditionally would silently void every agent's own
 		// `model:` frontmatter.
-		"CLAUDE_CODE_SUBAGENT_MODEL":      request.SubagentModel,
-		"ANTHROPIC_DEFAULT_FABLE_MODEL":   request.FableModel,
-		"ANTHROPIC_DEFAULT_OPUS_MODEL":    request.OpusModel,
-		"ANTHROPIC_DEFAULT_SONNET_MODEL":  request.SonnetModel,
-		"ANTHROPIC_DEFAULT_HAIKU_MODEL":   request.HaikuModel,
-		"CLAUDE_CODE_MAX_CONTEXT_TOKENS":  maxContext,
-		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": autoCompactPct,
+		"CLAUDE_CODE_SUBAGENT_MODEL":     request.SubagentModel,
+		"ANTHROPIC_DEFAULT_FABLE_MODEL":  request.FableModel,
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":   request.OpusModel,
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": request.SonnetModel,
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":  request.HaikuModel,
+		// The only window key written, and deliberately: raising the window can only move
+		// compaction later.
+		"CLAUDE_CODE_MAX_CONTEXT_TOKENS": maxContext,
+		// Always empty, which means "remove this key" — so an apply or a reset cleans these
+		// out of a settings.json that an earlier version of this function wrote them into.
+		//
+		// They forced the client to compact early: PCT_OVERRIDE=45 made it compact at 45% of
+		// the window, AUTO_COMPACT_WINDOW pinned the window it measured that against, and
+		// DISABLE_1M stopped a [1m] model id from inflating it. The reason was that a
+		// compaction request re-sends the whole conversation on top of the summarization
+		// prompt — about 2.06x what it compacts — so the client had to start well under half
+		// the window or the compaction request itself could not fit.
+		//
+		// That reasoning held only while the client was the only thing that could shrink a
+		// prompt. The proxy now compresses oversized prompts itself (internal/contextguard),
+		// so a client-side compaction at 45% bought nothing and cost minutes per session —
+		// and because the client compacts against a size the proxy reports, any error in that
+		// number moved the real trigger lower still. Compaction is left to the client's own
+		// judgement and to an explicit /compact.
+		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "",
+		"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "",
+		"CLAUDE_CODE_DISABLE_1M_CONTEXT":  "",
 	}
 }
 

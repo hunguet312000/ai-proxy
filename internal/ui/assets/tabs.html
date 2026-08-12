@@ -456,17 +456,38 @@ sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
           {{if .ClaudeApplied}}<span class="tag ok">active</span>{{else}}<span class="tag">saved · not applied</span>{{end}}
         </header>
         <form class="form-grid" method="post" data-cli-setup-form>
-          <label><span class="field-hint" title="ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN. Apply writes these into ~/.claude/settings.json — restart Claude Code for them to take effect.">Endpoint</span><input class="field" name="base_url" value="{{.BaseURL}}" required></label>
           <label class="model-field-label"><span class="field-hint" title="ANTHROPIC_MODEL — the resting model for every turn. Put a cheap model here and let Plan handle the thinking. Overrides whatever Claude Code&#39;s own /model is set to.">Default</span>
             <div class="model-field">
               <input class="field grow" name="model" value="{{if .ClaudeSetup.Model}}{{.ClaudeSetup.Model}}{{else if .Models}}{{index .Models 0}}{{end}}" list="model-options" placeholder="cheap · serves every turn" required data-model-input="model">
               <button class="btn secondary sm" type="button" data-open-model-picker="model" data-picker-title="Select model for Default">Browse</button>
             </div>
           </label>
-          <details class="form-section"{{if or .ClaudeSetup.FableModel .ClaudeSetup.OpusModel .ClaudeSetup.SonnetModel .ClaudeSetup.HaikuModel .ClaudeSetup.SubagentModel}} open{{end}}>
-            <summary><span>Role overrides</span><em>Fable · Opus · Sonnet · Haiku · Subagent</em></summary>
+          <label class="model-field-label"><span class="field-hint" title="The real context window of the models above, in tokens, written as CLAUDE_CODE_MAX_CONTEXT_TOKENS. Without it Claude Code enforces 200k for any model id it does not recognise, so it compacts long before it needs to. auto uses the smallest window LiteRouter knows for the models below, including what it learned at runtime: a ceiling an upstream named when it refused a prompt, and a floor set by the largest prompt it actually served — the Measure button under Models resolves it exactly. This is the only window key written, and it can only move compaction later; nothing here forces Claude Code to compact early any more. Ignored by Claude Code for claude-* model ids, so it is not written for those.">Max context</span>
+            <input class="field" name="max_context" value="{{.ClaudeSetup.MaxContext}}" list="max-context-options" placeholder="auto · recommended">
+            <datalist id="max-context-options">
+              <option value="auto"></option>
+              <option value="200000"></option>
+              <option value="400000"></option>
+              <option value="1000000"></option>
+            </datalist>
+          </label>
+          {{/* Folded by default, but never folded over something that would surprise the
+               reader. A role set to the same model as Default changes nothing, so hiding it
+               is honest; one that differs is a live override and must be visible, as is any
+               session effort. Subagent counts even when it equals Default, because setting
+               it at all overrides each agent's own model: frontmatter. */}}
+          {{$default := .ClaudeSetup.Model}}
+          <details class="form-section"{{if or
+            (and .ClaudeSetup.FableModel (ne .ClaudeSetup.FableModel $default))
+            (and .ClaudeSetup.OpusModel (ne .ClaudeSetup.OpusModel $default))
+            (and .ClaudeSetup.SonnetModel (ne .ClaudeSetup.SonnetModel $default))
+            (and .ClaudeSetup.HaikuModel (ne .ClaudeSetup.HaikuModel $default))
+            .ClaudeSetup.SubagentModel .ClaudeSetup.Effort}} open{{end}}>
+            <summary><span>Advanced</span><em>Endpoint · role overrides · session effort</em></summary>
+            <label><span class="field-hint" title="ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN. Apply writes these into ~/.claude/settings.json — restart Claude Code for them to take effect. Empty uses the address you loaded this dashboard from, which is almost always right; set it only when Claude Code reaches LiteRouter at a different address than your browser does.">Endpoint</span><input class="field" name="base_url" value="{{.BaseURL}}" placeholder="auto · same address as this dashboard"></label>
+            <div class="form-section-head">Role overrides <em>only when a role should differ from Default</em></div>
             <div class="form-grid two">
-              <label class="model-field-label"><span class="field-hint" title="Used when /model picks Fable. Empty sends Anthropic&#39;s own model id, which only routes if a Claude account is connected.">Fable</span>
+              <label class="model-field-label"><span class="field-hint" title="Used when /model picks Fable. Empty sends Anthropic&#39;s own model id, which routes only if a Claude account is connected — or to the router&#39;s Fallback model if one is set.">Fable</span>
                 <div class="model-field">
                   <input class="field grow" name="fable_model" value="{{.ClaudeSetup.FableModel}}" list="model-options" placeholder="strong · optional" data-model-input="fable_model">
                   <button class="btn secondary sm" type="button" data-open-model-picker="fable_model" data-picker-title="Select model for Fable">Browse</button>
@@ -497,10 +518,8 @@ sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
                 </div>
               </label>
             </div>
-          </details>
-          <div class="form-section-head">Session <em>applies to every model Claude Code calls</em></div>
-          <div class="form-grid two">
-            <label class="model-field-label"><span class="field-hint" title="Claude Code&#39;s effortLevel setting — the same value /effort writes, so /effort can still change it afterwards. Leave on &#39;keep current&#39; to not manage it. Reset does not revert it: effort is a preference, not routing. Reaches the model on cx/* (sent as reasoning.effort); dropped on ag/*, cursor and custom-provider upstreams. Claude Code holds one effort for the whole session — to force a level for a single model, use its Reasoning effort under Models.">Session effort</span>
+            <div class="form-section-head">Session effort <em>Claude Code holds one level for the whole session</em></div>
+            <label class="model-field-label"><span class="field-hint" title="Claude Code&#39;s effortLevel setting — the same value /effort writes, so /effort can still change it afterwards, which is why this is usually better left alone. Leave on &#39;keep current&#39; to not manage it. Reset does not revert it: effort is a preference, not routing. Reaches the model on cx/* (sent as reasoning.effort); dropped on ag/*, cursor and custom-provider upstreams. To force a level for a single model instead, use its Reasoning effort under Models.">Session effort</span>
               <select class="field" name="effort">
                 <option value=""{{if not .ClaudeSetup.Effort}} selected{{end}}>keep current</option>
                 <option value="low"{{if eq .ClaudeSetup.Effort "low"}} selected{{end}}>low</option>
@@ -510,16 +529,7 @@ sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
                 <option value="max"{{if eq .ClaudeSetup.Effort "max"}} selected{{end}}>max</option>
               </select>
             </label>
-            <label class="model-field-label"><span class="field-hint" title="The real context window of the models above, in tokens. Without it Claude Code assumes 200k — or 1M if /model picked a [1m] variant, a client-side marker LiteRouter never sees — so it compacts far too late and the compaction itself overflows. auto uses the smallest window LiteRouter knows for the models above, including what it has learned at runtime: a ceiling an upstream named when it refused a prompt, and a floor set by the largest prompt it actually served. Written as CLAUDE_CODE_MAX_CONTEXT_TOKENS, plus an auto-compact percentage so compaction starts while it still fits. Ignored by Claude Code for claude-* model ids.">Max context</span>
-              <input class="field" name="max_context" value="{{.ClaudeSetup.MaxContext}}" list="max-context-options" placeholder="auto · recommended">
-              <datalist id="max-context-options">
-                <option value="auto"></option>
-                <option value="200000"></option>
-                <option value="400000"></option>
-                <option value="1000000"></option>
-              </datalist>
-            </label>
-          </div>
+          </details>
           <div class="btn-row">
             <button class="btn primary" type="submit" formaction="/ui/setup/claude/apply">Apply</button>
             <button class="btn secondary" type="submit" formaction="/ui/setup/claude/reset" formnovalidate title="Returns Claude Code to its stock configuration: LiteRouter&#39;s keys are removed from ~/.claude/settings.json, restoring whatever was there before. The selection above is kept here, so Apply puts it all back.">Reset</button>
@@ -542,6 +552,12 @@ sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
             <div class="model-field">
               <input class="field grow" name="compact_model" value="{{.CompactModel}}" list="model-options" placeholder="pick a fast model — empty turns this off" data-model-input="compact_model">
               <button class="btn secondary sm" type="button" data-open-model-picker="compact_model" data-picker-title="Select model for compact requests">Browse</button>
+            </div>
+          </label>
+          <label class="model-field-label"><span class="field-hint" title="Last resort: a turn no other candidate could serve is sent here instead of failing with 502. Mainly catches a model whose provider has no usable account — Claude Code resolves its opus/sonnet/haiku tiers to claude-* ids whenever the matching ANTHROPIC_DEFAULT_*_MODEL is unset, and with no Anthropic account configured every one of those was a 502 that never left the proxy. Also covers an upstream whose accounts are all disabled or rate-limited at the moment the turn arrives. Appended after the requested model, so anything servable is still served by what the routing rules chose. Empty restores the 502.">Fallback</span>
+            <div class="model-field">
+              <input class="field grow" name="fallback_model" value="{{.FallbackModel}}" list="model-options" placeholder="pick an always-available model — empty turns this off" data-model-input="fallback_model">
+              <button class="btn secondary sm" type="button" data-open-model-picker="fallback_model" data-picker-title="Select the last-resort model">Browse</button>
             </div>
           </label>
           <label class="model-field-label"><span class="field-hint" title="LiteRouter&#39;s own pipeline for requests approaching their model&#39;s window. Safe: drop old reasoning and exact-duplicate tool results — lossless. Aggressive: additionally collapse re-reads superseded by a newer identical call and head/tail-truncate old bulky tool output; recent turns stay byte-for-byte and error output is kept. Off forwards requests untouched. Applies immediately.">Proxy compaction</span>
@@ -594,19 +610,22 @@ ANTHROPIC_AUTH_TOKEN=$LITEROUTER_API_TOKEN</pre>
           <span class="tag ok">ready</span>
         </header>
         <form class="form-grid" method="post" data-cli-setup-form>
-          <label>Endpoint<input class="field" name="base_url" value="{{.BaseURL}}" required></label>
           <label class="model-field-label">Model
             <div class="model-field">
               <input class="field grow" name="model" value="{{if .Models}}{{index .Models 0}}{{end}}" list="model-options" placeholder="type model id or browse" required data-model-input="codex_model">
               <button class="btn secondary sm" type="button" data-open-model-picker="codex_model" data-picker-title="Select model for Codex">Browse</button>
             </div>
           </label>
-          <label class="model-field-label">Subagent
-            <div class="model-field">
-              <input class="field grow" name="subagent_model" value="" list="model-options" placeholder="optional · defaults to model" data-model-input="subagent_model">
-              <button class="btn secondary sm" type="button" data-open-model-picker="subagent_model" data-picker-title="Select model for Subagent">Browse</button>
-            </div>
-          </label>
+          <details class="form-section">
+            <summary><span>Advanced</span><em>Endpoint · subagent</em></summary>
+            <label><span class="field-hint" title="Empty uses the address you loaded this dashboard from, which is almost always right; set it only when Codex reaches LiteRouter at a different address than your browser does.">Endpoint</span><input class="field" name="base_url" value="{{.BaseURL}}" placeholder="auto · same address as this dashboard"></label>
+            <label class="model-field-label">Subagent
+              <div class="model-field">
+                <input class="field grow" name="subagent_model" value="" list="model-options" placeholder="optional · defaults to model" data-model-input="subagent_model">
+                <button class="btn secondary sm" type="button" data-open-model-picker="subagent_model" data-picker-title="Select model for Subagent">Browse</button>
+              </div>
+            </label>
+          </details>
           <div class="btn-row">
             <button class="btn primary" type="submit" formaction="/ui/setup/codex/apply">Apply</button>
             <button class="btn secondary" type="submit" formaction="/ui/setup/codex/reset" formnovalidate>Reset</button>

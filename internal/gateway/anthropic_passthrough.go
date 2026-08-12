@@ -304,7 +304,11 @@ func (relay *anthropicRelay) reportedModel() string {
 func (relay *anthropicRelay) usageEvent(status string) UsageEvent {
 	return UsageEvent{
 		Provider: "claude", Model: relay.reportedModel(), Endpoint: "/v1/messages", Status: status,
-		PromptTokens: relay.inputTokens, CompletionTokens: relay.outputTokens,
+		// promptTotal, not inputTokens: UsageEvent.PromptTokens is the whole prompt on every
+		// other provider, and the context-window floor in LargestServedPrompts reads it as
+		// such. Recording Anthropic's uncached remainder here made this provider's rows
+		// smaller than the prompts it had actually served.
+		PromptTokens: relay.promptTotal(), CompletionTokens: relay.outputTokens,
 		CachedTokens: relay.cacheRead, CachedTokensReported: true,
 	}
 }

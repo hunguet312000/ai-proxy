@@ -192,7 +192,13 @@ func FromAnthropicResponse(response AnthropicResponse) (provider.Response, error
 	return provider.Response{
 		ID: response.ID, Model: response.Model, Role: response.Role, Content: content, StopReason: response.StopReason,
 		Usage: provider.Usage{
-			InputTokens: response.Usage.InputTokens, OutputTokens: response.Usage.OutputTokens,
+			// provider.Usage.InputTokens is the whole prompt, cached part included — the
+			// OpenAI convention, which is what the usage recorder and every OpenAI-shaped
+			// translation already assume. Anthropic splits it the other way, reporting the
+			// uncached remainder, so the cache counts are added back in here rather than
+			// leaving InputTokens meaning one thing on one upstream and another elsewhere.
+			InputTokens:     response.Usage.InputTokens + response.Usage.CacheReadInputTokens + response.Usage.CacheCreationInputTokens,
+			OutputTokens:    response.Usage.OutputTokens,
 			CacheReadTokens: response.Usage.CacheReadInputTokens, CacheCreationTokens: response.Usage.CacheCreationInputTokens,
 		},
 	}, nil
@@ -207,7 +213,12 @@ func ToAnthropicResponse(response provider.Response) AnthropicResponse {
 	return AnthropicResponse{
 		ID: response.ID, Type: "message", Model: response.Model, Role: response.Role, Content: content, StopReason: response.StopReason,
 		Usage: AnthropicUsage{
-			InputTokens: response.Usage.InputTokens, OutputTokens: response.Usage.OutputTokens,
+			// The inverse of FromAnthropicResponse: input_tokens on the wire is the uncached
+			// remainder, because the client sums all three to size the conversation. Sending
+			// the total here double-counted the cached part and made every session look 1.2x
+			// to 2.0x larger than it was, which is what dragged auto-compact forward.
+			InputTokens:          max(0, response.Usage.InputTokens-response.Usage.CacheReadTokens-response.Usage.CacheCreationTokens),
+			OutputTokens:         response.Usage.OutputTokens,
 			CacheReadInputTokens: response.Usage.CacheReadTokens, CacheCreationInputTokens: response.Usage.CacheCreationTokens,
 		},
 	}

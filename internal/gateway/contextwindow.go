@@ -333,13 +333,22 @@ func (s *Service) learnedContextBounds(model string) (ceiling, floor int) {
 // handing over the largest would leave every other model compacting too late, which is
 // exactly the failure the setting exists to prevent.
 //
+// One number, and not by choice. Claude Code 2.1.228 has no per-model context-window
+// setting: a sweep of its settings schema turns up only global keys, and modelOverrides —
+// the one that sounds like it would carry a window — is typed record(string, string) and
+// described as a mapping from an Anthropic model id to a provider-specific one. So the
+// compromise is the client's, not this function's, and the practical consequence is worth
+// knowing: adding a small-window model to the card lowers the window for every model on
+// it.
+//
 // Each model contributes its resolved window, which means both kinds of runtime evidence
 // — a ceiling an upstream named in a rejection, and a floor a served prompt established.
 // A floor makes the number larger, which reads like the unsafe direction, and is not: it
 // is a size that model has demonstrably answered, and the minimum across models still
 // binds. Handing the client less than a model can take is not free either — it compacts
-// sooner, and every compaction costs about twice the conversation it compacts. The
-// client-side half of that trade lives in clisetup.CompactRequestFits.
+// sooner, and every compaction costs about twice the conversation it compacts. Nothing
+// forces that compaction any earlier: clisetup writes the window and nothing else, so this
+// number is the whole of what the client is told (see clisetup.claudeEnvFor).
 func (s *Service) SmallestContextWindow(ctx context.Context, models []string) int {
 	smallest := 0
 	for _, model := range models {

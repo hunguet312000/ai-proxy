@@ -76,6 +76,10 @@ type RouterConfig struct {
 	// slowest request a session makes, and one nothing about needs the session
 	// model. Routed at medium effort. Empty disables the detection entirely.
 	CompactModel string `yaml:"compact_model"`
+	// FallbackModel serves a turn every other candidate failed to serve, instead of
+	// returning a 502. Its main job is the model whose provider has no usable account —
+	// a `claude-*` tier id with no Anthropic account configured is the common case.
+	FallbackModel string `yaml:"fallback_model"`
 	// LongContextModel serves a turn whose prompt is too large a share of the window
 	// belonging to the model that would otherwise take it — the routing equivalent of
 	// claude-code-router's `longContext`. Empty disables the rule.
@@ -262,6 +266,9 @@ func applyEnv(cfg *Config) error {
 	if value, ok := os.LookupEnv("LITEROUTER_ROUTER_COMPACT_MODEL"); ok {
 		cfg.Router.CompactModel = value
 	}
+	if value, ok := os.LookupEnv("LITEROUTER_ROUTER_FALLBACK_MODEL"); ok {
+		cfg.Router.FallbackModel = value
+	}
 	if value, ok := os.LookupEnv("LITEROUTER_ROUTER_LONG_CONTEXT_MODEL"); ok {
 		cfg.Router.LongContextModel = value
 	}
@@ -395,6 +402,7 @@ func (cfg *Config) Validate() error {
 	}
 	cfg.Router.PlanModel = strings.TrimSpace(cfg.Router.PlanModel)
 	cfg.Router.CompactModel = strings.TrimSpace(cfg.Router.CompactModel)
+	cfg.Router.FallbackModel = strings.TrimSpace(cfg.Router.FallbackModel)
 	cfg.Router.LongContextModel = strings.TrimSpace(cfg.Router.LongContextModel)
 	cfg.Router.ImageModel = strings.TrimSpace(cfg.Router.ImageModel)
 	cfg.Router.TextOnlyModels = trimModelList(cfg.Router.TextOnlyModels)

@@ -75,7 +75,7 @@ func (s *Service) chatStream(c echo.Context, request translator.OpenAIRequest) e
 			// caller reports as a mid-response server error, so close the stream
 			// cleanly instead and let the caller keep the partial completion.
 			slog.Warn("upstream stream ended early", "endpoint", "/v1/chat/completions", "model", lastModel, "status", streamErrorStatus(readErr), "error", readErr)
-			s.recordUsage(UsageEvent{Provider: s.providerNameFor(request.Model), Model: lastModel, Endpoint: "/v1/chat/completions", Status: streamErrorStatus(readErr), Effort: opener.sentEffort})
+			s.recordUsage(UsageEvent{Provider: s.providerNameFor(opener.servedModel()), Model: lastModel, Endpoint: "/v1/chat/completions", Status: streamErrorStatus(readErr), Effort: opener.sentEffort})
 			return writeSSERaw(c, "[DONE]")
 		}
 		if !delivered {
@@ -83,7 +83,7 @@ func (s *Service) chatStream(c echo.Context, request translator.OpenAIRequest) e
 		}
 		lastUsage, promptEstimated, completionEstimated := estimateStreamUsage(request, output.String(), lastUsage)
 		s.recordUsage(UsageEvent{
-			Provider: s.providerNameFor(request.Model), Model: lastModel, RequestModel: request.Model, Endpoint: "/v1/chat/completions",
+			Provider: s.providerNameFor(opener.servedModel()), Model: lastModel, RequestModel: request.Model, Endpoint: "/v1/chat/completions",
 			PromptTokens: lastUsage.PromptTokens, CompletionTokens: lastUsage.CompletionTokens,
 			CachedTokens:          lastUsage.PromptTokensDetails.CachedTokens,
 			PromptTokensEstimated: promptEstimated, CompletionTokensEstimated: completionEstimated,
@@ -230,7 +230,7 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 				// Failures carried no token count, so every failed turn landed in the
 				// smallest bucket and made "does this break at large context?"
 				// unanswerable from the data. Record the estimate here too.
-				s.recordUsage(UsageEvent{Provider: s.providerNameFor(request.Model), Model: request.Model, Endpoint: "/v1/messages",
+				s.recordUsage(UsageEvent{Provider: s.providerNameFor(opener.servedModel()), Model: opener.servedModel(), RequestModel: request.Model, Endpoint: "/v1/messages",
 					Status: streamErrorStatus(readErr), PromptTokens: promptTokens, PromptTokensEstimated: true,
 					Effort: opener.sentEffort})
 				if errors.Is(readErr, errEmptyUpstreamStream) {
@@ -258,7 +258,7 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 				}
 				return messagesGatewayError(c, readErr)
 			}
-			return s.closeBrokenStream(c, request, state, opener.sentEffort, readErr)
+			return s.closeBrokenStream(c, request, state, opener.servedModel(), opener.sentEffort, readErr)
 		}
 		if err := state.finish(c); err != nil {
 			return err
@@ -296,7 +296,7 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 			s.observeTokenScale(request.Model, ingressBytes, estimate, usage.PromptTokens)
 		}
 		s.recordUsage(UsageEvent{
-			Provider: s.providerNameFor(request.Model), Model: request.Model, Endpoint: "/v1/messages",
+			Provider: s.providerNameFor(opener.servedModel()), Model: opener.servedModel(), RequestModel: request.Model, Endpoint: "/v1/messages",
 			PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 			CachedTokens:          usage.PromptTokensDetails.CachedTokens,
 			PromptTokensEstimated: promptEstimated, CompletionTokensEstimated: completionEstimated,
@@ -311,11 +311,11 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 // an `event: error` frame. Claude Code treats a mid-stream error event as a failed
 // turn and reports "Server error mid-response"; a well-formed truncation lets the
 // caller keep what it already received and continue from there.
-func (s *Service) closeBrokenStream(c echo.Context, request translator.AnthropicRequest, state *anthropicStreamState, effort string, cause error) error {
+func (s *Service) closeBrokenStream(c echo.Context, request translator.AnthropicRequest, state *anthropicStreamState, served, effort string, cause error) error {
 	slog.Warn("upstream stream ended early", "endpoint", "/v1/messages", "model", request.Model,
 		"status", streamErrorStatus(cause), "prompt_tokens", state.promptTokens, "error", cause)
 	s.recordUsage(UsageEvent{
-		Provider: s.providerNameFor(request.Model), Model: request.Model, Endpoint: "/v1/messages",
+		Provider: s.providerNameFor(served), Model: served, RequestModel: request.Model, Endpoint: "/v1/messages",
 		Status: streamErrorStatus(cause), PromptTokens: state.promptTokens, PromptTokensEstimated: true,
 		CompletionTokens: estimateTextBytes(state.completionBytes), CompletionTokensEstimated: true,
 		Effort: effort,
@@ -641,10 +641,21 @@ func (s *anthropicStreamState) writeTerminal(c echo.Context, reason string) erro
 	if err := s.ensureStarted(c); err != nil {
 		return err
 	}
+	// input_tokens is the UNCACHED remainder, not the whole prompt: the client adds the
+	// three together (`input_tokens + cache_creation_input_tokens + cache_read_input_tokens`
+	// in Claude Code 2.1.228) to get the conversation size it compacts and reports /context
+	// against. OpenAI-shaped upstreams count the other way round — prompt_tokens is the
+	// total and cached_tokens is a subset of it — so passing PromptTokens through here
+	// counted the cached part twice and inflated every turn the client saw.
+	//
+	// Measured over 3,700 recorded turns before the fix: 1.24x on cx/gpt-5.6-sol, 1.29x on
+	// cx/gpt-5.6-luna, 1.80x on xai/grok-4.5, 1.99x on gpt-5.4. A session therefore appeared
+	// to cross the compact threshold at as little as half its real size.
+	cached := s.lastUsage.PromptTokensDetails.CachedTokens
 	usage := map[string]int{
-		"input_tokens":                s.lastUsage.PromptTokens,
+		"input_tokens":                max(0, s.lastUsage.PromptTokens-cached),
 		"output_tokens":               s.lastUsage.CompletionTokens,
-		"cache_read_input_tokens":     s.lastUsage.PromptTokensDetails.CachedTokens,
+		"cache_read_input_tokens":     cached,
 		"cache_creation_input_tokens": 0,
 	}
 	if err := writeSSE(c, "message_delta", map[string]any{
@@ -723,9 +734,14 @@ type streamOpener struct {
 	// has it in hand, and reusing it skips re-parsing the whole history back out
 	// of the OpenAI shape on every attempt — the dominant per-turn CPU cost once
 	// a coding session carries six figures of context.
-	unified   *provider.Request
-	models    []string
-	index     int
+	unified *provider.Request
+	models  []string
+	index   int
+	// served is the candidate that opened the stream, kept with its routing prefix
+	// intact. The model the upstream echoes back has the prefix stripped, so it cannot
+	// name the provider; the requested id cannot either once an alias or the fallback
+	// model has taken the turn to a different upstream.
+	served    string
 	prevBytes int64
 	lastErr   error
 	// replays counts same-candidate re-attempts spent on output-free turns. An
@@ -986,6 +1002,16 @@ func (s *Service) newUnifiedStreamOpener(c echo.Context, request translator.Open
 	return opener
 }
 
+// servedModel names the candidate that opened the stream, falling back to the requested
+// id when no attempt got that far — a failure before any upstream was reached is still the
+// requested model's to account for.
+func (o *streamOpener) servedModel() string {
+	if o.served != "" {
+		return o.served
+	}
+	return o.request.Model
+}
+
 func (o *streamOpener) exhausted() bool {
 	return o.index >= len(o.models)
 }
@@ -1052,6 +1078,7 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 			candidate.Model = target.Model
 			body, streamErr := target.Client.DoStream(c.Request().Context(), path, candidate)
 			if streamErr == nil {
+				o.served = model
 				s.touchCustomProviderKey(target.KeyID)
 				return body, nil
 			}
@@ -1087,6 +1114,7 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 			body, err = client.DoStream(c.Request().Context(), "/chat/completions", candidate)
 		}
 		if err == nil {
+			o.served = model
 			return body, nil
 		}
 		o.lastErr = err

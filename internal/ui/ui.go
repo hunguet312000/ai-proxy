@@ -168,6 +168,11 @@ type SettingsHooks struct {
 	// this model at medium effort. Same live-gateway contract as the plan model.
 	GetCompactModel func(context.Context) (string, error)
 	SetCompactModel func(context.Context, string) error
+	// GetFallbackModel and SetFallbackModel expose the router's last-resort model: a
+	// turn no other candidate could serve goes here instead of returning a 502. Same
+	// live-gateway contract as the plan model.
+	GetFallbackModel func(context.Context) (string, error)
+	SetFallbackModel func(context.Context, string) error
 	// GetContextMode and SetContextMode expose the proxy context pipeline switch:
 	// off, safe, or aggressive. Applied to the running gateway.
 	GetContextMode func(context.Context) (string, error)
@@ -326,6 +331,7 @@ type viewData struct {
 	ClaudeApplied      bool
 	PlanModel          string
 	CompactModel       string
+	FallbackModel      string
 	ContextMode        string
 	LongContextModel   string
 	LongContextPercent int
@@ -1308,6 +1314,11 @@ func (s *Service) pageData(c echo.Context, tab string) viewData {
 		if s.settings.GetCompactModel != nil {
 			if compactModel, compactErr := s.settings.GetCompactModel(c.Request().Context()); compactErr == nil {
 				data.CompactModel = compactModel
+			}
+		}
+		if s.settings.GetFallbackModel != nil {
+			if fallbackModel, fallbackErr := s.settings.GetFallbackModel(c.Request().Context()); fallbackErr == nil {
+				data.FallbackModel = fallbackModel
 			}
 		}
 		if s.settings.GetContextMode != nil {
@@ -2330,6 +2341,10 @@ func (s *Service) routingHandler(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	fallbackModel, err := routingModelValue(c, "fallback_model")
+	if err != nil {
+		return err
+	}
 	contextMode := strings.ToLower(strings.TrimSpace(c.FormValue("context_mode")))
 	switch contextMode {
 	case "", "off", "safe", "aggressive":
@@ -2364,6 +2379,11 @@ func (s *Service) routingHandler(c echo.Context) error {
 	}
 	if s.settings.SetCompactModel != nil {
 		if err := s.settings.SetCompactModel(c.Request().Context(), compactModel); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+	}
+	if s.settings.SetFallbackModel != nil {
+		if err := s.settings.SetFallbackModel(c.Request().Context(), fallbackModel); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
 	}

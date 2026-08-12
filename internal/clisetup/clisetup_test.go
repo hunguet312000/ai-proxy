@@ -539,30 +539,10 @@ func TestRequestContextWindow(t *testing.T) {
 	}
 }
 
-// The whole point of autoCompactPercent: the client compacts at min(window × pct,
-// window − 13000) and the compaction request costs roughly twice the conversation, so
-// the threshold has to leave room for its own request to fit.
-// The rule that connects the two halves: LiteRouter picks the window, the client picks
-// when to compact from that number alone, and the compaction request costs about twice
-// what it compacts. Asserted through CompactRequestFits rather than re-derived here, so
-// there is one copy of the rule to edit — raising autoCompactPercent to 50 looks harmless
-// and puts the compaction request back over the ceiling, which is the failure that got a
-// correct 400,000 window hand-lowered to 256,000.
-func TestAutoCompactPercentLeavesRoomForTheCompactionItself(t *testing.T) {
-	windows := []int{
-		minManagedContextWindow, 64_000, 128_000, 200_000, 256_000,
-		272_000, 350_018, 372_860, 400_000, 1_000_000,
-	}
-	for _, window := range windows {
-		if !CompactRequestFits(window) {
-			threshold := ClientCompactThreshold(window)
-			t.Fatalf("window %d: compacts at %d, so the compaction request is ~%.0f and does not fit",
-				window, threshold, float64(threshold)*compactRequestMultiplier)
-		}
-	}
-}
-
-func TestApplyClaudeWritesMaxContextAndCompactPercent(t *testing.T) {
+// The window is the only thing the client is told, and the keys that used to force it to
+// compact early are written as empty so that an apply also strips them from a
+// settings.json an older version wrote them into.
+func TestApplyClaudeWritesTheWindowAndForcesNoCompaction(t *testing.T) {
 	home := t.TempDir()
 	request := Request{
 		Tool: ToolClaude, Action: Apply, BaseURL: "http://127.0.0.1:8317", Token: "t",
@@ -575,14 +555,53 @@ func TestApplyClaudeWritesMaxContextAndCompactPercent(t *testing.T) {
 	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "400000" {
 		t.Fatalf("max context: got %q, want 400000", env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"])
 	}
-	if env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] != "45" {
-		t.Fatalf("compact pct: got %q, want 45", env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"])
+	for _, key := range compactForcingKeys {
+		if value, ok := env[key]; ok {
+			t.Fatalf("%s = %q: compaction must be left to the client, not forced", key, value)
+		}
 	}
 }
 
+// The migration half of the same rule. Anyone who applied an earlier version has the
+// forcing keys sitting in settings.json; applying again has to take them out, because
+// nothing else will and a stale PCT_OVERRIDE=45 keeps compacting at 45% of the window
+// forever.
+func TestApplyClaudeStripsCompactForcingKeysLeftByAnEarlierApply(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := `{"env":{"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"45","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"370578","CLAUDE_CODE_DISABLE_1M_CONTEXT":"1","KEEP_ME":"yes"}}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := Request{
+		Tool: ToolClaude, Action: Apply, BaseURL: "http://127.0.0.1:8317", Token: "t",
+		Model: "cx/gpt-5.6-sol", MaxContext: "auto", CatalogContextWindow: 400_000,
+	}
+	if _, err := applyClaude(home, request); err != nil {
+		t.Fatalf("applyClaude: %v", err)
+	}
+	env := claudeEnv(t, home)
+	for _, key := range compactForcingKeys {
+		if value, ok := env[key]; ok {
+			t.Fatalf("%s = %q survived the apply", key, value)
+		}
+	}
+	if env["KEEP_ME"] != "yes" {
+		t.Fatalf("apply removed a key it does not own: %#v", env)
+	}
+}
+
+var compactForcingKeys = []string{
+	"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+	"CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+	"CLAUDE_CODE_DISABLE_1M_CONTEXT",
+}
+
 // The client consults CLAUDE_CODE_MAX_CONTEXT_TOKENS only for ids that do not start
-// with "claude-". Writing it for one of those would be inert while the percentage
-// override stayed in force against a window that never applied.
+// with "claude-", so writing it for one of those would be inert.
 func TestApplyClaudeSkipsMaxContextForAnthropicIDs(t *testing.T) {
 	home := t.TempDir()
 	request := Request{
@@ -615,26 +634,29 @@ func claudeEnv(t *testing.T, home string) map[string]string {
 	return settings.Env
 }
 
-// And the guard is real, not vacuous: the client's own threshold — which is what applies
-// when no percentage override is written — does not satisfy it at any usable size. This
-// is what the override exists to prevent.
-func TestTheClientsOwnThresholdWouldNotFit(t *testing.T) {
-	for _, window := range []int{200_000, 256_000, 400_000} {
-		bare := window - clientCompactFloor
-		if float64(bare)*compactRequestMultiplier <= float64(window) {
-			t.Fatalf("window %d: compacting at the client's own %d would have fit, so the override is unnecessary",
-				window, bare)
+// A reset has to strip the forcing keys too, for the same reason an apply does: they are
+// only removable by something that knows it owns them.
+func TestResetClaudeStripsCompactForcingKeys(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := `{"env":{"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"45","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"370578","CLAUDE_CODE_DISABLE_1M_CONTEXT":"1","KEEP_ME":"yes"}}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resetClaude(home); err != nil {
+		t.Fatalf("resetClaude: %v", err)
+	}
+	env := claudeEnv(t, home)
+	for _, key := range compactForcingKeys {
+		if value, ok := env[key]; ok {
+			t.Fatalf("%s = %q survived the reset", key, value)
 		}
 	}
-}
-
-// A window small enough that the two rules cross over must be reported as not fitting
-// rather than silently producing a negative or zero threshold.
-func TestCompactRequestFitsRejectsUnusableWindows(t *testing.T) {
-	for _, window := range []int{0, -1, clientCompactFloor, clientCompactFloor - 1} {
-		if CompactRequestFits(window) {
-			t.Fatalf("window %d reported as fitting", window)
-		}
+	if env["KEEP_ME"] != "yes" {
+		t.Fatalf("reset removed a key it does not own: %#v", env)
 	}
 }
 
@@ -667,13 +689,16 @@ func TestEveryClaudePathAgreesOnTheManagedKeys(t *testing.T) {
 	}
 	directEnv := claudeEnv(t, direct)
 
-	// The window has to reach the client whichever way the configuration was applied.
+	// The window has to reach the client whichever way the configuration was applied — and
+	// nothing that forces compaction may, by either route.
 	for _, env := range []map[string]string{scriptEnv, directEnv} {
 		if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "372860" {
-			t.Fatalf("max context = %v, want 372860", env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"])
+			t.Fatalf("max context = %q, want 372860", env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"])
 		}
-		if env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] != "45" {
-			t.Fatalf("compact pct = %v, want 45", env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"])
+		for _, key := range compactForcingKeys {
+			if value, ok := env[key]; ok {
+				t.Fatalf("%s = %q: no path may force compaction", key, value)
+			}
 		}
 	}
 	for key, value := range directEnv {
@@ -701,6 +726,25 @@ func TestEveryClaudePathAgreesOnTheManagedKeys(t *testing.T) {
 			if _, ok := env[key]; ok {
 				t.Fatalf("reset left %q behind: %v", key, env)
 			}
+		}
+	}
+}
+
+// Claude Code consults CLAUDE_CODE_MAX_CONTEXT_TOKENS only for ids that do not start with
+// "claude-". Writing the window for one of those is a no-op, but writing the keys that act
+// on it is not: the percentage and the 1M switch would bind against a window the client
+// never read. All four move together or none does.
+func TestClaudeModelsGetNoneOfTheWindowKeys(t *testing.T) {
+	env := claudeEnvFor(Request{
+		Tool: ToolClaude, Action: Apply, BaseURL: "http://127.0.0.1:8317", Token: "t",
+		Model: "claude-opus-4-5", MaxContext: "auto", CatalogContextWindow: 400_000,
+	})
+	for _, key := range []string{
+		"CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+		"CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+	} {
+		if env[key] != "" {
+			t.Fatalf("%s = %q for a claude-* model, want empty", key, env[key])
 		}
 	}
 }

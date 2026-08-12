@@ -413,3 +413,70 @@ func TestMixedTextAndImageKeepsTheArrayForm(t *testing.T) {
 		t.Fatalf("parts = %+v", parts)
 	}
 }
+
+// The invariant Claude Code's context accounting depends on: it sizes a conversation as
+// input_tokens + cache_creation_input_tokens + cache_read_input_tokens, so those three
+// have to add up to the prompt the upstream actually counted — no more.
+//
+// They did not. OpenAI-shaped upstreams report prompt_tokens as the total with
+// cached_tokens as a subset of it; passing both straight through counted the cached part
+// twice. Over 3,700 recorded turns that inflated the client's view by 1.24x (cx/gpt-5.6-sol),
+// 1.29x (cx/gpt-5.6-luna), 1.80x (xai/grok-4.5) and 1.99x (gpt-5.4) — so a session crossed
+// the compact threshold at as little as half its real size. Asserted as a sum rather than
+// against fixed numbers, because the sum is the part that has to hold.
+func TestAnthropicUsageDoesNotDoubleCountCachedTokens(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		promptTotal  int
+		cachedTokens int
+	}{
+		{"no cache", 1000, 0},
+		{"partial cache", 1000, 400},
+		{"fully cached", 1000, 1000},
+		{"grok-shaped", 66971, 53281},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			upstream := OpenAIResponse{
+				ID: "one", Model: "model",
+				Choices: []OpenAIChoice{{Message: OpenAIMessage{Role: "assistant", Content: "hi"}, FinishReason: "stop"}},
+			}
+			upstream.Usage.PromptTokens = testCase.promptTotal
+			upstream.Usage.CompletionTokens = 5
+			upstream.Usage.PromptTokensDetails.CachedTokens = testCase.cachedTokens
+
+			unified, err := FromOpenAIResponse(upstream)
+			if err != nil {
+				t.Fatalf("FromOpenAIResponse: %v", err)
+			}
+			out := ToAnthropicResponse(unified).Usage
+			sum := out.InputTokens + out.CacheReadInputTokens + out.CacheCreationInputTokens
+			if sum != testCase.promptTotal {
+				t.Fatalf("client would size the prompt at %d (input %d + read %d + creation %d), upstream counted %d",
+					sum, out.InputTokens, out.CacheReadInputTokens, out.CacheCreationInputTokens, testCase.promptTotal)
+			}
+			if out.InputTokens < 0 {
+				t.Fatalf("input_tokens went negative: %d", out.InputTokens)
+			}
+		})
+	}
+}
+
+// And the Anthropic-native direction round-trips: that upstream splits the prompt the
+// other way, so a relayed turn must not gain or lose tokens on the way through.
+func TestAnthropicUsageRoundTripsNativeUpstream(t *testing.T) {
+	native := AnthropicResponse{
+		ID: "one", Model: "claude-opus-4-8", Role: "assistant",
+		Content: []AnthropicContent{{Type: "text", Text: "hi"}},
+		Usage:   AnthropicUsage{InputTokens: 1200, OutputTokens: 7, CacheReadInputTokens: 900, CacheCreationInputTokens: 300},
+	}
+	unified, err := FromAnthropicResponse(native)
+	if err != nil {
+		t.Fatalf("FromAnthropicResponse: %v", err)
+	}
+	if unified.Usage.InputTokens != 2400 {
+		t.Fatalf("provider.Usage.InputTokens = %d, want the whole prompt 2400", unified.Usage.InputTokens)
+	}
+	if got := ToAnthropicResponse(unified).Usage; got != native.Usage {
+		t.Fatalf("round trip changed usage: %+v -> %+v", native.Usage, got)
+	}
+}

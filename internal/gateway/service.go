@@ -211,6 +211,7 @@ type Service struct {
 	aliases         map[string][]string
 	planModel       atomic.Pointer[string]
 	compactModel    atomic.Pointer[string]
+	fallbackModel   atomic.Pointer[string]
 	longContext     longContextPointer
 	imageRoute      atomic.Pointer[imageRoute]
 	outputLimits    map[string]int
@@ -263,6 +264,10 @@ type Options struct {
 	// compactEffort. Empty disables the detection and leaves compaction on the
 	// session model.
 	CompactModel string
+	// FallbackModel serves a turn whose every other candidate failed — most often a
+	// model whose provider has no usable account, which would otherwise be reported
+	// as a 502. Empty disables it. See withFallbackModel.
+	FallbackModel string
 	// LongContextModel serves a /v1/messages turn whose prompt is too large a share of
 	// the window belonging to the model that would otherwise take it. Empty disables it.
 	LongContextModel string
@@ -353,6 +358,7 @@ func New(options Options) *Service {
 	}
 	service.SetPlanModel(options.PlanModel)
 	service.SetCompactModel(options.CompactModel)
+	service.SetFallbackModel(options.FallbackModel)
 	service.SetLongContext(options.LongContextModel, options.LongContextPercent)
 	service.SetImageRoute(options.ImageModel, options.TextOnlyModels)
 	service.seedTokenScales(options.LearnedCalibrations)
@@ -475,6 +481,10 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 	var response translator.OpenAIResponse
 	var lastErr error
 	chain := s.modelChain(request.Model)
+	// The candidate that actually served, which is not always the one the client asked
+	// for: the chain can hand the turn to an alias or to the router's fallback model, and
+	// either can belong to a different provider than the requested id does.
+	served := request.Model
 	// Indexed rather than ranged so an output-cap rejection can rewind onto the same
 	// candidate, exactly as the streaming and Anthropic paths do.
 	clampAttempts := map[string]int{}
@@ -560,6 +570,7 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 			}
 		}
 		lastErr = nil
+		served = model
 		break
 	}
 	if lastErr != nil {
@@ -583,7 +594,7 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 	// as an authoritative count.
 	promptEst, completionEst := !usage.PromptTokensReported, !usage.CompletionTokensReported
 	s.recordUsage(UsageEvent{
-		Provider: s.providerNameFor(request.Model), Model: response.Model, RequestModel: request.Model, Endpoint: endpoint,
+		Provider: s.providerNameFor(served), Model: response.Model, RequestModel: request.Model, Endpoint: endpoint,
 		PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 		CachedTokens:          usage.PromptTokensDetails.CachedTokens,
 		CachedTokensReported:  usage.PromptTokensDetails.CachedTokensReported,
@@ -695,6 +706,10 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 	var response provider.Response
 	var lastErr error
 	chain := s.modelChain(request.Model)
+	// The candidate that actually served, which is not always the one the client asked
+	// for: the chain can hand the turn to an alias or to the router's fallback model, and
+	// either can belong to a different provider than the requested id does.
+	served := request.Model
 	// A response with no content is the non-streaming twin of the empty turn the
 	// streaming path retries. Returning it verbatim is what surfaces as an empty
 	// response — and on a /compact request that means the summary silently comes
@@ -834,6 +849,7 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 			}
 		}
 		lastErr = nil
+		served = model
 		break
 	}
 	if lastErr != nil {
@@ -867,11 +883,14 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		usage.CompletionTokens = contextguard.EstimateText(out.String())
 	}
 	promptEst, completionEst := !usage.PromptTokensReported, !usage.CompletionTokensReported
-	// Attribution keys on the requested model, not the echoed one: the upstream
-	// returns its own name with the routing prefix already stripped, so resolving
-	// that would report a custom provider's traffic as the built-in fallback.
+	// Attribution keys on the candidate that served, not on the echoed name and not on the
+	// requested id. The echoed name arrives with the routing prefix already stripped, so
+	// resolving that would report a custom provider's traffic as the built-in fallback. The
+	// requested id is wrong for a different reason: a turn asked for as claude-opus-5 and
+	// served by the fallback on cx/gpt-5.6-luna was filed under the claude provider, so the
+	// dashboard read "Claude / GPT 5.6 Luna" and billed an upstream that was never called.
 	s.recordUsage(UsageEvent{
-		Provider: s.providerNameFor(request.Model), Model: raw.Model, Endpoint: "/v1/messages",
+		Provider: s.providerNameFor(served), Model: raw.Model, RequestModel: request.Model, Endpoint: "/v1/messages",
 		PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 		CachedTokens:          usage.PromptTokensDetails.CachedTokens,
 		CachedTokensReported:  usage.PromptTokensDetails.CachedTokensReported,
@@ -1258,11 +1277,16 @@ func cacheableProviderResponse(response provider.Response) bool {
 	return response.StopReason == "end_turn" && len(response.Content) > 0 && !hasToolCalls(response)
 }
 
+// modelChain is the ordered list of models one turn may be attempted on. It is the single
+// place the list is built — the summarizer, both non-streaming paths, the stream opener and
+// the Anthropic passthrough all call it — which is why the fallback is appended here rather
+// than at each of those five call sites.
 func (s *Service) modelChain(model string) []string {
-	if chain := s.aliases[model]; len(chain) > 0 {
-		return append([]string(nil), chain...)
+	chain := []string{model}
+	if aliases := s.aliases[model]; len(aliases) > 0 {
+		chain = append([]string(nil), aliases...)
 	}
-	return []string{model}
+	return s.withFallbackModel(chain)
 }
 
 // errEmptyUpstreamResponse marks a non-streaming reply that carried no content and
