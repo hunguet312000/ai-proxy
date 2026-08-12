@@ -76,13 +76,29 @@ func AggressiveCompact(request provider.Request, policy Policy) provider.Request
 // compacted prefix byte-identical for K consecutive turns and batches the
 // reprice into one turn per quantum. Between advances the verbatim-recent window
 // is strictly larger than KeepRecentTurns — more recency, never less.
+//
+// Snapping never reports "no old history" when there is some. With the defaults
+// (keep 6, quantum 8) the grid rounds every count below 14 messages down to zero,
+// which switched off all four stages at once — dedup, supersede and truncation all
+// gate on `index < boundary`, and a transcript with one real user turn never opens
+// a second summary unit either. A subagent holding six 350 KB tool results inside
+// thirteen messages therefore skipped the whole ladder and landed on trim, which
+// deletes entire tool chains, where truncation would have kept all six at ~2 KB
+// with a recovery hint on each. Quantization is a cache optimization layered over
+// the boundary, so it may delay a rewrite but must not cancel one: below the first
+// grid line the raw boundary stands. The churn that costs is bounded — Prepare only
+// calls compact once a request is over SoftRatio, and AggressiveCompact has always
+// used the raw boundary for the same reason.
 func stickyOldBoundary(messageCount int, policy Policy) int {
 	quantum := policy.BoundaryQuantum
 	if quantum < 1 {
 		quantum = 1
 	}
 	raw := max(0, messageCount-policy.KeepRecentTurns)
-	return (raw / quantum) * quantum
+	if snapped := (raw / quantum) * quantum; snapped > 0 {
+		return snapped
+	}
+	return raw
 }
 
 // elideAndDedup is the always-on lossless pass: old thinking blocks become a

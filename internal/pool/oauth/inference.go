@@ -48,10 +48,18 @@ func (inference *Inference) DoStream(ctx context.Context, request translator.Ope
 	request.Stream = true
 	// Preserve upstream streaming for tool turns. The gateway incrementally buffers
 	// and validates only tool arguments, rather than the entire completion.
-	body, _, providerName, err := inference.open(ctx, request, conversationID)
+	body, accountID, providerName, err := inference.open(ctx, request, conversationID)
 	if err != nil {
 		return nil, err
 	}
+	// A live body is the only success signal this path ever gets, and the selector needs
+	// it: every failure calls ReportError/ReportRateLimit, but nothing cleared the
+	// counters, so for a Claude CLI session — which is streaming end to end — errors
+	// accumulated for the life of the process and five scattered failures eventually
+	// circuit-broke an account that had served hundreds of turns in between. Tokens are
+	// still unknown here; the stream has not been read yet, so the hourly counter stays
+	// fed by the non-streaming path alone.
+	inference.selector.ReportSuccess(accountID, 0)
 	if providerName == "codex" {
 		return codexSSEToChatStream(body, request.Model), nil
 	}

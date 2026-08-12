@@ -972,6 +972,49 @@ func TestAnthropicTransientFailureReplaysSingleCandidate(t *testing.T) {
 	}
 }
 
+// alwaysFailingStreamClient fails every read with the same error.
+type alwaysFailingStreamClient struct {
+	err   error
+	calls int
+}
+
+func (c *alwaysFailingStreamClient) DoStream(_ context.Context, _ string, _ any) (io.ReadCloser, error) {
+	c.calls++
+	return io.NopCloser(&failingReader{err: c.err}), nil
+}
+
+// An upstream that answers an oversized prompt with a 5xx satisfies both classifiers:
+// transientUpstreamError accepts any 5xx, and isContextOverflow reads the message. The
+// transient branch would then replay the identical prompt that was just refused — twice,
+// with a second and then two seconds of backoff — before the overflow handling that can
+// actually fix it ever ran.
+func TestAnthropicOversizedPromptIsNotReplayedAsTransient(t *testing.T) {
+	refused := &provider.ProviderError{Provider: "codex OAuth", StatusCode: 500,
+		Code: "server_error", Message: "prompt is too long: 719000 tokens > 256000 maximum"}
+	client := &alwaysFailingStreamClient{err: refused}
+	service := New(Options{OpenAIStream: client})
+	e := echo.New()
+	service.Register(e)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"cx/gpt-5.6-luna","messages":[{"role":"user","content":"hi"}],"max_tokens":100,"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	start := time.Now()
+	e.ServeHTTP(recorder, request)
+
+	if client.calls != 1 {
+		t.Fatalf("upstream attempts = %d, want the refused prompt sent once", client.calls)
+	}
+	// The backoff is the other half of the cost: replaying spends it before giving up.
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("request spent %v, which means it backed off and replayed", elapsed)
+	}
+	if recorder.Code == http.StatusBadGateway {
+		t.Fatalf("reported as a transient upstream fault rather than an oversized prompt: %s", recorder.Body.String())
+	}
+}
+
 // errorThenBodyClient fails the first read with err, then serves body.
 type errorThenBodyClient struct {
 	err   error

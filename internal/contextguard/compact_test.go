@@ -18,8 +18,11 @@ func toolExchange(id, name, input, result string, isError bool) []provider.Messa
 
 func TestStickyBoundaryAdvancesOnGrid(t *testing.T) {
 	policy := Policy{KeepRecentTurns: 2, BoundaryQuantum: 4}
+	// Below the first grid line the raw boundary stands (5 messages, keep 2 → 3):
+	// rounding it to zero would switch off every compaction stage, which is what sent
+	// short-but-huge transcripts straight to trim. See TestCompactionRunsBelowTheFirstGridLine.
 	cases := []struct{ messages, want int }{
-		{0, 0}, {2, 0}, {5, 0}, {6, 4}, {9, 4}, {10, 8}, {13, 8}, {14, 12},
+		{0, 0}, {2, 0}, {5, 3}, {6, 4}, {9, 4}, {10, 8}, {13, 8}, {14, 12},
 	}
 	for _, testCase := range cases {
 		if got := stickyOldBoundary(testCase.messages, policy); got != testCase.want {
@@ -29,6 +32,69 @@ func TestStickyBoundaryAdvancesOnGrid(t *testing.T) {
 	// Quantum 0/1 reproduces the raw sliding boundary.
 	if got := stickyOldBoundary(10, Policy{KeepRecentTurns: 2}); got != 8 {
 		t.Fatalf("unquantized boundary = %d, want 8", got)
+	}
+}
+
+// The shape that used to fall through the whole ladder: a subagent transcript short
+// enough that the boundary grid rounded to zero, but carrying tool output far larger
+// than the window. Every stage gates on `index < boundary`, so a zero boundary left
+// trim — which deletes whole tool chains — as the only rung that could act.
+func TestCompactionRunsBelowTheFirstGridLine(t *testing.T) {
+	policy := AggressivePolicy(DefaultPolicy()) // keep 6, quantum 8: the grid line is 14 messages
+	messages := []provider.Message{
+		{Role: "user", Content: []provider.Content{{Type: "text", Text: "audit the inference flow"}}},
+	}
+	for index := range 6 {
+		messages = append(messages, toolExchange(
+			fmt.Sprintf("call-%d", index), "Bash", fmt.Sprintf(`{"command":"grep -r x dir%d"}`, index),
+			strings.Repeat(fmt.Sprintf("match %d line\n", index), 20_000), false)...)
+	}
+	if len(messages) != 13 {
+		t.Fatalf("fixture has %d messages; the grid line must stay above it", len(messages))
+	}
+	request := provider.Request{Model: "model", Messages: messages}
+	before := EstimateRequest(request)
+
+	boundary := stickyOldBoundary(len(messages), policy)
+	if boundary == 0 {
+		t.Fatal("boundary rounded to zero, so every compaction stage is switched off")
+	}
+	compact(&request, policy, 1, 1<<30)
+
+	after := EstimateRequest(request)
+	if after >= before*3/5 {
+		t.Fatalf("compaction saved almost nothing: %d -> %d tokens", before, after)
+	}
+	// Old results are truncated in place — the chain itself survives, which is the whole
+	// difference from trim — while everything inside the recent window stays verbatim.
+	truncated, verbatim := 0, 0
+	for index, message := range request.Messages {
+		for _, block := range message.Content {
+			if block.Type != "tool_result" {
+				continue
+			}
+			switch {
+			case index >= boundary:
+				if strings.Contains(block.Text, truncateMarker) {
+					t.Fatalf("message %d is inside the recent window but was truncated", index)
+				}
+				verbatim++
+			case !strings.Contains(block.Text, truncateMarker):
+				t.Fatalf("old tool result at message %d was left at %d bytes", index, len(block.Text))
+			default:
+				truncated++
+				// Head plus tail plus the note, not the original 260 KB.
+				if len(block.Text) > policy.TruncateThresholdBytes {
+					t.Fatalf("truncated result at message %d is still %d bytes", index, len(block.Text))
+				}
+			}
+		}
+	}
+	if truncated != 3 || verbatim != 3 {
+		t.Fatalf("truncated %d and kept %d verbatim; want 3 old and 3 recent", truncated, verbatim)
+	}
+	if len(request.Messages) != len(messages) {
+		t.Fatalf("compaction dropped messages: %d -> %d", len(messages), len(request.Messages))
 	}
 }
 

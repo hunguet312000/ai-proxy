@@ -207,7 +207,14 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 			// reached on the first overloaded response and the caller saw a 502 for a
 			// condition the upstream itself described as temporary. Back off briefly so
 			// the retry is not part of the overload.
-			if retryable && transientUpstreamError(readErr) && opener.replayCurrent() {
+			//
+			// The overflow check is not redundant with the branch above: transient means
+			// any 5xx, and an upstream that answers an oversized prompt with a 5xx whose
+			// message says so satisfies both tests. Replaying the identical oversized
+			// request cannot succeed, and it costs two guaranteed-failing upstream calls
+			// plus three seconds of backoff before control reaches the trim retry below.
+			// It has to precede replayCurrent, which spends the replay budget.
+			if retryable && transientUpstreamError(readErr) && !isContextOverflow(readErr) && opener.replayCurrent() {
 				delay := time.Duration(opener.replays) * transientRetryBackoff
 				slog.Warn("upstream reported a transient failure; retrying the same candidate after backoff",
 					"endpoint", "/v1/messages", "model", request.Model,

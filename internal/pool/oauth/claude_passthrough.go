@@ -41,8 +41,11 @@ func (inference *Inference) DoAnthropicStream(ctx context.Context, payload []byt
 	var lastErr error
 	for wave := 1; wave <= oauthRetryWaves; wave++ {
 		excluded := make(map[string]struct{})
-		body, err := inference.openAnthropic(ctx, payload, model, conversationID, betas, excluded)
+		body, accountID, err := inference.openAnthropic(ctx, payload, model, conversationID, betas, excluded)
 		if err == nil {
+			// Same reason as DoStream: without this the selector only ever hears about
+			// failures on the streaming path and eventually circuit-breaks a working account.
+			inference.selector.ReportSuccess(accountID, 0)
 			return body, nil
 		}
 		lastErr = err
@@ -60,7 +63,7 @@ func (inference *Inference) DoAnthropicStream(ctx context.Context, payload []byt
 	return nil, lastErr
 }
 
-func (inference *Inference) openAnthropic(ctx context.Context, payload []byte, model, conversationID, betas string, excluded map[string]struct{}) (io.ReadCloser, error) {
+func (inference *Inference) openAnthropic(ctx context.Context, payload []byte, model, conversationID, betas string, excluded map[string]struct{}) (io.ReadCloser, string, error) {
 	var lastErr error
 	for {
 		selected, err := inference.selector.Select(pool.SelectRequest{
@@ -68,12 +71,12 @@ func (inference *Inference) openAnthropic(ctx context.Context, payload []byte, m
 		})
 		if err != nil {
 			if lastErr != nil {
-				return nil, errors.Join(errOAuthPoolExhausted, lastErr)
+				return nil, "", errors.Join(errOAuthPoolExhausted, lastErr)
 			}
 			if len(excluded) > 0 {
-				return nil, errors.Join(errOAuthPoolExhausted, err)
+				return nil, "", errors.Join(errOAuthPoolExhausted, err)
 			}
-			return nil, err
+			return nil, "", err
 		}
 		excluded[selected.Account.ID] = struct{}{}
 		_, token, _, err := inference.credentials.LoadFresh(ctx, selected.Account.ID)
@@ -85,11 +88,11 @@ func (inference *Inference) openAnthropic(ctx context.Context, payload []byte, m
 		}
 		body, err := inference.callAnthropic(ctx, token.AccessToken, selected.ResolvedModel, betas, payload, selected.ReservationID)
 		if err == nil {
-			return body, nil
+			return body, selected.Account.ID, nil
 		}
 		lastErr = err
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		}
 		var providerErr *provider.ProviderError
 		if errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusTooManyRequests {
@@ -99,7 +102,7 @@ func (inference *Inference) openAnthropic(ctx context.Context, payload []byte, m
 		}
 		slog.Debug("Anthropic passthrough account failed", "model", selected.ResolvedModel, "account_id", selected.Account.ID, "error", err)
 		if !retryAcrossOAuthAccounts(err) {
-			return nil, err
+			return nil, "", err
 		}
 	}
 }
