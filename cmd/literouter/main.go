@@ -41,11 +41,6 @@ import (
 
 const healthcheckTimeout = 2 * time.Second
 
-// usageAdviceWindow is how far back the compaction advisor looks. Long enough to
-// accumulate large-prompt evidence, short enough that a model's recent behaviour is
-// what drives the recommendation.
-const usageAdviceWindow = 30 * 24 * time.Hour
-
 func main() {
 	os.Exit(run())
 }
@@ -707,19 +702,6 @@ func run() int {
 		ContextCeiling: gatewayService.ClientContextCeiling,
 	}, ui.UsageHooks{
 		Summary: usageService.UsageSummary,
-		Compaction: func(ctx context.Context) ([]usage.CompactionAdvice, error) {
-			// Windows come from the catalog so a recommendation is compared against what
-			// the gateway actually advertises, not against a default.
-			windows := map[string]int{}
-			models, err := store.ListCatalogModels(ctx, "")
-			if err != nil {
-				return nil, err
-			}
-			for _, model := range models {
-				windows[model.ID] = model.ContextWindow
-			}
-			return usage.NewAdvisor(store).Advise(ctx, time.Now().Add(-usageAdviceWindow), windows)
-		},
 	}, gatewayService.Models()...)
 	if err != nil {
 		logger.Error("initialize UI", "error", err)

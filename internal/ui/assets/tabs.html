@@ -643,87 +643,6 @@ wire_api = "responses"</pre>
 </dialog>
 {{end}}
 
-{{define "compaction-advice"}}
-<div class="advice-panel">
-  {{if .AdviceNote}}<p class="advice-note">{{.AdviceNote}}</p>{{end}}
-  {{$actionable := false}}
-  {{range .Advice}}{{if gt .RecommendedWindow 0}}{{$actionable = true}}{{end}}{{end}}
-
-  {{if $actionable}}
-  <table class="advice-table">
-    <thead>
-      <tr>
-        <th>Model</th>
-        <th class="advice-num">Now</th>
-        <th class="advice-num">Recommended</th>
-        <th class="advice-num">Cache reuse</th>
-        <th class="advice-num">Saving</th>
-        <th class="advice-act"><span class="visually-hidden">Action</span></th>
-      </tr>
-    </thead>
-    <tbody>
-      {{range .Advice}}{{if gt .RecommendedWindow 0}}
-      <tr>
-        <td><code>{{.Model}}</code><span class="advice-evidence">{{.Provider}} · {{.LargeRequests}} large requests</span></td>
-        <td class="advice-num">{{if gt .CurrentWindow 0}}{{div .CurrentWindow 1000}}k{{else}}—{{end}}</td>
-        <td class="advice-num advice-target">{{div .RecommendedWindow 1000}}k</td>
-        <td class="advice-num">{{if .SavingIsUpperBound}}<span class="advice-unknown">not reported</span>{{else}}{{pctf .BestHitRate}}% → {{pctf .CliffHitRate}}%{{end}}</td>
-        <td class="advice-num advice-saving" title="{{if .SavingIsUpperBound}}Upper bound: this upstream reports no cache usage, so part of the trimmed input may already have been discounted{{else}}Measured against the cache reuse this model actually reported{{end}}">{{if .SavingIsUpperBound}}≤{{else}}~{{end}}{{pctf .EstimatedSaving}}%</td>
-        <td class="advice-act">
-          {{if gt .CurrentWindow 0}}
-          <form hx-post="/ui/models/advice/apply" hx-target="#compaction-advice" hx-swap="innerHTML">
-            <input type="hidden" name="provider" value="{{.Provider}}">
-            <input type="hidden" name="model" value="{{.Model}}">
-            <input type="hidden" name="window" value="{{.RecommendedWindow}}">
-            <button type="submit" class="btn primary sm">Apply</button>
-          </form>
-          {{else}}
-          <form hx-post="/ui/models/advice/register" hx-target="#compaction-advice" hx-swap="innerHTML">
-            <input type="hidden" name="provider" value="{{.Provider}}">
-            <input type="hidden" name="model" value="{{.Model}}">
-            <input type="hidden" name="window" value="{{.RecommendedWindow}}">
-            <button type="submit" class="btn secondary sm" title="This model has served traffic but has no catalog entry, so there is no window to set. This adds it under {{.Provider}} with the recommended window.">Add &amp; apply</button>
-          </form>
-          {{end}}
-        </td>
-      </tr>
-      {{end}}{{end}}
-    </tbody>
-  </table>
-  <p class="advice-foot">Applying lowers the model's advertised context window, so the client compacts earlier. That trades context for cost — the saving is measured on traffic already seen, not predicted.</p>
-  {{else}}
-  <p class="advice-empty">No model has enough evidence for a recommendation yet.</p>
-  {{end}}
-
-  {{if .AdviceGroups}}
-  <details class="advice-rest">
-    <summary>Models without a recommendation ({{len .Advice}} seen)</summary>
-    <div class="advice-groups">
-      {{range .AdviceGroups}}
-      <section class="advice-group">
-        <h4>
-          <img src="/ui/assets/providers/{{.Logo}}.png" alt="" width="14" height="14">
-          {{.Label}}
-          <span class="advice-count">{{.Count}} model{{if ne .Count 1}}s{{end}}</span>
-        </h4>
-        {{if .Note}}<p class="advice-group-note">{{.Note}}</p>{{end}}
-        <ul class="advice-list">
-          {{range .Models}}
-          <li title="{{.Title}}">
-            <code>{{.Model}}</code>
-            {{if .Metric}}<b class="advice-metric">{{.Metric}}</b>{{end}}
-            {{if .Detail}}<span>{{.Detail}}</span>{{end}}
-          </li>
-          {{end}}
-        </ul>
-      </section>
-      {{end}}
-    </div>
-  </details>
-  {{end}}
-</div>
-{{end}}
-
 {{define "model-catalog"}}
 <div class="model-chip-grid">
   {{range .CatalogModels}}
@@ -904,17 +823,6 @@ wire_api = "responses"</pre>
     </div>
   </section>
 
-  <section class="block">
-    <div class="block-head">
-      <div>
-        <h2>Compaction</h2>
-        <p>Where carrying more history stops paying for itself, measured from this proxy's own traffic. A saving marked <em>at most</em> comes from an upstream that reports no cache: the token cut is exact, how much of it turns into money is not.</p>
-      </div>
-    </div>
-    <div id="compaction-advice" hx-get="/ui/models/advice" hx-trigger="load" hx-swap="innerHTML">
-      <p class="advice-empty">Reading usage…</p>
-    </div>
-  </section>
 
   <section class="block usage-map-block">
     <div class="block-head">

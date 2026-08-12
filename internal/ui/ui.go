@@ -23,7 +23,6 @@ import (
 	"literouter/internal/clisetup"
 	"literouter/internal/pool"
 	"literouter/internal/storage"
-	"literouter/internal/usage"
 )
 
 //go:embed assets/*
@@ -196,10 +195,6 @@ type SettingsHooks struct {
 
 type UsageHooks struct {
 	Summary func(context.Context, time.Time, int) (storage.UsageSummary, error)
-	// Compaction reports where each model's prompt cache stops paying for itself, so
-	// the operator can see the recommendation and the evidence behind it rather than
-	// having it applied silently.
-	Compaction func(context.Context) ([]usage.CompactionAdvice, error)
 }
 
 type ProviderInfo struct {
@@ -318,9 +313,6 @@ type viewData struct {
 	CustomProvider       *storage.CustomProvider
 	CustomProviderModels map[string][]storage.CatalogModel
 	CustomError          string
-	Advice               []usage.CompactionAdvice
-	AdviceGroups         []AdviceGroup
-	AdviceNote           string
 	Total                int
 	Enabled              int
 	Exhausted            int
@@ -1091,7 +1083,7 @@ func New(
 	funcs := template.FuncMap{
 		"urlquery": url.QueryEscape, "quotaBucket": quotaBucket, "modelIDExample": modelIDExample,
 		"formatReset": formatReset, "formatFetched": formatFetched, "formatPlan": formatPlan, "planClass": planClass,
-		"formatUSD": formatUSD, "formatInt": formatInt, "formatUsageInt": formatUsageInt, "formatTokens": formatTokens, "prettyModel": storage.PrettyModelLabel, "formatContextWindow": storage.FormatContextWindow, "pct": pct, "pct64": pct64, "div": divInt, "pctf": pctFraction, "effortLevels": func() []string { return storage.EffortLevels }, "honoursEffort": providerHonoursEffort, "providerLabel": providerLabel, "providerLogo": providerLogo, "endpointLabel": endpointLabel, "formatClock": formatClock, "formatDayTime": formatDayTime,
+		"formatUSD": formatUSD, "formatInt": formatInt, "formatUsageInt": formatUsageInt, "formatTokens": formatTokens, "prettyModel": storage.PrettyModelLabel, "formatContextWindow": storage.FormatContextWindow, "pct": pct, "pct64": pct64, "effortLevels": func() []string { return storage.EffortLevels }, "honoursEffort": providerHonoursEffort, "providerLabel": providerLabel, "providerLogo": providerLogo, "endpointLabel": endpointLabel, "formatClock": formatClock, "formatDayTime": formatDayTime,
 	}
 	index, err := template.New("index.html").Funcs(funcs).ParseFS(assets, "assets/index.html", "assets/tabs.html", "assets/accounts.html")
 	if err != nil {
@@ -1164,9 +1156,6 @@ func (s *Service) Register(e *echo.Echo) error {
 	e.POST("/ui/models/:id/context", s.updateModelContextHandler)
 	e.POST("/ui/models/:id/context-probe", s.probeModelContextHandler)
 	e.POST("/ui/models/:id/effort", s.updateModelEffortHandler)
-	e.GET("/ui/models/advice", s.compactionAdviceHandler)
-	e.POST("/ui/models/advice/apply", s.applyCompactionAdviceHandler)
-	e.POST("/ui/models/advice/register", s.registerCompactionAdviceHandler)
 	e.POST("/ui/models/test", s.testModelHandler)
 	e.DELETE("/ui/models/:id", s.deleteModelHandler)
 	e.POST("/ui/setup/:tool/:action", s.cliSetupHandler)
@@ -1784,101 +1773,6 @@ func (s *Service) updateModelEffortHandler(c echo.Context) error {
 	}
 	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
 	return s.renderModelCatalog(c, provider)
-}
-
-// compactionAdviceHandler renders the per-model compaction recommendations.
-func (s *Service) compactionAdviceHandler(c echo.Context) error {
-	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
-	return s.tab.ExecuteTemplate(c.Response(), "compaction-advice", s.compactionView(c))
-}
-
-// applyCompactionAdviceHandler writes one recommendation into the catalog. It is a
-// deliberate, per-model click: lowering a context window makes the client compact
-// earlier, which discards context, so it is never applied on the proxy's own initiative.
-func (s *Service) applyCompactionAdviceHandler(c echo.Context) error {
-	if !sameOrigin(c.Request()) {
-		return echo.NewHTTPError(http.StatusForbidden, "cross-origin request denied")
-	}
-	if s.modelsHook.SetContextWindow == nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, "model context configuration unavailable")
-	}
-	provider := normalizeProviderID(c.FormValue("provider"))
-	model := strings.TrimSpace(c.FormValue("model"))
-	window, err := strconv.Atoi(strings.TrimSpace(c.FormValue("window")))
-	if provider == "" || model == "" || err != nil || window < 1_000 {
-		return echo.NewHTTPError(http.StatusBadRequest, "provider, model and window are required")
-	}
-	view := s.compactionView(c)
-	if err := s.modelsHook.SetContextWindow(c.Request().Context(), provider, model, window); err != nil {
-		view.AdviceNote = err.Error()
-	} else {
-		// Re-read so the row reflects the change and drops out of the recommendation
-		// list on its own, rather than being hidden client-side.
-		view = s.compactionView(c)
-		view.AdviceNote = fmt.Sprintf("%s now compacts near %dk.", model, window/1000)
-	}
-	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
-	return s.tab.ExecuteTemplate(c.Response(), "compaction-advice", view)
-}
-
-// divInt and pctFraction keep the advice table readable without pushing formatting
-// decisions into the handler.
-func divInt(value, by int) int {
-	if by == 0 {
-		return 0
-	}
-	return value / by
-}
-
-func pctFraction(value float64) string {
-	return strconv.FormatFloat(value*100, 'f', 0, 64)
-}
-
-// registerCompactionAdviceHandler adds a model the proxy has served but nobody
-// registered, then sets the recommended window on it.
-//
-// The id is taken verbatim from usage rather than through the Add-model form's prefix
-// normalisation. Windows are resolved by the id the client actually asks for, so a
-// catalog entry stored as "ag/gemini-3.6-flash-high" would never apply to the traffic
-// that produced the recommendation — the row would look applied and change nothing.
-func (s *Service) registerCompactionAdviceHandler(c echo.Context) error {
-	if !sameOrigin(c.Request()) {
-		return echo.NewHTTPError(http.StatusForbidden, "cross-origin request denied")
-	}
-	if s.modelsHook.Add == nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, "model catalog unavailable")
-	}
-	provider := normalizeProviderID(c.FormValue("provider"))
-	model := strings.TrimSpace(c.FormValue("model"))
-	window, err := strconv.Atoi(strings.TrimSpace(c.FormValue("window")))
-	if provider == "" || model == "" || err != nil || window < 1_000 {
-		return echo.NewHTTPError(http.StatusBadRequest, "provider, model and window are required")
-	}
-	view := s.compactionView(c)
-	if _, addErr := s.modelsHook.Add(c.Request().Context(), provider, model, "", window); addErr != nil {
-		view.AdviceNote = addErr.Error()
-	} else {
-		view = s.compactionView(c)
-		view.AdviceNote = fmt.Sprintf("%s added to the catalog and set to compact near %dk.", model, window/1000)
-	}
-	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
-	return s.tab.ExecuteTemplate(c.Response(), "compaction-advice", view)
-}
-
-func (s *Service) compactionView(c echo.Context) viewData {
-	data := viewData{}
-	if s.usage.Compaction == nil {
-		data.AdviceNote = "usage analytics unavailable"
-		return data
-	}
-	advice, err := s.usage.Compaction(c.Request().Context())
-	if err != nil {
-		data.AdviceNote = err.Error()
-		return data
-	}
-	data.Advice = advice
-	data.AdviceGroups = groupAdvice(advice)
-	return data
 }
 
 func (s *Service) testModelHandler(c echo.Context) error {
