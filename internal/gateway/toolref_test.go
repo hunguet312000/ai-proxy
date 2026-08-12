@@ -15,6 +15,85 @@ import (
 	"literouter/internal/toolstore"
 )
 
+// The diff-based near-duplicate dedup must survive the trip through the real
+// production shape — aggressive mode, summarize=trim, a window big enough that
+// compact fits the request without trimming — so the diff marker that carries
+// /ref/ is exactly what is forwarded upstream. Two Reads of the same file with two
+// changed lines is the dominant coding-agent pattern this feature exists for.
+func TestDiffDedupCaptureSurvivesTrimModeForwarding(t *testing.T) {
+	store := toolstore.New(0)
+	service := New(Options{
+		ContextEnabled: true, ContextMode: ContextModeAggressive, SummarizeMode: SummarizeModeTrim,
+		ContextLimits: contextguard.Limits{Default: 30_000},
+		ContextPolicy: contextguard.Policy{
+			SoftRatio: 0.20, TruncateRatio: 0.25, SummarizeRatio: 0.30, HardRatio: 0.95, KeepRecentTurns: 1,
+		},
+		ToolStore: store,
+	})
+	var beforeLines, afterLines []string
+	for index := 1; index <= 900; index++ {
+		line := fmt.Sprintf("file.go:%d: diagnostic content", index)
+		beforeLines = append(beforeLines, line)
+		if index != 200 && index != 201 {
+			afterLines = append(afterLines, line)
+		}
+	}
+	before := strings.Join(beforeLines, "\n") + "\n"
+	after := strings.Join(afterLines, "\n")
+	messages := []provider.Message{
+		{Role: "assistant", Content: []provider.Content{{Type: "tool_use", ToolUseID: "read-old", Name: "Read", Input: []byte(`{"file_path":"/repo/a.go"}`)}}},
+		{Role: "user", Content: []provider.Content{{Type: "tool_result", ToolUseID: "read-old", Text: before}}},
+		{Role: "assistant", Content: []provider.Content{{Type: "tool_use", ToolUseID: "read-new", Name: "Read", Input: []byte(`{"file_path":"/repo/a.go"}`)}}},
+		{Role: "user", Content: []provider.Content{{Type: "tool_result", ToolUseID: "read-new", Text: after}}},
+		{Role: "user", Content: []provider.Content{{Type: "text", Text: "latest instruction"}}},
+	}
+	request := provider.Request{Model: "model", Messages: messages, MaxTokens: 100}
+
+	prepared, outcome, err := service.prepareContextStages(context.Background(), request)
+	if err != nil {
+		t.Fatalf("prepareContextStages() = %v", err)
+	}
+	if outcome.stage == "trim" {
+		t.Fatal("a compactable request was trimmed; the diff capture is moot")
+	}
+	var marker string
+	for _, message := range prepared.Messages {
+		for _, block := range message.Content {
+			if strings.HasPrefix(block.Text, "[literouter:diff-v1") {
+				marker = block.Text
+			}
+		}
+	}
+	if marker == "" {
+		t.Fatal("the forwarded request carries no diff marker")
+	}
+	if !strings.Contains(marker, "base=read-new") {
+		t.Fatalf("diff marker does not name the newer read: %q", marker[:min(len(marker), 160)])
+	}
+	hash := toolstore.ID(before)
+	if _, ok := store.Get(hash); !ok {
+		t.Fatal("the diff-elided body was not captured into the reference store")
+	}
+	if !strings.Contains(marker, "/ref/"+hash) {
+		t.Fatalf("forwarded diff marker lacks the fetch reference: %q", marker[:min(len(marker), 200)])
+	}
+	// The base read is the newest of its call, so it must not be diff-elided itself.
+	// In this small window the truncation stage may still head/tail it — that is a
+	// different stage and fine — but it must never gain a diff marker pointing at
+	// another block.
+	for _, message := range prepared.Messages {
+		for _, block := range message.Content {
+			if strings.HasPrefix(block.Text, "[literouter:diff-v1") && strings.Contains(block.Text, "base="+block.ToolUseID) {
+				t.Fatal("a diff marker references itself as its own base")
+			}
+		}
+	}
+	if !strings.HasPrefix(prepared.Messages[3].Content[0].Text, "[literouter:truncate-v1") &&
+		prepared.Messages[3].Content[0].Text != after {
+		t.Fatalf("base read was neither preserved nor truncated as expected: %q", prepared.Messages[3].Content[0].Text[:min(len(prepared.Messages[3].Content[0].Text), 120)])
+	}
+}
+
 // bigBashExchange is one tool call whose result is large enough to be truncated by
 // aggressive mode at the small window these tests use.
 func bigBashExchange(id, command, result string) []provider.Message {

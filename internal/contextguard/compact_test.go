@@ -234,6 +234,180 @@ func TestTruncateKeepsErrorResultsIntact(t *testing.T) {
 	}
 }
 
+// diffReadExchange is a Read tool call whose result `before` is followed by a
+// later Read of the same file returning `after` — the near-duplicate case diff
+// dedup exists for.
+func diffReadExchange(before, after string) []provider.Message {
+	return []provider.Message{
+		{Role: "assistant", Content: []provider.Content{{Type: "tool_use", ToolUseID: "read-old", Name: "Read", Input: json.RawMessage(`{"file_path":"/repo/a.go"}`)}}},
+		{Role: "user", Content: []provider.Content{{Type: "tool_result", ToolUseID: "read-old", Text: before}}},
+		{Role: "assistant", Content: []provider.Content{{Type: "tool_use", ToolUseID: "read-new", Name: "Read", Input: json.RawMessage(`{"file_path":"/repo/a.go"}`)}}},
+		{Role: "user", Content: []provider.Content{{Type: "tool_result", ToolUseID: "read-new", Text: after}}},
+	}
+}
+
+func TestDiffDedupReplacesOldNearDuplicate(t *testing.T) {
+	before, after := sameFileReads(300, 41, 42, 43)
+	messages := diffReadExchange(before, after)
+	messages = append(messages, provider.Message{Role: "user", Content: []provider.Content{{Type: "text", Text: "latest"}}})
+	request := provider.Request{Model: "model", Messages: messages}
+	// Boundary covers all four tool blocks but excludes the trailing user text.
+	boundary := len(messages) - 1
+	elideAndDedup(&request, boundary, Policy{})
+
+	oldBlock := request.Messages[1].Content[0]
+	if !strings.HasPrefix(oldBlock.Text, diffMarker) {
+		t.Fatalf("old near-duplicate not elided to a diff marker: %q", oldBlock.Text[:min(len(oldBlock.Text), 80)])
+	}
+	if !strings.Contains(oldBlock.Text, "base=read-new") {
+		t.Fatalf("diff marker does not name the base: %q", oldBlock.Text)
+	}
+	if !strings.Contains(oldBlock.Text, "changed=3 of 300") {
+		t.Fatalf("diff marker does not name the change: %q", oldBlock.Text)
+	}
+	// The newer read stays full.
+	if got := request.Messages[3].Content[0].Text; got != after {
+		t.Fatal("the newer (base) read was elided")
+	}
+}
+
+func TestDiffDedupSkipsLowOverlap(t *testing.T) {
+	// Two reads of the same file with content that shares no lines — not
+	// near-duplicates, even though the call key is identical.
+	before := strings.Repeat("before content line\n", 200)
+	after := strings.Repeat("after content line\n", 200)
+	request := provider.Request{Model: "model", Messages: diffReadExchange(before, after)}
+	boundary := len(request.Messages)
+	elideAndDedup(&request, boundary, Policy{})
+	if strings.HasPrefix(request.Messages[1].Content[0].Text, diffMarker) {
+		t.Fatal("unrelated same-file reads were diff-elided")
+	}
+}
+
+func TestDiffDedupKeepsRecentTurnFull(t *testing.T) {
+	before := strings.Repeat("line\n", 200)
+	after := strings.Repeat("line\n", 200) + "changed\n"
+	request := provider.Request{Model: "model", Messages: diffReadExchange(before, after)}
+	// boundary = 0 → nothing old → the whole exchange must stay untouched.
+	elideAndDedup(&request, 0, Policy{})
+	if got := request.Messages[1].Content[0].Text; got != before {
+		t.Fatal("a recent turn was diff-elided")
+	}
+}
+
+func TestDiffDedupPreservesFullBodyForReferenceStore(t *testing.T) {
+	before, after := sameFileReads(400, 50, 51)
+	var captured map[string]string
+	store := func(id, tool, toolUseID, body string) {
+		captured = map[string]string{"id": id, "use": toolUseID, "body": body}
+	}
+	request := provider.Request{Model: "model", Messages: diffReadExchange(before, after)}
+	boundary := len(request.Messages)
+	elideAndDedup(&request, boundary, Policy{StoreResult: store})
+	if captured == nil {
+		t.Fatal("StoreResult was not called for an elided near-duplicate")
+	}
+	if captured["body"] != before {
+		t.Fatal("captured body is not the full elided result")
+	}
+	if captured["id"] != toolstore.ID(before) {
+		t.Fatal("captured id is not the content hash")
+	}
+	marker := request.Messages[1].Content[0].Text
+	if !strings.Contains(marker, "GET /ref/"+captured["id"]) {
+		t.Fatalf("diff marker does not reference the captured body: %q", marker)
+	}
+}
+
+func TestDiffDedupIsIdempotent(t *testing.T) {
+	before, after := sameFileReads(300, 41, 42, 43)
+	messages := diffReadExchange(before, after)
+	request := provider.Request{Model: "model", Messages: messages}
+	policy := Policy{}
+	boundary := len(request.Messages)
+	elideAndDedup(&request, boundary, policy)
+	first, _ := json.Marshal(request.Messages)
+	elideAndDedup(&request, boundary, policy)
+	second, _ := json.Marshal(request.Messages)
+	if string(first) != string(second) {
+		t.Fatal("diff dedup is not idempotent: second pass rewrote the marker")
+	}
+}
+
+// TestDiffDedupPrefixStable pins the byte-stability of diff markers as a message
+// is appended within a boundary quantum, reusing the same harness the exact-dedup
+// and truncation markers use: serialize the messages before a stable boundary and
+// require them to be byte-identical.
+func TestDiffDedupPrefixStable(t *testing.T) {
+	policy := AggressivePolicy(Policy{SoftRatio: 0.78, SummarizeRatio: 0.88, HardRatio: 0.96,
+		KeepRecentTurns: 1, BoundaryQuantum: 4, TruncateRatio: 0.82})
+	before, after := sameFileReads(300, 41, 42, 43)
+	base := diffReadExchange(before, after)
+	build := func(extraTexts int) provider.Request {
+		var messages []provider.Message
+		messages = append(messages, base...)
+		messages = append(messages, provider.Message{Role: "user", Content: []provider.Content{{Type: "text", Text: "latest"}}})
+		for range extraTexts {
+			messages = append(messages, provider.Message{Role: "user", Content: []provider.Content{{Type: "text", Text: "continue"}}})
+		}
+		return provider.Request{Model: "model", Messages: messages}
+	}
+	serializePrefix := func(request provider.Request, boundary int) string {
+		encoded, err := json.Marshal(request.Messages[:boundary])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(encoded)
+	}
+	// Base exchange (4) + trailing text (1) = 5 messages: raw boundary 4, quantum 4
+	// → snapped 4. Appending one text (6 messages): raw 5, still snapped 4.
+	first := build(0)
+	compact(&first, policy, 1, 1<<30)
+	second := build(1)
+	compact(&second, policy, 1, 1<<30)
+	boundary := stickyOldBoundary(len(first.Messages), policy)
+	if boundary != stickyOldBoundary(len(second.Messages), policy) {
+		t.Fatalf("boundary moved inside the quantum: %d vs %d", boundary, stickyOldBoundary(len(second.Messages), policy))
+	}
+	if serializePrefix(first, boundary) != serializePrefix(second, boundary) {
+		t.Fatal("compacted prefix changed while the boundary was stable")
+	}
+}
+
+func TestDiffDedupSkipsNonCanonicalCalls(t *testing.T) {
+	before := strings.Repeat("line\n", 200)
+	after := strings.Repeat("line\n", 200) + "changed\n"
+	messages := []provider.Message{
+		{Role: "assistant", Content: []provider.Content{{Type: "tool_use", ToolUseID: "c1", Name: "Custom", Input: json.RawMessage(`{"payload":{`)}}}, // invalid JSON → not canonical
+		{Role: "user", Content: []provider.Content{{Type: "tool_result", ToolUseID: "c1", Text: before}}},
+		{Role: "assistant", Content: []provider.Content{{Type: "tool_use", ToolUseID: "c2", Name: "Custom", Input: json.RawMessage(`{"payload":{`)}}},
+		{Role: "user", Content: []provider.Content{{Type: "tool_result", ToolUseID: "c2", Text: after}}},
+	}
+	request := provider.Request{Model: "model", Messages: messages}
+	elideAndDedup(&request, len(messages), Policy{})
+	if strings.HasPrefix(request.Messages[1].Content[0].Text, diffMarker) {
+		t.Fatal("a non-canonical call was diff-elided")
+	}
+}
+
+// sameFileReads builds two versions of a file read, `before` and `after`, where
+// `after` is `before` with the 1-based lines in `changed` removed.
+func sameFileReads(total int, changed ...int) (before, after string) {
+	changedSet := make(map[int]bool, len(changed))
+	for _, line := range changed {
+		changedSet[line] = true
+	}
+	var beforeLines, afterLines []string
+	for index := 1; index <= total; index++ {
+		line := fmt.Sprintf("file.go:%d: diagnostic content", index)
+		beforeLines = append(beforeLines, line)
+		if !changedSet[index] {
+			afterLines = append(afterLines, line)
+		}
+	}
+	return strings.Join(beforeLines, "\n") + "\n", strings.Join(afterLines, "\n")
+}
+
 func TestTruncateCapturesFullBodyWhenStoreIsWired(t *testing.T) {
 	var captured map[string]string
 	policy := Policy{StoreResult: func(id, tool, toolUseID, body string) {

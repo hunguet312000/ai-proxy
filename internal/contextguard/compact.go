@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"literouter/internal/cache"
+	"literouter/internal/contextguard/editdiff"
 	"literouter/internal/provider"
 )
 
@@ -16,6 +17,7 @@ const (
 	compactMarker   = "[literouter:compact-v1"
 	supersedeMarker = "[literouter:supersede-v1"
 	truncateMarker  = "[literouter:truncate-v1"
+	diffMarker      = "[literouter:diff-v1"
 	// proxyMarkerPrefix is shared by every rewrite this package makes. A block that
 	// already starts with it is never reprocessed, which keeps every stage
 	// idempotent and keeps a summary/trim note out of the dedup hash set.
@@ -39,7 +41,7 @@ const (
 // deactivates — no flapping, no prefix churn from stage oscillation.
 func compact(request *provider.Request, policy Policy, available, beforeTokens int) {
 	boundary := stickyOldBoundary(len(request.Messages), policy)
-	elideAndDedup(request, boundary)
+	elideAndDedup(request, boundary, policy)
 	if !policy.Aggressive {
 		return
 	}
@@ -64,7 +66,7 @@ func AggressiveCompact(request provider.Request, policy Policy) provider.Request
 		policy.KeepRecentTurns = 1
 	}
 	boundary := max(0, len(result.Messages)-policy.KeepRecentTurns)
-	elideAndDedup(&result, boundary)
+	elideAndDedup(&result, boundary, policy)
 	collapseSuperseded(&result, boundary)
 	truncateOldToolResults(&result, boundary, policy)
 	return result
@@ -102,11 +104,38 @@ func stickyOldBoundary(messageCount int, policy Policy) int {
 }
 
 // elideAndDedup is the always-on lossless pass: old thinking blocks become a
-// stub, and an old tool result byte-identical to an earlier one becomes a stable
-// reference to it. First occurrence stays full, which is the prefix-friendly
-// direction.
-func elideAndDedup(request *provider.Request, boundary int) {
+// stub, an old tool result byte-identical to an earlier one becomes a stable
+// reference to it, and an old tool result that is a near-duplicate of a later one
+// becomes a diff marker naming the difference. First occurrence stays full, which
+// is the prefix-friendly direction.
+func elideAndDedup(request *provider.Request, boundary int, policy Policy) {
 	seen := make(map[[32]byte]string)
+	calls := toolCallsFor(request)
+	// lastFullBody records, per call key, the body and position of the newest
+	// un-elided tool_result — the base a diff marker compares an older result to.
+	// Filled in a first pass so an old block can reference a newer one regardless
+	// of scan order. The base is the newest full body for its call, so it is never
+	// itself elided: nothing newer exists to collapse it against.
+	lastFullBody := make(map[string]laterResult)
+	for messageIndex := range request.Messages {
+		message := &request.Messages[messageIndex]
+		for contentIndex := range message.Content {
+			block := &message.Content[contentIndex]
+			if strings.HasPrefix(block.Text, proxyMarkerPrefix) {
+				continue
+			}
+			if block.Type != "tool_result" || block.Text == "" {
+				continue
+			}
+			call, ok := calls[block.ToolUseID]
+			if !ok || call.key == "" {
+				continue
+			}
+			lastFullBody[call.key] = laterResult{
+				message: messageIndex, content: contentIndex, toolUseID: block.ToolUseID, body: block.Text,
+			}
+		}
+	}
 	for messageIndex := range request.Messages {
 		message := &request.Messages[messageIndex]
 		for contentIndex := range message.Content {
@@ -130,8 +159,118 @@ func elideAndDedup(request *provider.Request, boundary int) {
 				continue
 			}
 			seen[hash] = block.ToolUseID
+			// The diff pass runs after exact dedup has been given its chance: it only
+			// catches the near-duplicates that SHA-256 missed. A block at or past the
+			// boundary is never elided.
+			if messageIndex < boundary {
+				if call, ok := calls[block.ToolUseID]; ok && call.key != "" {
+					elideNearDuplicate(request, messageIndex, contentIndex, call.key, lastFullBody, policy)
+				}
+			}
 		}
 	}
+}
+
+// toolCallsFor indexes every tool invocation in the request by its tool_use_id,
+// keyed by the canonical form collapseSuperseded uses. A call whose arguments are
+// not canonicalizable has an empty key and takes no part in call-keyed passes.
+func toolCallsFor(request *provider.Request) map[string]toolCall {
+	calls := make(map[string]toolCall)
+	for _, message := range request.Messages {
+		for _, block := range message.Content {
+			if block.Type != "tool_use" || block.ToolUseID == "" {
+				continue
+			}
+			key, ok := canonicalToolKey(block.Name, block.Input)
+			if !ok {
+				key = ""
+			}
+			calls[block.ToolUseID] = toolCall{name: block.Name, key: key}
+		}
+	}
+	return calls
+}
+
+// laterResult is one un-elided tool_result, used as the base a diff marker points
+// at. It is always the newest full body of its call, so its identity is fixed for
+// as long as the request exists.
+type laterResult struct {
+	message, content int
+	toolUseID        string
+	body             string
+}
+
+// elideNearDuplicate replaces an old tool result that is a high-overlap
+// near-duplicate of a newer result of the same call with a diff marker. The marker
+// names the base's tool_use_id and the changed line spans; because a block is
+// elided at most once (the proxyMarkerPrefix guard skips it on every later pass)
+// and the base is the newest full body, never itself elided, the marker is written
+// once and stays byte-identical as the conversation grows.
+func elideNearDuplicate(request *provider.Request, messageIndex, contentIndex int, key string, last map[string]laterResult, policy Policy) {
+	block := &request.Messages[messageIndex].Content[contentIndex]
+	base, ok := last[key]
+	if !ok || base.body == "" {
+		return
+	}
+	// A block is never its own base.
+	if base.message == messageIndex && base.content == contentIndex {
+		return
+	}
+	script, isNear := editdiff.Diff(block.Text, base.body)
+	if !isNear {
+		return
+	}
+	// A pure insertion or pure deletion deletes nothing from the old body — the
+	// newer result simply has more or fewer lines — so there is no elided content
+	// to represent and no bytes to save. Diff reports Changed=0 for those; only a
+	// real change in the old result earns a marker.
+	if script.Changed == 0 {
+		return
+	}
+	fullID := ""
+	if policy.StoreResult != nil {
+		fullID = sha256Hex(block.Text)
+		policy.StoreResult(fullID, "", base.toolUseID, block.Text)
+	}
+	replacement := fmt.Sprintf("%s base=%s changed=%d of %d lines hash=%s]\n%s",
+		diffMarker, base.toolUseID, script.Changed, script.Total, shortHash(sha256.Sum256([]byte(block.Text))),
+		diffNote(script, fullID))
+	if len(replacement) >= len(block.Text) {
+		return
+	}
+	block.Text = replacement
+}
+
+// diffNote is the human-readable line a diff marker carries: which lines changed
+// relative to the base result, and — when the body was captured — how to fetch it
+// back. It is a pure function of the script and the (stable) full hash.
+func diffNote(script editdiff.Script, fullID string) string {
+	var builder strings.Builder
+	switch {
+	case script.Changed == 1 && len(script.Spans) == 1:
+		fmt.Fprintf(&builder, "An earlier result of the same tool call, differing from the later result in line %d.", script.Spans[0].From)
+	case len(script.Spans) == 1 && script.Spans[0].From == script.Spans[0].To:
+		fmt.Fprintf(&builder, "An earlier result of the same tool call, differing from the later result in line %d.", script.Spans[0].From)
+	case len(script.Spans) == 1:
+		fmt.Fprintf(&builder, "An earlier result of the same tool call, differing from the later result in lines %d-%d.", script.Spans[0].From, script.Spans[0].To)
+	default:
+		builder.WriteString("An earlier result of the same tool call, differing from the later result in lines ")
+		for index, span := range script.Spans {
+			if index > 0 {
+				builder.WriteString(", ")
+			}
+			if span.From == span.To {
+				fmt.Fprintf(&builder, "%d", span.From)
+			} else {
+				fmt.Fprintf(&builder, "%d-%d", span.From, span.To)
+			}
+		}
+		builder.WriteString(".")
+	}
+	if fullID != "" {
+		fmt.Fprintf(&builder, " The full body is preserved — GET /ref/%s to retrieve it.", fullID)
+	}
+	return builder.String()
 }
 
 // toolCall identifies one historical tool invocation for the supersede pass.
