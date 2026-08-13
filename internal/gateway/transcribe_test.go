@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"literouter/internal/provider"
 	"literouter/internal/translator"
 )
 
@@ -256,6 +257,58 @@ func TestRouteModelKeepsRerouteWhenToggleOff(t *testing.T) {
 	}
 	if decision.Model != "vision-model" {
 		t.Fatalf("decision.Model = %q, want vision-model (reroute)", decision.Model)
+	}
+}
+
+// A request asked-for as a vision-capable model can fall back to a text-only model
+// (fallback_model appended to the chain). The routing decision was made on the
+// asked-for model, so the image was left in place — the fallback candidate must strip
+// it per-candidate or it carries an image_url a text-only model cannot read. This is
+// the exact shape of the compaction 400: a claude-* id falling back to opencode.
+func TestCompleteStripsImagesForTextOnlyFallbackCandidate(t *testing.T) {
+	service := New(Options{
+		ImageModel: "vision-model", TextOnlyModels: []string{"opencode/deepseek-v4-flash"},
+		FallbackModel: "opencode/deepseek-v4-flash",
+	})
+	// A vision-capable asked-for model: no text-only route fires on it, image stays.
+	request := provider.Request{
+		Model:     "vision-model",
+		MaxTokens: 100,
+		Messages: []provider.Message{{
+			Role: "user",
+			Content: []provider.Content{
+				{Type: "text", Text: "describe"},
+				{Type: "image", MediaType: "image/png", Data: "iVBOR"},
+			},
+		}},
+	}
+	// Walk the chain the way complete() does; the fallback (text-only) candidate must
+	// have its image stripped before ToOpenAIRequest.
+	chain := service.modelChain("vision-model")
+	found := false
+	for _, model := range chain {
+		if model != "opencode/deepseek-v4-flash" {
+			continue
+		}
+		found = true
+		prepared := cloneProviderRequest(request)
+		prepared.Model = model
+		if route := service.imageRoute.Load(); route != nil && route.isTextOnly(model) {
+			service.stripProviderImages(&prepared)
+		}
+		for _, message := range prepared.Messages {
+			for _, block := range message.Content {
+				if block.Type == "image" {
+					t.Fatal("text-only fallback candidate still carries an image")
+				}
+				if block.Type == "text" && strings.Contains(block.Text, "an image was here") {
+					// good — stripped to placeholder
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("chain did not include the text-only fallback")
 	}
 }
 

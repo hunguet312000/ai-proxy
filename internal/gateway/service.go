@@ -757,12 +757,41 @@ func (s *Service) prepareStreamCandidate(ctx context.Context, request translator
 			return translator.OpenAIRequest{}, 0, err
 		}
 	}
+	// The image rule runs on the model actually about to be attempted, not just the one the
+	// client asked for. A request routed to a vision model can fall back to a text-only model
+	// (fallback_model is appended to every chain), and a routing decision made on the asked-for
+	// model alone never re-checks the candidate that ends up serving — so a turn with an image
+	// in its history would reach that text-only candidate carrying the image_url it cannot read.
+	// Strip it here, per candidate, before translation.
+	if route := s.imageRoute.Load(); route != nil && route.isTextOnly(candidate.Model) {
+		s.stripProviderImages(&candidate)
+	}
 	result, err := translator.ToOpenAIRequest(candidate)
 	if err != nil {
 		return translator.OpenAIRequest{}, 0, err
 	}
 	result.PromptCacheKey = request.PromptCacheKey
 	return result, contextguard.EstimateRequest(candidate), nil
+}
+
+// stripProviderImages replaces every image block in a provider request with a text
+// placeholder. In the unified form, images nested inside a tool result are hoisted into
+// standalone image blocks alongside the tool_result (translator anthropicToolResultContent),
+// so top-level blocks cover both shapes. It runs before translation, per candidate, when
+// the candidate model cannot read images.
+func (s *Service) stripProviderImages(request *provider.Request) {
+	for messageIndex := range request.Messages {
+		message := &request.Messages[messageIndex]
+		for contentIndex := range message.Content {
+			block := &message.Content[contentIndex]
+			if block.Type != "image" {
+				continue
+			}
+			block.Type = "text"
+			block.Data, block.MediaType, block.URL = "", "", ""
+			block.Text = imagePlaceholder
+		}
+	}
 }
 
 func (s *Service) prepareOpenAIRequest(ctx context.Context, request translator.OpenAIRequest) (translator.OpenAIRequest, error) {
@@ -871,6 +900,12 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 				}
 			}
 			return provider.Response{}, err
+		}
+		// Same per-candidate image rule as the streaming path: a fallback to a text-only
+		// model must not carry an image the routing decision (made on the asked-for model)
+		// left in place.
+		if route := s.imageRoute.Load(); route != nil && route.isTextOnly(model) {
+			s.stripProviderImages(&prepared)
 		}
 		sentRequest = prepared
 		upstream, err := translator.ToOpenAIRequest(prepared)

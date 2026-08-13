@@ -94,9 +94,15 @@ func (s *Service) transcribeImages(ctx context.Context, request translator.Anthr
 		return request, false
 	}
 	cache := s.transcriptions()
+	// System blocks can carry an image too; transcribe those as well.
+	system, systemTranscribed, err := s.transcribeSystem(ctx, route.model, request.System, cache)
+	if err != nil {
+		return request, false
+	}
+	request.System = system
+	transcribed := systemTranscribed
 	messages := make([]translator.AnthropicMessage, len(request.Messages))
 	copy(messages, request.Messages)
-	transcribed := 0
 	for messageIndex, message := range messages {
 		var content []translator.AnthropicContent
 		ensure := func() {
@@ -198,6 +204,34 @@ func (s *Service) transcribeNested(ctx context.Context, visionModel string, entr
 	}
 	cache.put(hash, text)
 	return text, nil
+}
+
+// transcribeSystem transcribes any image blocks in the system preamble, mirroring
+// the message pass. Returns the new system and how many images it transcribed.
+func (s *Service) transcribeSystem(ctx context.Context, visionModel string, system []translator.AnthropicContent, cache *transcriptionCache) ([]translator.AnthropicContent, int, error) {
+	changed := false
+	cleaned := make([]translator.AnthropicContent, len(system))
+	copy(cleaned, system)
+	transcribed := 0
+	for index, block := range system {
+		if block.Type != "image" {
+			continue
+		}
+		text, err := s.transcribeOne(ctx, visionModel, block, cache)
+		if err != nil {
+			cleaned[index] = translator.AnthropicContent{Type: "text", Text: imagePlaceholder}
+			transcribed++
+			changed = true
+			continue
+		}
+		cleaned[index] = translator.AnthropicContent{Type: "text", Text: text}
+		transcribed++
+		changed = true
+	}
+	if !changed {
+		return system, 0, nil
+	}
+	return cleaned, transcribed, nil
 }
 
 // callVisionModel sends one image to the vision model and returns its text

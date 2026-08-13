@@ -181,6 +181,24 @@ func nestedImageIndexes(block translator.AnthropicContent) []int {
 	return indexes
 }
 
+// stripSystemImages replaces every image in a system block list with imagePlaceholder,
+// reporting whether anything changed (so callers can leave the slice untouched when not).
+func stripSystemImages(system []translator.AnthropicContent) ([]translator.AnthropicContent, bool) {
+	changed := false
+	cleaned := make([]translator.AnthropicContent, len(system))
+	copy(cleaned, system)
+	for index, block := range system {
+		if block.Type == "image" {
+			cleaned[index] = translator.AnthropicContent{Type: "text", Text: imagePlaceholder}
+			changed = true
+		}
+	}
+	if !changed {
+		return system, false
+	}
+	return cleaned, true
+}
+
 // imagePlaceholder replaces an image a text-only model cannot be shown.
 //
 // Explicit rather than silent, and worded so the model reports the gap instead of guessing
@@ -199,6 +217,17 @@ const imagePlaceholder = "[an image was here. The model serving this turn cannot
 // its slices with the passthrough path, which forwards the caller's original bytes.
 func stripUnreadableImages(request translator.AnthropicRequest) (translator.AnthropicRequest, int) {
 	stripped := 0
+	// System blocks can carry an image too (a screenshot the client embedded in the
+	// preamble). anyImage/freshImage already look there; the pass that removes them
+	// must as well, or a text-only model is handed an image_url it cannot read.
+	if system, changed := stripSystemImages(request.System); changed {
+		request.System = system
+		for _, block := range request.System {
+			if block.Type == "image" {
+				stripped++
+			}
+		}
+	}
 	messages := make([]translator.AnthropicMessage, len(request.Messages))
 	copy(messages, request.Messages)
 	for messageIndex, message := range messages {
