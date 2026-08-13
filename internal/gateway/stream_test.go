@@ -1276,3 +1276,32 @@ func TestMessagesRelentlessOverflowStopsAndReports(t *testing.T) {
 		t.Fatalf("upstream calls = %d, want at most %d", client.calls, 1+maxContextTrimRetries)
 	}
 }
+
+// A thinking model (GLM, DeepSeek) that finishes having emitted only reasoning_content
+// and no content still produced an answer — the reasoning is the only output. It must be
+// emitted as text rather than treated as an empty stream that falls back to another model.
+func TestAnthropicStreamEmitsReasoningOnlyAsText(t *testing.T) {
+	stream := &fakeStreamClient{content: strings.Join([]string{
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{"reasoning_content":"thinking through"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{"reasoning_content":" the plan"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		"data: [DONE]", "",
+	}, "\n")}
+	service := New(Options{OpenAIStream: stream})
+	e := echo.New()
+	service.Register(e)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"model","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, request)
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %q", recorder.Code, body)
+	}
+	if !strings.Contains(body, "thinking through the plan") {
+		t.Fatalf("reasoning-only output not emitted as text: %q", body)
+	}
+}

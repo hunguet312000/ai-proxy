@@ -480,3 +480,41 @@ func TestAnthropicUsageRoundTripsNativeUpstream(t *testing.T) {
 		t.Fatalf("round trip changed usage: %+v -> %+v", native.Usage, got)
 	}
 }
+
+// A thinking model (GLM, DeepSeek) that returns only reasoning_content and no content in
+// a non-stream response still answered — the reasoning is the answer. It must surface as
+// text rather than an empty response that the gateway retries into a fallback.
+func TestFromOpenAIResponseEmitsReasoningOnlyAsText(t *testing.T) {
+	response := OpenAIResponse{
+		Model: "GLM-5.2",
+		Choices: []OpenAIChoice{{
+			Message: OpenAIMessage{Role: "assistant", Reasoning: "thinking through the answer"},
+		}},
+		Usage: OpenAIUsage{PromptTokens: 10, CompletionTokens: 20},
+	}
+	result, err := FromOpenAIResponse(response)
+	if err != nil {
+		t.Fatalf("FromOpenAIResponse() = %v", err)
+	}
+	if len(result.Content) != 1 || result.Content[0].Type != "text" ||
+		!strings.Contains(result.Content[0].Text, "thinking through the answer") {
+		t.Fatalf("reasoning-only response not surfaced as text: %+v", result.Content)
+	}
+}
+
+// When content exists, reasoning_content stays dropped — it is internal deliberation.
+func TestFromOpenAIResponseDropsReasoningWhenContentExists(t *testing.T) {
+	response := OpenAIResponse{
+		Model: "GLM-5.2",
+		Choices: []OpenAIChoice{{
+			Message: OpenAIMessage{Role: "assistant", Reasoning: "internal deliberation", Content: "final answer"},
+		}},
+	}
+	result, err := FromOpenAIResponse(response)
+	if err != nil {
+		t.Fatalf("FromOpenAIResponse() = %v", err)
+	}
+	if len(result.Content) != 1 || result.Content[0].Text != "final answer" {
+		t.Fatalf("content not surfaced, reasoning leaked: %+v", result.Content)
+	}
+}

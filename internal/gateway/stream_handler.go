@@ -348,6 +348,12 @@ type anthropicStreamState struct {
 	completionBytes int
 	messageID       string
 	messageModel    string
+	// reasoningBuf accumulates reasoning_content chunks when the upstream is a thinking
+	// model (GLM, DeepSeek). Reasoning is normally dropped — it is internal deliberation,
+	// not the answer — but if the stream ends with reasoning and nothing else, the model
+	// produced no answer at all, and the reasoning is the only output it had. Emitting it
+	// as text beats an empty turn that gets retried and dropped to the fallback.
+	reasoningBuf string
 }
 
 type bufferedToolCall struct {
@@ -375,10 +381,15 @@ func (s *anthropicStreamState) emit(c echo.Context, chunk OpenAIStreamChunk) err
 			// OpenAI reasoning_content has no Anthropic thinking signature, so it used
 			// to be forwarded as assistant text. That put internal deliberation into
 			// the transcript, where the model re-read it as its own final answer and
-			// repeated work it had already done. Count it for usage and drop it.
+			// repeated work it had already done. Count it for usage and buffer it — if
+			// the stream ends with no content at all, the reasoning is the only answer
+			// and is emitted then (see emit's terminal path).
 			s.completionBytes += len(choice.Delta.Reasoning)
+			s.reasoningBuf += choice.Delta.Reasoning
 		}
 		if choice.Delta.Content != "" {
+			s.reasoningBuf = ""
+			s.completionBytes += len(choice.Delta.Content)
 			s.completionBytes += len(choice.Delta.Content)
 			if err := s.flushTools(c); err != nil {
 				return err
@@ -555,6 +566,21 @@ func (s *anthropicStreamState) sendTerminal(c echo.Context, reason string) error
 		return nil
 	}
 	if s.nextIndex == 0 && len(s.toolOrder) == 0 {
+		// A thinking model that never produced content (GLM, DeepSeek) finishes having
+		// emitted only reasoning. Treating that as empty would retry and fall back to
+		// another model for a question the upstream actually answered with its reasoning.
+		// Emit the buffered reasoning as the answer instead.
+		if s.reasoningBuf != "" {
+			if err := s.ensureStarted(c); err != nil {
+				return err
+			}
+			if err := s.contentDelta(c, "text", map[string]any{"type": "text_delta", "text": s.reasoningBuf}); err != nil {
+				return err
+			}
+			s.reasoningBuf = ""
+		}
+	}
+	if s.nextIndex == 0 && len(s.toolOrder) == 0 && s.reasoningBuf == "" {
 		// The upstream finished having produced no text and no tool call. Passing that
 		// on as a completed message — previously padded with a single space so the
 		// Anthropic shape stayed valid — reaches the agent as end_turn, so the client
