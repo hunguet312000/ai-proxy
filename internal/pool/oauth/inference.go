@@ -381,14 +381,18 @@ func (inference *Inference) call(ctx context.Context, providerName string, crede
 		request.Model = model
 		payload = request
 	case "antigravity":
+		// Antigravity is served through the Cloud Code endpoint, which is scoped to the
+		// account's project. An account that onboarded without a project cannot serve here;
+		// report that clearly rather than attempting the plain Gemini API (which needs a
+		// different OAuth scope the Antigravity token does not carry).
 		if accountID == "" {
-			return nil, fmt.Errorf("Antigravity account has no Cloud Code project")
+			return nil, fmt.Errorf("Antigravity account has no Cloud Code project — sign in at antigravity.google and create a project, then reconnect")
 		}
 		endpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
 		request.Model = resolveAntigravityModel(model)
-		envelope, err := buildAntigravityEnvelope(request, accountID, conversationID)
-		if err != nil {
-			return nil, err
+		envelope, buildErr := buildAntigravityEnvelope(request, accountID, conversationID)
+		if buildErr != nil {
+			return nil, buildErr
 		}
 		payload = envelope
 		headers["Accept"] = "text/event-stream"
