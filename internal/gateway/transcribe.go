@@ -288,7 +288,9 @@ func (s *Service) callVisionModel(ctx context.Context, visionModel string, image
 			upstreamRequest.Model = custom.Model
 			if err = custom.Client.DoJSON(ctx, path, upstreamRequest, &response); err == nil {
 				s.touchCustomProviderKey(custom.KeyID)
-				return summaryResponseText(response)
+				text, textErr := summaryResponseText(response)
+				s.recordTranscriptionUsage(candidate, response)
+				return text, textErr
 			}
 			lastErr = err
 			if retryableProviderError(err) {
@@ -299,7 +301,9 @@ func (s *Service) callVisionModel(ctx context.Context, visionModel string, image
 		if s.oauthInference != nil {
 			response, err = s.oauthInference.DoJSON(ctx, upstreamRequest, conversationID(ctx))
 			if err == nil {
-				return summaryResponseText(response)
+				text, textErr := summaryResponseText(response)
+				s.recordTranscriptionUsage(candidate, response)
+				return text, textErr
 			}
 			lastErr = err
 		}
@@ -315,12 +319,29 @@ func (s *Service) callVisionModel(ctx context.Context, visionModel string, image
 			}
 			return "", err
 		}
-		return summaryResponseText(response)
+		text, textErr := summaryResponseText(response)
+		s.recordTranscriptionUsage(candidate, response)
+		return text, textErr
 	}
 	if lastErr != nil {
 		return "", lastErr
 	}
 	return "", ErrProviderUnavailable
+}
+
+// recordTranscriptionUsage files the vision-model call under the model that transcribed
+// the image, so the Usage tab shows what image→text actually cost. Endpoint marks it as
+// transcription rather than a served turn.
+func (s *Service) recordTranscriptionUsage(model string, response translator.OpenAIResponse) {
+	s.recordUsage(UsageEvent{
+		Provider:         s.providerNameFor(model),
+		Model:            response.Model,
+		RequestModel:     model,
+		Endpoint:         "/v1/messages",
+		PromptTokens:     response.Usage.PromptTokens,
+		CompletionTokens: response.Usage.CompletionTokens,
+		CachedTokens:     response.Usage.PromptTokensDetails.CachedTokens,
+	})
 }
 
 // imageToProvider converts an Anthropic image block into the unified provider form.
