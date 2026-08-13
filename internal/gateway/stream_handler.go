@@ -882,7 +882,7 @@ func (s *Service) trimAfterContextRejection(ctx context.Context, model string, u
 		// truncating old tool output had already kept every one of them.
 		base = compacted
 	}
-	trimmed, ok := contextguard.TrimOldestTurns(base, budget)
+	trimmed, ok := contextguard.TrimOldestTurns(base, budget, policy.KeepContaining)
 	before := len(unified.Messages)
 	// Trimming that removed nothing cannot make the retry succeed. A single turn too
 	// large for the model is the honest end of the line: there is no older history left

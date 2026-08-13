@@ -1,6 +1,8 @@
 package contextguard
 
 import (
+	"strings"
+
 	"literouter/internal/provider"
 )
 
@@ -30,7 +32,10 @@ const trimNotice = trimMarker + "] Older conversation turns were removed to fit 
 // turn is where the task, the constraints and the file paths were stated — losing it is the
 // most damaging single thing this function can do to answer quality, and keeping it costs
 // nothing. So the middle goes first: oldest-but-one, forward.
-func TrimOldestTurns(request provider.Request, budget int) (provider.Request, bool) {
+// TrimOldestTurns drops whole conversation turns until the request fits budget.
+// keep lists substrings that protect a turn from being dropped — the gateway passes
+// the plan-mode markers so trimming cannot erase an "exited plan mode" reminder.
+func TrimOldestTurns(request provider.Request, budget int, keep []string) (provider.Request, bool) {
 	if budget <= 0 || len(request.Messages) == 0 {
 		return request, false
 	}
@@ -40,10 +45,42 @@ func TrimOldestTurns(request provider.Request, budget int) (provider.Request, bo
 	units := summaryUnits(request.Messages)
 	dropped := 0
 	fits := func(candidate provider.Request) bool { return EstimateRequest(candidate) <= budget }
+	protected := func(unit []provider.Message) bool {
+		for _, needle := range keep {
+			for _, message := range unit {
+				for _, block := range message.Content {
+					if strings.Contains(block.Text, needle) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
 
 	// Keep index 0, drop index 1 repeatedly: the middle of the conversation shrinks while
 	// both ends survive. Stops with the opening turn and the latest turn still present.
 	for len(units) > 2 {
+		if protected(units[1]) {
+			// A protected turn must not be dropped; try the next one instead. If every
+			// droppable middle turn is protected, fall through and let the open ends go.
+			moved := false
+			for index := 2; index < len(units)-1; index++ {
+				if !protected(units[index]) {
+					units = append(units[:1], append(append([][]provider.Message{}, units[2:index]...), units[index+1:]...)...)
+					moved = true
+					break
+				}
+			}
+			if !moved {
+				break
+			}
+			dropped++
+			if candidate := trimmedRequest(request, units, dropped); fits(candidate) {
+				return candidate, true
+			}
+			continue
+		}
 		units = append(units[:1], units[2:]...)
 		dropped++
 		if candidate := trimmedRequest(request, units, dropped); fits(candidate) {
@@ -52,7 +89,8 @@ func TrimOldestTurns(request provider.Request, budget int) (provider.Request, bo
 	}
 	// The opening turn plus the latest one is still too large, so the opening turn has to
 	// go too. Being servable beats being well-grounded; a rejected turn is worth nothing.
-	for len(units) > 1 {
+	// Protected opening turns are skipped the same way.
+	for len(units) > 1 && !protected(units[0]) {
 		units = units[1:]
 		dropped++
 		if candidate := trimmedRequest(request, units, dropped); fits(candidate) {

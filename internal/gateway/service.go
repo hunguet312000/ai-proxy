@@ -549,6 +549,10 @@ func (s *Service) activeContextPolicy() contextguard.Policy {
 	if store := s.toolStore; store != nil {
 		policy.StoreResult = store.Put
 	}
+	// Plan-mode markers are protected from trimming: a turn that contains the "exited
+	// plan mode" reminder must survive a trim, or the gateway would never learn the
+	// session left plan mode and would keep routing every turn to the plan model.
+	policy.KeepContaining = append(policy.KeepContaining, planEnteredMarker, planActiveMarker, planExitedMarker)
 	return policy
 }
 
@@ -1303,7 +1307,7 @@ func (s *Service) trimStage(request provider.Request, limits contextguard.Limits
 // rejection ends the turn and leaves the caller with nothing to continue from.
 func (s *Service) trimToBudget(request provider.Request, limits contextguard.Limits, policy contextguard.Policy) (provider.Request, error) {
 	budget := contextguard.HardBudget(request, limits, policy)
-	trimmed, ok := contextguard.TrimOldestTurns(request, budget)
+	trimmed, ok := contextguard.TrimOldestTurns(request, budget, policy.KeepContaining)
 	if !ok {
 		return provider.Request{}, contextguard.ErrBudgetExceeded
 	}

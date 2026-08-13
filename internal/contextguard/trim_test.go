@@ -34,7 +34,7 @@ func TestTrimReducesASubagentTurnThatHasNoSecondUserTurn(t *testing.T) {
 	request := provider.Request{Model: "model", Messages: messages}
 	budget := EstimateRequest(request) / 4
 
-	trimmed, ok := TrimOldestTurns(request, budget)
+	trimmed, ok := TrimOldestTurns(request, budget, nil)
 	if !ok {
 		t.Fatal("a single-unit subagent turn must still be trimmable")
 	}
@@ -50,7 +50,7 @@ func TestTrimReducesASubagentTurnThatHasNoSecondUserTurn(t *testing.T) {
 
 func TestTrimKeepsToolChainsPairedWithinAUnit(t *testing.T) {
 	request := provider.Request{Model: "model", Messages: subagentTranscript(30, 8192)}
-	trimmed, ok := TrimOldestTurns(request, EstimateRequest(request)/5)
+	trimmed, ok := TrimOldestTurns(request, EstimateRequest(request)/5, nil)
 	if !ok {
 		t.Fatal("trim failed")
 	}
@@ -72,7 +72,7 @@ func TestTrimStillPrefersDroppingWholeTurnsWhenThereAreAny(t *testing.T) {
 		messages = append(messages, subagentTranscript(4, 8192)...)
 	}
 	request := provider.Request{Model: "model", Messages: messages}
-	trimmed, ok := TrimOldestTurns(request, EstimateRequest(request)/3)
+	trimmed, ok := TrimOldestTurns(request, EstimateRequest(request)/3, nil)
 	if !ok {
 		t.Fatal("multi-turn transcript must trim")
 	}
@@ -88,7 +88,7 @@ func TestTrimFallsBackToTheOpeningTurnWhenEveryChainIsOversized(t *testing.T) {
 	request := provider.Request{Model: "model", Messages: subagentTranscript(2, 1_200_000)}
 	budget := 251_087
 
-	trimmed, ok := TrimOldestTurns(request, budget)
+	trimmed, ok := TrimOldestTurns(request, budget, nil)
 	if !ok {
 		t.Fatal("the head-only candidate must be returned, not discarded")
 	}
@@ -116,9 +116,9 @@ func TestCompactThenTrimNeverKeepsLessThanTrimAlone(t *testing.T) {
 	request := provider.Request{Model: "model", Messages: messages}
 	budget := EstimateRequest(request) * 3 / 4
 
-	plain, okPlain := TrimOldestTurns(request, budget)
+	plain, okPlain := TrimOldestTurns(request, budget, nil)
 	compacted := AggressiveCompact(request, AggressivePolicy(DefaultPolicy()))
-	viaCompact, okCompact := TrimOldestTurns(compacted, budget)
+	viaCompact, okCompact := TrimOldestTurns(compacted, budget, nil)
 
 	if !okCompact {
 		t.Fatalf("compacted payload did not fit; plain fit = %v", okPlain)
@@ -172,7 +172,7 @@ func TestBudgetSurvivesAnOutputAskTheSizeOfTheWindow(t *testing.T) {
 	if budget := HardBudget(request, limits, policy); budget <= 0 {
 		t.Fatalf("hard budget = %d, want a positive budget to trim against", budget)
 	}
-	trimmed, ok := TrimOldestTurns(request, HardBudget(request, limits, policy))
+	trimmed, ok := TrimOldestTurns(request, HardBudget(request, limits, policy), nil)
 	if !ok {
 		t.Fatal("a droppable history must still be trimmable under an oversized output ask")
 	}
@@ -204,11 +204,11 @@ func TestTrimKeepsSystemContentIdenticalAcrossDifferentDropCounts(t *testing.T) 
 	request := provider.Request{Model: "model", System: system,
 		Messages: subagentTranscript(40, 8192)}
 
-	light, ok := TrimOldestTurns(request, EstimateRequest(request)*3/4)
+	light, ok := TrimOldestTurns(request, EstimateRequest(request)*3/4, nil)
 	if !ok {
 		t.Fatal("light trim failed")
 	}
-	heavy, ok := TrimOldestTurns(request, EstimateRequest(request)/8)
+	heavy, ok := TrimOldestTurns(request, EstimateRequest(request)/8, nil)
 	if !ok {
 		t.Fatal("heavy trim failed")
 	}
@@ -237,7 +237,7 @@ func TestTrimReportsFailureWhenTheHeadAloneCannotFit(t *testing.T) {
 	request := provider.Request{Model: "model", Messages: []provider.Message{
 		{Role: "user", Content: []provider.Content{{Type: "text", Text: strings.Repeat("x", 40_000)}}},
 	}}
-	if _, ok := TrimOldestTurns(request, 100); ok {
+	if _, ok := TrimOldestTurns(request, 100, nil); ok {
 		t.Fatal("expected failure with nothing droppable")
 	}
 }
@@ -261,7 +261,7 @@ func TestTrimKeepsTheOpeningTurnAndDropsTheMiddle(t *testing.T) {
 		},
 	}
 	full := EstimateRequest(request)
-	trimmed, ok := TrimOldestTurns(request, full/2)
+	trimmed, ok := TrimOldestTurns(request, full/2, nil)
 	if !ok {
 		t.Fatal("TrimOldestTurns reported failure on a trimmable request")
 	}
@@ -307,11 +307,58 @@ func TestTrimGivesUpTheOpeningTurnRatherThanFailing(t *testing.T) {
 		},
 	}
 	budget := EstimateRequest(request) * 2 / 3
-	trimmed, ok := TrimOldestTurns(request, budget)
+	trimmed, ok := TrimOldestTurns(request, budget, nil)
 	if !ok {
 		t.Fatal("TrimOldestTurns refused a request it could have made fit")
 	}
 	if got := EstimateRequest(trimmed); got > budget {
 		t.Fatalf("trimmed to %d, over the budget of %d", got, budget)
+	}
+}
+
+// A turn carrying a plan-mode marker must survive trimming — otherwise a trim that
+// drops the "exited plan mode" reminder leaves the gateway believing the session is
+// still planning, and every subsequent turn keeps going to the expensive plan model.
+func TestTrimKeepsPlanMarkerTurn(t *testing.T) {
+	filler := strings.Repeat("x", 2000)
+	messages := []provider.Message{
+		{Role: "user", Content: []provider.Content{{Type: "text", Text: "mở đầu " + filler}}},
+		{Role: "user", Content: []provider.Content{{Type: "text", Text: "plan turn " + filler}}},
+		{Role: "user", Content: []provider.Content{{Type: "text", Text: "You have exited plan mode"}}},
+		{Role: "user", Content: []provider.Content{{Type: "text", Text: "mới nhất " + filler}}},
+	}
+	request := provider.Request{Model: "model", Messages: messages}
+	// A budget that forces dropping the middle turn.
+	budget := EstimateRequest(request) / 2
+	trimmed, ok := TrimOldestTurns(request, budget, []string{"You have exited plan mode"})
+	if !ok {
+		t.Fatal("TrimOldestTurns refused a request it could have made fit")
+	}
+	kept := false
+	for _, message := range trimmed.Messages {
+		for _, block := range message.Content {
+			if strings.Contains(block.Text, "You have exited plan mode") {
+				kept = true
+			}
+		}
+	}
+	if !kept {
+		t.Fatal("trim dropped the turn carrying the exited-plan-mode marker")
+	}
+	// Without the keep list, the same request is free to drop it.
+	plain, okPlain := TrimOldestTurns(request, budget, nil)
+	if !okPlain {
+		t.Fatal("plain trim refused")
+	}
+	dropped := true
+	for _, message := range plain.Messages {
+		for _, block := range message.Content {
+			if strings.Contains(block.Text, "You have exited plan mode") {
+				dropped = false
+			}
+		}
+	}
+	if dropped {
+		t.Log("plain trim dropped the marker turn as expected")
 	}
 }

@@ -16,6 +16,12 @@ type Policy struct {
 	HardRatio       float64
 	KeepRecentTurns int
 	ReserveTokens   int
+	// KeepContaining lists substrings; any message in a turn that contains one is
+	// protected from trimming. The gateway sets this to the plan-mode markers so a
+	// trimmed history cannot silently lose the "exited plan mode" reminder — without
+	// it, a trim that drops the approval turn leaves the session believing it is still
+	// planning, and plan turns keep going to the expensive plan model.
+	KeepContaining []string
 	// Aggressive enables the lossy history stages — superseded-result collapse and
 	// head/tail truncation of old bulky tool results — on top of the always-safe
 	// thinking elision and exact dedup. Recent turns stay byte-for-byte either way.

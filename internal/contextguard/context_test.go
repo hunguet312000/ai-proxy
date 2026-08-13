@@ -455,7 +455,7 @@ func TestTrimOldestTurnsKeepsRecentTurnAndToolChain(t *testing.T) {
 		{Role: "user", Content: []provider.Content{{Type: "tool_result", ToolUseID: "new", Text: "fresh evidence"}}},
 	}
 	request := provider.Request{Model: "model", Messages: messages}
-	trimmed, ok := TrimOldestTurns(request, 200)
+	trimmed, ok := TrimOldestTurns(request, 200, nil)
 	if !ok {
 		t.Fatalf("trim failed: %d tokens", EstimateRequest(trimmed))
 	}
