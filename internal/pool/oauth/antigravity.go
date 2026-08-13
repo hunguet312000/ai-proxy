@@ -137,14 +137,13 @@ func (p *AntigravityProvider) loadProject(ctx context.Context, accessToken strin
 	if projectID := antigravityProjectID(result.Project); projectID != "" {
 		return projectID, nil
 	}
-	// No project from loadCodeAssist: fall back to onboarding with a tier. 9router uses
-	// "legacy-tier" when no default tier is advertised; keep that fallback instead of
-	// failing. And if onboarding completes without a project, the connection still works —
-	// the project id is metadata, not a prerequisite — so log and continue rather than
-	// rejecting the account.
+	// No project from loadCodeAssist: fall back to onboarding with a tier. 9router always
+	// uses "legacy-tier" — the tier advertised in allowedTiers ("standard-tier" on this
+	// account) completes onboarding without ever creating a project, while legacy-tier
+	// does. Trust 9router's choice over the advertised one.
 	tierID := "legacy-tier"
 	if advertised := antigravityTierID(result.AllowedTiers); advertised != "" {
-		tierID = advertised
+		slog.Debug("antigravity advertised tier ignored", "advertised", advertised, "using", tierID)
 	}
 	for attempt := 0; attempt < 5; attempt++ {
 		project, done, err := p.onboardUser(ctx, accessToken, tierID)
@@ -183,6 +182,7 @@ func (p *AntigravityProvider) loadCodeAssist(ctx context.Context, accessToken st
 	err := p.antigravityJSON(ctx, accessToken, p.loadCodeAssistURL, map[string]any{
 		"metadata": antigravityMetadata(), "mode": 1,
 	}, &result, "load Code Assist")
+	slog.Debug("antigravity loadCodeAssist response", "project", string(result.Project), "tiers", result.AllowedTiers, "err", err)
 	return result, err
 }
 
