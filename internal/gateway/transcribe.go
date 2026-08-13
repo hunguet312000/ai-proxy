@@ -69,9 +69,14 @@ func (c *transcriptionCache) put(hash, text string) {
 // text rendering of the image the text-only task model can act on. The output
 // replaces the image in the prompt, so it must carry the picture's information,
 // not describe the picture.
-const transcriptionInstruction = "Describe everything visible in this image as dense text for a text-only model that " +
-	"will act on it. Include every label, path, error message, diagram label, number, and layout detail " +
-	"you can read. Do not comment on the image; transcribe its content."
+const transcriptionInstruction = "Transcribe this image into dense plain text for a text-only model that will act on it. " +
+	"Return ONLY the transcription — no preamble, no commentary, no reasoning, no thinking. Include every label, " +
+	"path, error message, number, and layout detail you can read."
+
+// transcribedPrefix marks a transcription so the text-only model reads it as a
+// vision model's description of an attached image, not as words the user said.
+const transcribedPrefix = "[transcribed from image: "
+const transcribedSuffix = "]"
 
 // transcribeImages replaces every image in request with a text block produced by
 // the vision model (ImageModel), so a text-only serving model can read the picture.
@@ -123,7 +128,7 @@ func (s *Service) transcribeImages(ctx context.Context, request translator.Anthr
 					continue
 				}
 				ensure()
-				content[blockIndex] = translator.AnthropicContent{Type: "text", Text: text}
+				content[blockIndex] = translator.AnthropicContent{Type: "text", Text: transcribedPrefix + text + transcribedSuffix}
 				transcribed++
 				continue
 			}
@@ -145,7 +150,7 @@ func (s *Service) transcribeImages(ctx context.Context, request translator.Anthr
 					transcribed++
 					continue
 				}
-				replaced[at] = map[string]any{"type": "text", "text": text}
+				replaced[at] = map[string]any{"type": "text", "text": transcribedPrefix + text + transcribedSuffix}
 				changed = true
 				transcribed++
 			}
@@ -224,7 +229,7 @@ func (s *Service) transcribeSystem(ctx context.Context, visionModel string, syst
 			changed = true
 			continue
 		}
-		cleaned[index] = translator.AnthropicContent{Type: "text", Text: text}
+		cleaned[index] = translator.AnthropicContent{Type: "text", Text: transcribedPrefix + text + transcribedSuffix}
 		transcribed++
 		changed = true
 	}
@@ -240,7 +245,8 @@ func (s *Service) transcribeSystem(ctx context.Context, visionModel string, syst
 func (s *Service) callVisionModel(ctx context.Context, visionModel string, image translator.AnthropicContent) (string, error) {
 	request := provider.Request{
 		Model:     visionModel,
-		MaxTokens: 1024,
+		MaxTokens: 2048,
+		Effort:    "low",
 		Messages: []provider.Message{{
 			Role: "user",
 			Content: []provider.Content{
