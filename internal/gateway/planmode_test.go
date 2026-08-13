@@ -236,3 +236,28 @@ func TestPlanModelIsSafeUnderConcurrentUse(t *testing.T) {
 	}
 	group.Wait()
 }
+
+// A plan-mode turn whose last user message is a tool_result is the agent mid tool-loop
+// (reading, searching, running commands) — it must route to the cheap default model, not
+// the expensive plan model. Only a fresh instruction (last message is text) earns plan.
+func TestPlanModeModelRoutesToolLoopToDefault(t *testing.T) {
+	service := New(Options{PlanModel: "strong"})
+	// Tool-loop turn: plan active marker in history, last user message is a tool_result.
+	toolLoop := translator.AnthropicRequest{Model: "cheap", Messages: []translator.AnthropicMessage{
+		userText(planEnteredMarker),
+		{Role: "user", Content: []translator.AnthropicContent{{Type: "tool_result", ToolUseID: "t1", Text: "output"}}},
+	}}
+	if model, ok := service.planModeModel(toolLoop); ok {
+		t.Fatalf("tool-loop turn routed to %q, want default (no override)", model)
+	}
+	// Fresh-instruction turn: same history plus a new text user message → plan model.
+	analysis := translator.AnthropicRequest{Model: "cheap", Messages: []translator.AnthropicMessage{
+		userText(planEnteredMarker),
+		{Role: "user", Content: []translator.AnthropicContent{{Type: "tool_result", ToolUseID: "t1", Text: "output"}}},
+		{Role: "user", Content: []translator.AnthropicContent{{Type: "text", Text: "what is the plan?"}}},
+	}}
+	model, ok := service.planModeModel(analysis)
+	if !ok || model != "strong" {
+		t.Fatalf("analysis turn = %q, %v; want strong, true", model, ok)
+	}
+}

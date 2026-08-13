@@ -193,7 +193,34 @@ func (s *Service) planModeModel(request translator.AnthropicRequest) (string, bo
 	if !active {
 		return "", false
 	}
+	// A turn that follows a tool_result is the agent continuing its tool loop — reading,
+	// searching, running commands — not the moment it thinks about the answer. Route those
+	// to the cheap default model; only a fresh instruction (last message is text, not a tool
+	// result) earns the expensive plan model. Plan mode decides the *task*, not every step
+	// of gathering context for it.
+	if lastUserMessageIsToolResult(request) {
+		slog.Debug("plan turn routed to the default model", "evidence", evidence)
+		return "", false
+	}
 	return planModel, true
+}
+
+// lastUserMessageIsToolResult reports whether the last user message in the transcript
+// is (part of) a tool result — the agent responding to a tool, mid tool-loop.
+func lastUserMessageIsToolResult(request translator.AnthropicRequest) bool {
+	for index := len(request.Messages) - 1; index >= 0; index-- {
+		message := request.Messages[index]
+		if message.Role != "user" {
+			continue
+		}
+		for _, block := range message.Content {
+			if block.Type == "tool_result" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // PlanModel reports the model plan-mode turns are routed to, or empty when the
