@@ -653,7 +653,7 @@ func pct64(part, total int64) int {
 // only thing standing between the setting and a promise the proxy cannot keep.
 func providerHonoursEffort(provider string) bool {
 	switch normalizeProviderID(provider) {
-	case "codex", "cx", "openai":
+	case "codex", "cx", "openai", "opencode":
 		return true
 	default:
 		return false

@@ -548,3 +548,36 @@ func TestToOpenAIRequestKeepsThinkingAsReasoningContent(t *testing.T) {
 		t.Fatalf("Content = %q, want final answer", got)
 	}
 }
+
+// The reasoning_effort a routing decision sets must reach an OpenAI-compatible upstream
+// (opencode, custom providers) as reasoning_effort, not be dropped by a json:"-" tag.
+func TestToOpenAIRequestCarriesReasoningEffort(t *testing.T) {
+	request := provider.Request{Model: "model", Effort: "max",
+		Messages: []provider.Message{{Role: "user", Content: []provider.Content{{Type: "text", Text: "hi"}}}}}
+	upstream, err := ToOpenAIRequest(request)
+	if err != nil {
+		t.Fatalf("ToOpenAIRequest() = %v", err)
+	}
+	if upstream.ReasoningEffort != "max" {
+		t.Fatalf("ReasoningEffort = %q, want max", upstream.ReasoningEffort)
+	}
+	if upstream.Effort != "max" {
+		t.Fatalf("Effort = %q, want max (internal routing field kept)", upstream.Effort)
+	}
+	encoded, err := json.Marshal(upstream)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"reasoning_effort":"max"`) {
+		t.Fatalf("reasoning_effort not in serialized body: %s", encoded)
+	}
+	// An empty effort must not emit the field.
+	plain := provider.Request{Model: "model", Messages: []provider.Message{{Role: "user", Content: []provider.Content{{Type: "text", Text: "hi"}}}}}
+	upstreamPlain, err := ToOpenAIRequest(plain)
+	if err != nil {
+		t.Fatalf("ToOpenAIRequest() = %v", err)
+	}
+	if upstreamPlain.ReasoningEffort != "" {
+		t.Fatalf("ReasoningEffort = %q, want empty when no effort", upstreamPlain.ReasoningEffort)
+	}
+}

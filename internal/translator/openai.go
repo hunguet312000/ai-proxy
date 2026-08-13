@@ -29,6 +29,11 @@ type OpenAIRequest struct {
 	User                string               `json:"user,omitempty"`
 	ParallelToolCalls   *bool                `json:"parallel_tool_calls,omitempty"`
 	Effort              string               `json:"-"`
+	// ReasoningEffort is the reasoning_effort sent to OpenAI-compatible upstreams
+	// (opencode, FPT AI, any custom provider that supports thinking mode). It is separate
+	// from Effort, which is the internal routing effort; serializing Effort directly would
+	// break the codex/OAuth paths that read it off the struct. Set in ToOpenAIRequest.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type OpenAIStreamOptions struct {
@@ -152,6 +157,7 @@ func ToOpenAIRequest(request provider.Request) (OpenAIRequest, error) {
 		PresencePenalty: request.PresencePenalty, FrequencyPenalty: request.FrequencyPenalty, User: request.User,
 		MaxTokens: request.MaxTokens, MaxCompletionTokens: request.MaxCompletionTokens, Stream: request.Stream,
 		ParallelToolCalls: request.ParallelToolCalls, Effort: request.Effort,
+		ReasoningEffort: request.Effort,
 	}
 	if request.Stream {
 		result.StreamOptions = &OpenAIStreamOptions{IncludeUsage: true}
