@@ -305,7 +305,13 @@ func toOpenAIMessage(message provider.Message, toolNames map[string]string) ([]O
 	for _, block := range message.Content {
 		switch block.Type {
 		case "thinking", "redacted_thinking":
-			// OpenAI-compatible chat APIs do not accept Anthropic reasoning blocks.
+			// Some OpenAI-compatible thinking-mode upstreams (opencode/Console Go) require
+			// the assistant's reasoning_content to be passed back verbatim when its history
+			// is re-sent; dropping it yields 400 "reasoning_content must be passed back".
+			// Accumulate it on the assistant message rather than dropping it.
+			if result.Role == "assistant" && block.Thinking != "" {
+				result.Reasoning += block.Thinking
+			}
 			continue
 		case "tool_use":
 			arguments := string(block.Input)

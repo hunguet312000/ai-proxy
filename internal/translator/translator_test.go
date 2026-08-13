@@ -518,3 +518,33 @@ func TestFromOpenAIResponseDropsReasoningWhenContentExists(t *testing.T) {
 		t.Fatalf("content not surfaced, reasoning leaked: %+v", result.Content)
 	}
 }
+
+// A thinking-mode upstream requires the assistant's reasoning_content to be passed back
+// in history. An Anthropic thinking block must become reasoning_content on the OpenAI
+// assistant message instead of being dropped.
+func TestToOpenAIRequestKeepsThinkingAsReasoningContent(t *testing.T) {
+	request := provider.Request{
+		Model: "model",
+		Messages: []provider.Message{{
+			Role: "assistant",
+			Content: []provider.Content{
+				{Type: "thinking", Thinking: "internal deliberation"},
+				{Type: "text", Text: "final answer"},
+			},
+		}},
+	}
+	upstream, err := ToOpenAIRequest(request)
+	if err != nil {
+		t.Fatalf("ToOpenAIRequest() = %v", err)
+	}
+	if len(upstream.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(upstream.Messages))
+	}
+	msg := upstream.Messages[0]
+	if msg.Reasoning != "internal deliberation" {
+		t.Fatalf("Reasoning = %q, want internal deliberation", msg.Reasoning)
+	}
+	if got, _ := msg.Content.(string); got != "final answer" {
+		t.Fatalf("Content = %q, want final answer", got)
+	}
+}
