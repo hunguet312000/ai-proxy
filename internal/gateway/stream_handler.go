@@ -566,11 +566,13 @@ func (s *anthropicStreamState) sendTerminal(c echo.Context, reason string) error
 		return nil
 	}
 	if s.nextIndex == 0 && len(s.toolOrder) == 0 {
-		// A thinking model that never produced content (GLM, DeepSeek) finishes having
-		// emitted only reasoning. Treating that as empty would retry and fall back to
-		// another model for a question the upstream actually answered with its reasoning.
-		// Emit the buffered reasoning as the answer instead.
-		if s.reasoningBuf != "" {
+		// A thinking model that never produced content (GLM, DeepSeek) can finish having
+		// emitted only reasoning. With finish_reason=stop the reasoning IS the model's
+		// answer (some models emit no final content at all) — emit it rather than retrying
+		// into the fallback. With finish_reason=length the model ran out of tokens mid-
+		// reasoning and was cut off; its deliberation is not an answer, so treat that as
+		// empty.
+		if s.reasoningBuf != "" && (reason == "stop" || reason == "end_turn") {
 			if err := s.ensureStarted(c); err != nil {
 				return err
 			}

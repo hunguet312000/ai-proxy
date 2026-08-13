@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -69,9 +70,12 @@ func (c *transcriptionCache) put(hash, text string) {
 // text rendering of the image the text-only task model can act on. The output
 // replaces the image in the prompt, so it must carry the picture's information,
 // not describe the picture.
-const transcriptionInstruction = "Transcribe this image into dense plain text for a text-only model that will act on it. " +
-	"Return ONLY the transcription — no preamble, no commentary, no reasoning, no thinking. Include every label, " +
-	"path, error message, number, and layout detail you can read."
+const transcriptionInstruction = "Transcribe this image completely and exactly for a text-only model that must act on it " +
+	"without ever seeing the image. Preserve every visible string verbatim — labels, values, paths, ids, numbers, " +
+	"error messages, button text, headers, code — and keep the layout structure: emit one \"label: value\" pair per " +
+	"line, group related fields, and note the position of anything that has spatial meaning (top, left, right, column). " +
+	"Do not summarize, do not omit anything you can read, do not guess missing characters, and do not add commentary. " +
+	"Return ONLY the transcription."
 
 // transcribedPrefix marks a transcription so the text-only model reads it as a
 // vision model's description of an attached image, not as words the user said.
@@ -245,7 +249,7 @@ func (s *Service) transcribeSystem(ctx context.Context, visionModel string, syst
 func (s *Service) callVisionModel(ctx context.Context, visionModel string, image translator.AnthropicContent) (string, error) {
 	request := provider.Request{
 		Model:     visionModel,
-		MaxTokens: 2048,
+		MaxTokens: 4096,
 		Effort:    "low",
 		Messages: []provider.Message{{
 			Role: "user",
@@ -260,7 +264,16 @@ func (s *Service) callVisionModel(ctx context.Context, visionModel string, image
 		return "", err
 	}
 	var lastErr error
+	slog.Info("image transcription call", "vision_model", visionModel, "chain", s.modelChain(visionModel))
 	for _, candidate := range s.modelChain(visionModel) {
+		// A text-only candidate (usually the fallback model) cannot transcribe an image —
+		// it returns "cannot view images" garbage that then replaces the image. Only a
+		// vision-capable model may serve the transcription; skipping keeps the failure
+		// honest so the caller substitutes a placeholder instead of useless text.
+		if route := s.imageRoute.Load(); route != nil && route.isTextOnly(candidate) {
+			lastErr = fmt.Errorf("%s is text-only and cannot transcribe images", candidate)
+			continue
+		}
 		upstreamRequest.Model = candidate
 		var response translator.OpenAIResponse
 		// Mirror the real turn's routing order (service.go complete()): a custom provider

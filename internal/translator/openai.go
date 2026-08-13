@@ -264,10 +264,12 @@ func FromOpenAIResponse(response OpenAIResponse) (provider.Response, error) {
 		return provider.Response{}, err
 	}
 	// A thinking model can finish having produced only reasoning_content and no content.
-	// The reasoning is the answer; without it the response is empty and gets retried into
-	// the fallback. Emit it as text only when there is nothing else (when content exists,
-	// reasoning is internal deliberation and stays dropped).
-	if len(content) == 0 && len(choice.Message.ToolCalls) == 0 && strings.TrimSpace(choice.Message.Reasoning) != "" {
+	// With finish_reason=stop the reasoning is the model's answer; without it the response
+	// is empty and gets retried into the fallback. With finish_reason=length the model ran
+	// out of tokens mid-reasoning — its deliberation is not an answer, so it stays dropped.
+	// Emit reasoning as text only when there is nothing else and the model actually stopped.
+	if len(content) == 0 && len(choice.Message.ToolCalls) == 0 &&
+		choice.FinishReason == "stop" && strings.TrimSpace(choice.Message.Reasoning) != "" {
 		content = append(content, provider.Content{Type: "text", Text: choice.Message.Reasoning})
 	}
 	for _, call := range choice.Message.ToolCalls {

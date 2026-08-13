@@ -488,7 +488,8 @@ func TestFromOpenAIResponseEmitsReasoningOnlyAsText(t *testing.T) {
 	response := OpenAIResponse{
 		Model: "GLM-5.2",
 		Choices: []OpenAIChoice{{
-			Message: OpenAIMessage{Role: "assistant", Reasoning: "thinking through the answer"},
+			Message:      OpenAIMessage{Role: "assistant", Reasoning: "thinking through the answer"},
+			FinishReason: "stop",
 		}},
 		Usage: OpenAIUsage{PromptTokens: 10, CompletionTokens: 20},
 	}
@@ -499,6 +500,25 @@ func TestFromOpenAIResponseEmitsReasoningOnlyAsText(t *testing.T) {
 	if len(result.Content) != 1 || result.Content[0].Type != "text" ||
 		!strings.Contains(result.Content[0].Text, "thinking through the answer") {
 		t.Fatalf("reasoning-only response not surfaced as text: %+v", result.Content)
+	}
+}
+
+// A model cut off mid-reasoning (finish_reason=length) has no answer — its deliberation
+// must not leak into the content the user reads.
+func TestFromOpenAIResponseDropsReasoningOnLength(t *testing.T) {
+	response := OpenAIResponse{
+		Model: "GLM-5.2",
+		Choices: []OpenAIChoice{{
+			Message:      OpenAIMessage{Role: "assistant", Reasoning: "thinking cut off"},
+			FinishReason: "length",
+		}},
+	}
+	result, err := FromOpenAIResponse(response)
+	if err != nil {
+		t.Fatalf("FromOpenAIResponse() = %v", err)
+	}
+	if len(result.Content) != 0 {
+		t.Fatalf("length-truncated reasoning leaked as content: %+v", result.Content)
 	}
 }
 
