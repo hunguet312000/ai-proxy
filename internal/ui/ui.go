@@ -967,7 +967,9 @@ func computeUsageLive(summary storage.UsageSummary) UsageLive {
 	if age > usageLiveWindow || live.Last == "" {
 		return live
 	}
-	// Only the latest provider path is hot.
+	// Only the latest provider path is hot. Custom providers (custom:*) have no dedicated
+	// flag, but their traffic is just as live: the client-side node and the hub must light
+	// up for them too, or the map looks idle while OpenCode/FPT are actively serving.
 	switch live.Last {
 	case "codex":
 		live.Codex = true
@@ -975,8 +977,6 @@ func computeUsageLive(summary storage.UsageSummary) UsageLive {
 		live.Claude = true
 	case "xai":
 		live.XAI = true
-	default:
-		return live
 	}
 	live.Any = true
 	return live

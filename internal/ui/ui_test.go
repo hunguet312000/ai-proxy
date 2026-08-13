@@ -733,6 +733,18 @@ func TestComputeUsageLiveRecentOnly(t *testing.T) {
 	if unused.UsedAny || unused.Any {
 		t.Fatalf("unused = %+v", unused)
 	}
+	// A custom provider (opencode) carrying the newest request must light the client
+	// node too — previously only codex/claude/xai set live.Any, so the map looked idle
+	// while OpenCode was actively serving.
+	custom := computeUsageLive(storage.UsageSummary{
+		Recent: []storage.UsageEvent{{Provider: "custom:opencode", Model: "opencode/deepseek-v4-flash", Timestamp: now.Add(-5 * time.Second)}},
+	})
+	if !custom.Any {
+		t.Fatalf("custom provider traffic should be live: %+v", custom)
+	}
+	if custom.Codex || custom.Claude || custom.XAI {
+		t.Fatalf("custom traffic must not light a named provider flag: %+v", custom)
+	}
 }
 
 func TestBuildUsageMapConfiguredOnly(t *testing.T) {
