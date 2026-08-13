@@ -1294,6 +1294,13 @@ func (s *Service) pageData(c echo.Context, tab string) viewData {
 	if data.Tab == "endpoint" {
 		data.APIKeys = s.loadAPIKeys(c.Request().Context())
 	}
+	// The Antigravity OAuth identity is shown on the providers tab, so it is loaded for
+	// every tab rather than inside the cli block below.
+	if s.settings.GetAntigravityCredentials != nil {
+		if clientID, secret, err := s.settings.GetAntigravityCredentials(c.Request().Context()); err == nil {
+			data.AntigravityClientID, data.AntigravityClientSecret = clientID, secret
+		}
+	}
 	// CLI picker uses full catalog grouped by provider; provider detail only shows that provider's models.
 	if data.Tab == "cli" {
 		data.CatalogModels = s.loadCatalogModels(c.Request().Context(), "")
@@ -1327,11 +1334,6 @@ func (s *Service) pageData(c echo.Context, tab string) viewData {
 		if s.settings.GetBuildImagePrompt != nil {
 			if enabled, buildErr := s.settings.GetBuildImagePrompt(c.Request().Context()); buildErr == nil {
 				data.BuildImagePrompt = enabled
-			}
-		}
-		if s.settings.GetAntigravityCredentials != nil {
-			if clientID, secret, err := s.settings.GetAntigravityCredentials(c.Request().Context()); err == nil {
-				data.AntigravityClientID, data.AntigravityClientSecret = clientID, secret
 			}
 		}
 		if s.settings.GetPlanModel != nil {

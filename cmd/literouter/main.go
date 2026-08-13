@@ -775,6 +775,7 @@ func run() int {
 		},
 		GetAntigravityCredentials: func(ctx context.Context) (string, string, error) {
 			clientID, err := store.GetSetting(ctx, "antigravity.client_id")
+			logger.Info("GetAntigravityCredentials", "client_id", clientID, "err", err)
 			if err != nil {
 				return "", "", nil
 			}

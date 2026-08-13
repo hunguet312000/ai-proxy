@@ -166,6 +166,13 @@
         <h2>Antigravity OAuth</h2>
         <p>The Google OAuth app identity Antigravity login runs with. Stored in LiteRouter's settings — set it once, and the Antigravity connector completes the Google consent flow.</p>
       </div>
+      {{if and .AntigravityClientID .AntigravityClientSecret}}
+      <span class="tag ok" title="Client id and secret are stored in LiteRouter's database">configured</span>
+      {{else if .AntigravityClientID}}
+      <span class="tag" title="Client id stored; secret missing — Google will refuse the token exchange until both are set">client id only</span>
+      {{else}}
+      <span class="tag" title="No Antigravity OAuth credentials stored yet — set them below before connecting">not configured</span>
+      {{end}}
     </div>
     <form class="form-grid" hx-post="/ui/antigravity" hx-target="find .ag-result" hx-swap="innerHTML">
       <label class="model-field-label"><span class="field-hint" title="The OAuth client id of the Google Cloud application that issues Antigravity credentials.">Client ID</span>
