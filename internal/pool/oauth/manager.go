@@ -33,6 +33,10 @@ type Manager struct {
 	servers            map[string]*http.Server
 	listeners          map[*http.Server]net.Listener
 	onAccountConnected func(context.Context, string)
+	// antigravity is the provider instance the OAuth flows use, injected from the host
+	// so the client id/secret configured in LiteRouter's settings reach the authorize
+	// and token requests. A fresh provider created here would have empty credentials.
+	antigravity *AntigravityProvider
 }
 
 func (m *Manager) SetOnAccountConnected(fn func(context.Context, string)) {
@@ -78,8 +82,17 @@ func (m *Manager) StartGrok(ctx context.Context) (StartResult, error) {
 	return m.startBrowser(ctx, provider, []int{provider.PreferredPort()})
 }
 
+// SetAntigravityProvider injects the configured Antigravity provider (client id/secret
+// from LiteRouter's settings), so the OAuth flow uses it instead of a bare one.
+func (m *Manager) SetAntigravityProvider(provider *AntigravityProvider) {
+	m.antigravity = provider
+}
+
 func (m *Manager) StartAntigravity(ctx context.Context) (StartResult, error) {
-	provider := NewAntigravityProvider(nil)
+	provider := m.antigravity
+	if provider == nil {
+		provider = NewAntigravityProvider(nil)
+	}
 	return m.startBrowser(ctx, provider, []int{provider.PreferredPort()})
 }
 
@@ -317,7 +330,11 @@ func (m *Manager) handleCallback(providerName string, server *http.Server, w htt
 	case "grok", "xai":
 		provider = NewGrokProvider(nil)
 	case "antigravity":
-		provider = NewAntigravityProvider(nil)
+		if m.antigravity != nil {
+			provider = m.antigravity
+		} else {
+			provider = NewAntigravityProvider(nil)
+		}
 	default:
 		finish(false, "Unsupported OAuth provider")
 		return
@@ -401,7 +418,7 @@ func (m *Manager) CompleteManualCallback(ctx context.Context, providerName, raw 
 		state = session.State
 	}
 
-	provider, err := browserProvider(providerName)
+	provider, err := m.browserProvider(providerName)
 	if err != nil {
 		return pool.Account{}, err
 	}
@@ -446,7 +463,7 @@ func (m *Manager) CompleteManualCallback(ctx context.Context, providerName, raw 
 	return account, nil
 }
 
-func browserProvider(name string) (OAuthProvider, error) {
+func (m *Manager) browserProvider(name string) (OAuthProvider, error) {
 	switch name {
 	case "codex":
 		return NewCodexProvider(nil), nil
@@ -455,6 +472,9 @@ func browserProvider(name string) (OAuthProvider, error) {
 	case "grok", "xai":
 		return NewGrokProvider(nil), nil
 	case "antigravity":
+		if m.antigravity != nil {
+			return m.antigravity, nil
+		}
 		return NewAntigravityProvider(nil), nil
 	default:
 		return nil, fmt.Errorf("unsupported OAuth provider %q", name)

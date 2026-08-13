@@ -195,6 +195,10 @@ type SettingsHooks struct {
 	// toggle for text-only models.
 	GetBuildImagePrompt func(context.Context) (bool, error)
 	SetBuildImagePrompt func(context.Context, bool) error
+	// GetAntigravityCredentials and SetAntigravityCredentials expose the OAuth app
+	// identity Antigravity login runs with, stored in LiteRouter's own settings.
+	GetAntigravityCredentials func(context.Context) (string, string, error)
+	SetAntigravityCredentials func(context.Context, string, string) error
 	// GetCLIDraft and SetCLIDraft remember the CLI model selection independently of the
 	// host client's config, so Reset can return that client to stock without discarding
 	// what to re-apply.
@@ -333,35 +337,37 @@ type viewData struct {
 	// NeedsSignIn counts accounts the gateway retired because the provider refused their
 	// credentials. Surfaced in the summary line so lost capacity is noticed there rather
 	// than only on the card of whichever account happens to be scrolled into view.
-	NeedsSignIn        int
-	Models             []string
-	BaseURL            string
-	ClaudeSetup        clisetup.Request
-	ClaudeApplied      bool
-	PlanModel          string
-	CompactModel       string
-	FallbackModel      string
-	ContextMode        string
-	SummarizeMode      string
-	LongContextModel   string
-	LongContextPercent int
-	ImageModel         string
-	TextOnlyModels     string
-	BuildImagePrompt   bool
-	Tab                string
-	TabTitle           string
-	TabHeading         string
-	View               string
-	Strategy           string
-	FilterProvider     string
-	FilterStatus       string
-	Sort               string
-	AutoRefresh        bool
-	Usage              storage.UsageSummary
-	UsageRange         string
-	UsageSince         time.Time
-	UsageLive          UsageLive
-	UsageMap           []MapProviderNode
+	NeedsSignIn             int
+	Models                  []string
+	BaseURL                 string
+	ClaudeSetup             clisetup.Request
+	ClaudeApplied           bool
+	PlanModel               string
+	CompactModel            string
+	FallbackModel           string
+	ContextMode             string
+	SummarizeMode           string
+	LongContextModel        string
+	LongContextPercent      int
+	ImageModel              string
+	TextOnlyModels          string
+	BuildImagePrompt        bool
+	AntigravityClientID     string
+	AntigravityClientSecret string
+	Tab                     string
+	TabTitle                string
+	TabHeading              string
+	View                    string
+	Strategy                string
+	FilterProvider          string
+	FilterStatus            string
+	Sort                    string
+	AutoRefresh             bool
+	Usage                   storage.UsageSummary
+	UsageRange              string
+	UsageSince              time.Time
+	UsageLive               UsageLive
+	UsageMap                []MapProviderNode
 }
 
 func newViewData(accounts []AccountView) viewData {
@@ -1164,6 +1170,7 @@ func (s *Service) Register(e *echo.Echo) error {
 	e.DELETE("/ui/accounts/:id", s.deleteHandler)
 	e.POST("/ui/strategy", s.strategyHandler)
 	e.POST("/ui/routing", s.routingHandler)
+	e.POST("/ui/antigravity", s.antigravityHandler)
 	e.GET("/ui/keys", s.keysHandler)
 	e.POST("/ui/keys", s.createKeyHandler)
 	e.POST("/ui/keys/:id/toggle", s.toggleKeyHandler)
@@ -1320,6 +1327,11 @@ func (s *Service) pageData(c echo.Context, tab string) viewData {
 		if s.settings.GetBuildImagePrompt != nil {
 			if enabled, buildErr := s.settings.GetBuildImagePrompt(c.Request().Context()); buildErr == nil {
 				data.BuildImagePrompt = enabled
+			}
+		}
+		if s.settings.GetAntigravityCredentials != nil {
+			if clientID, secret, err := s.settings.GetAntigravityCredentials(c.Request().Context()); err == nil {
+				data.AntigravityClientID, data.AntigravityClientSecret = clientID, secret
 			}
 		}
 		if s.settings.GetPlanModel != nil {
@@ -2528,6 +2540,51 @@ func routingCheckbox(c echo.Context, field string) (bool, bool, error) {
 	// A checkbox that is submitted without the checked attribute carries an empty value;
 	// one that is checked carries "on". Both are a deliberate explicit state.
 	return len(values) > 0 && values[0] != "", true, nil
+}
+
+// antigravityHandler saves the OAuth app identity Antigravity login runs with.
+// Both fields are read together; an empty client_id is allowed (it means the flow is
+// unconfigured and Google will refuse it, which the UI explains).
+func (s *Service) antigravityHandler(c echo.Context) error {
+	if !sameOrigin(c.Request()) {
+		return echo.NewHTTPError(http.StatusForbidden, "cross-origin request denied")
+	}
+	if s.settings.SetAntigravityCredentials == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "antigravity settings unavailable")
+	}
+	clientID, clientIDSet, err := routingModelValue(c, "antigravity_client_id")
+	if err != nil {
+		return err
+	}
+	secret, secretSet, err := routingModelValue(c, "antigravity_client_secret")
+	if err != nil {
+		return err
+	}
+	if !clientIDSet && !secretSet {
+		return echo.NewHTTPError(http.StatusBadRequest, "no antigravity credentials submitted")
+	}
+	// A partial POST must not wipe the half it did not carry.
+	if !clientIDSet {
+		existing, _, getErr := s.settings.GetAntigravityCredentials(c.Request().Context())
+		if getErr != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, getErr.Error())
+		}
+		clientID = existing
+	}
+	if !secretSet {
+		_, existing, getErr := s.settings.GetAntigravityCredentials(c.Request().Context())
+		if getErr != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, getErr.Error())
+		}
+		secret = existing
+	}
+	if err := s.settings.SetAntigravityCredentials(c.Request().Context(), clientID, secret); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
+	c.Response().Header().Set("Cache-Control", "no-store")
+	_, err = c.Response().Write([]byte(`<span class="success">Antigravity credentials saved.</span>`))
+	return err
 }
 
 func (s *Service) deleteHandler(c echo.Context) error {

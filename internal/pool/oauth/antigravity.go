@@ -5,11 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,10 +24,17 @@ const (
 	antigravityCallbackPath      = "/callback"
 )
 
+// antigravityCredentials is the OAuth app identity, supplied from LiteRouter's own
+// settings (never hardcoded, never env): the client id and secret Google requires for
+// the authorize and token endpoints.
+type antigravityCredentials struct {
+	clientID     string
+	clientSecret string
+}
+
 type AntigravityProvider struct {
 	client            *http.Client
-	clientID          string
-	clientSecret      string
+	credentials       atomic.Pointer[antigravityCredentials]
 	redirectURL       string
 	loadCodeAssistURL string
 	onboardUserURL    string
@@ -37,32 +45,54 @@ func NewAntigravityProvider(client *http.Client) *AntigravityProvider {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	clientID := os.Getenv("ANTIGRAVITY_CLIENT_ID")
-	clientSecret := os.Getenv("ANTIGRAVITY_CLIENT_SECRET")
 	return &AntigravityProvider{
-		client: client, clientID: clientID, clientSecret: clientSecret,
+		client:            client,
 		redirectURL:       fmt.Sprintf("http://127.0.0.1:%d%s", antigravityCallbackPort, antigravityCallbackPath),
 		loadCodeAssistURL: antigravityLoadCodeAssistURL, onboardUserURL: antigravityOnboardUserURL, onboardPollDelay: 2 * time.Second,
 	}
+}
+
+// SetCredentials updates the OAuth app identity on a running provider, so the dashboard
+// can change it without a restart. Empty clientID leaves the provider unconfigured —
+// AuthURL then yields the Google "missing client_id" error, which the UI surfaces as
+// "set the Antigravity client id".
+func (p *AntigravityProvider) SetCredentials(clientID, clientSecret string) {
+	p.credentials.Store(&antigravityCredentials{clientID: strings.TrimSpace(clientID), clientSecret: strings.TrimSpace(clientSecret)})
+}
+
+// Credentials reports the current OAuth app identity.
+func (p *AntigravityProvider) Credentials() (string, string) {
+	if creds := p.credentials.Load(); creds != nil {
+		return creds.clientID, creds.clientSecret
+	}
+	return "", ""
 }
 func (p *AntigravityProvider) Name() string         { return "antigravity" }
 func (p *AntigravityProvider) PreferredPort() int   { return antigravityCallbackPort }
 func (p *AntigravityProvider) CallbackPath() string { return antigravityCallbackPath }
 func (p *AntigravityProvider) RedirectURL() string  { return p.redirectURL }
 func (p *AntigravityProvider) WithRedirectURL(redirectURL string) OAuthProvider {
-	cp := *p
-	cp.redirectURL = redirectURL
-	return &cp
+	cp := &AntigravityProvider{
+		client: p.client, redirectURL: redirectURL,
+		loadCodeAssistURL: p.loadCodeAssistURL, onboardUserURL: p.onboardUserURL, onboardPollDelay: p.onboardPollDelay,
+	}
+	// The credentials pointer is shared, not copied: the noCopy in atomic.Pointer makes
+	// copying the struct a vet error, and sharing keeps a later SetCredentials visible.
+	cp.credentials.Store(p.credentials.Load())
+	return cp
 }
 func (p *AntigravityProvider) AuthURL(state, challenge string) string {
-	q := url.Values{"client_id": {p.clientID}, "redirect_uri": {p.redirectURL}, "response_type": {"code"}, "access_type": {"offline"}, "prompt": {"consent"}, "state": {state}, "code_challenge": {challenge}, "code_challenge_method": {"S256"}, "scope": {strings.Join([]string{"https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/cclog", "https://www.googleapis.com/auth/experimentsandconfigs"}, " ")}}
+	clientID, _ := p.Credentials()
+	q := url.Values{"client_id": {clientID}, "redirect_uri": {p.redirectURL}, "response_type": {"code"}, "access_type": {"offline"}, "prompt": {"consent"}, "state": {state}, "code_challenge": {challenge}, "code_challenge_method": {"S256"}, "scope": {strings.Join([]string{"https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/cclog", "https://www.googleapis.com/auth/experimentsandconfigs"}, " ")}}
 	return antigravityAuthorizeURL + "?" + q.Encode()
 }
 func (p *AntigravityProvider) Exchange(ctx context.Context, code, verifier string) (*TokenSet, error) {
-	return p.tokenRequest(ctx, url.Values{"code": {code}, "client_id": {p.clientID}, "client_secret": {p.clientSecret}, "redirect_uri": {p.redirectURL}, "grant_type": {"authorization_code"}, "code_verifier": {verifier}}, "exchange")
+	clientID, clientSecret := p.Credentials()
+	return p.tokenRequest(ctx, url.Values{"code": {code}, "client_id": {clientID}, "client_secret": {clientSecret}, "redirect_uri": {p.redirectURL}, "grant_type": {"authorization_code"}, "code_verifier": {verifier}}, "exchange")
 }
 func (p *AntigravityProvider) Refresh(ctx context.Context, refreshToken string) (*TokenSet, error) {
-	return p.tokenRequest(ctx, url.Values{"refresh_token": {refreshToken}, "client_id": {p.clientID}, "client_secret": {p.clientSecret}, "grant_type": {"refresh_token"}}, "refresh")
+	clientID, clientSecret := p.Credentials()
+	return p.tokenRequest(ctx, url.Values{"refresh_token": {refreshToken}, "client_id": {clientID}, "client_secret": {clientSecret}, "grant_type": {"refresh_token"}}, "refresh")
 }
 func (p *AntigravityProvider) AccountInfo(ctx context.Context, token *TokenSet) (*AccountInfo, error) {
 	if token == nil || token.AccessToken == "" {
@@ -107,12 +137,14 @@ func (p *AntigravityProvider) loadProject(ctx context.Context, accessToken strin
 	if projectID := antigravityProjectID(result.Project); projectID != "" {
 		return projectID, nil
 	}
-	if len(result.AllowedTiers) == 0 {
-		return "", fmt.Errorf("Antigravity Code Assist returned no project or allowed tier")
-	}
-	tierID := antigravityTierID(result.AllowedTiers)
-	if tierID == "" {
-		return "", fmt.Errorf("Antigravity Code Assist returned no usable tier")
+	// No project from loadCodeAssist: fall back to onboarding with a tier. 9router uses
+	// "legacy-tier" when no default tier is advertised; keep that fallback instead of
+	// failing. And if onboarding completes without a project, the connection still works —
+	// the project id is metadata, not a prerequisite — so log and continue rather than
+	// rejecting the account.
+	tierID := "legacy-tier"
+	if advertised := antigravityTierID(result.AllowedTiers); advertised != "" {
+		tierID = advertised
 	}
 	for attempt := 0; attempt < 5; attempt++ {
 		project, done, err := p.onboardUser(ctx, accessToken, tierID)
@@ -123,7 +155,9 @@ func (p *AntigravityProvider) loadProject(ctx context.Context, accessToken strin
 			return project, nil
 		}
 		if done {
-			return "", fmt.Errorf("Antigravity onboarding completed without a project")
+			slog.Warn("antigravity onboarding finished without a project; continuing without one",
+				"tier", tierID)
+			return "", nil
 		}
 		if attempt < 4 {
 			timer := time.NewTimer(p.onboardPollDelay)
@@ -135,7 +169,8 @@ func (p *AntigravityProvider) loadProject(ctx context.Context, accessToken strin
 			}
 		}
 	}
-	return "", fmt.Errorf("Antigravity onboarding did not complete after 5 attempts")
+	slog.Warn("antigravity onboarding did not complete after 5 attempts; continuing without a project")
+	return "", nil
 }
 
 type antigravityCodeAssistResult struct {
@@ -169,6 +204,8 @@ func (p *AntigravityProvider) onboardUser(ctx context.Context, accessToken, tier
 	if project == "" {
 		project = antigravityProjectID(result.Project)
 	}
+	slog.Debug("antigravity onboard response", "done", result.Done,
+		"response_project", string(result.Response.Project), "project", string(result.Project), "resolved", project)
 	return project, result.Done, nil
 }
 

@@ -128,11 +128,20 @@ func run() int {
 	claudeProvider := pooloauth.NewClaudeProvider(nil)
 	grokProvider := pooloauth.NewGrokProvider(nil)
 	antigravityProvider := pooloauth.NewAntigravityProvider(nil)
+	// The OAuth app identity comes from LiteRouter's own settings, configured in the UI —
+	// never hardcoded and never from env. Restore it here so a restart keeps the login.
+	if clientID, storedErr := store.GetSetting(context.Background(), "antigravity.client_id"); storedErr == nil {
+		secret, _ := store.GetSetting(context.Background(), "antigravity.client_secret")
+		antigravityProvider.SetCredentials(clientID, secret)
+	}
 	oauthManager, err := pooloauth.NewManager(store, accountPool, key, logger)
 	if err != nil {
 		logger.Error("initialize OAuth", "error", err)
 		return 1
 	}
+	// The OAuth flows must use the same provider instance that carries the configured
+	// credentials; a fresh one inside the manager would authorize with an empty client id.
+	oauthManager.SetAntigravityProvider(antigravityProvider)
 	credentialManager := pooloauth.NewCredentialManager(store, accountPool, logger, codexProvider, claudeProvider, grokProvider, antigravityProvider)
 	usageService := usage.NewService(store, accountPool, credentialManager)
 	usageService.SetLogger(logger)
@@ -762,6 +771,24 @@ func run() int {
 				return err
 			}
 			gatewayService.SetBuildImagePrompt(enabled)
+			return nil
+		},
+		GetAntigravityCredentials: func(ctx context.Context) (string, string, error) {
+			clientID, err := store.GetSetting(ctx, "antigravity.client_id")
+			if err != nil {
+				return "", "", nil
+			}
+			secret, _ := store.GetSetting(ctx, "antigravity.client_secret")
+			return clientID, secret, nil
+		},
+		SetAntigravityCredentials: func(ctx context.Context, clientID, secret string) error {
+			if err := store.SetSetting(ctx, "antigravity.client_id", clientID); err != nil {
+				return err
+			}
+			if err := store.SetSetting(ctx, "antigravity.client_secret", secret); err != nil {
+				return err
+			}
+			antigravityProvider.SetCredentials(clientID, secret)
 			return nil
 		},
 		ContextCeiling: gatewayService.ClientContextCeiling,

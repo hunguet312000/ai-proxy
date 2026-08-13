@@ -159,6 +159,31 @@
     </div>
     <div id="custom-providers">{{template "custom-providers" .}}</div>
   </section>
+
+  <section class="block">
+    <div class="block-head">
+      <div>
+        <h2>Antigravity OAuth</h2>
+        <p>The Google OAuth app identity Antigravity login runs with. Stored in LiteRouter's settings — set it once, and the Antigravity connector completes the Google consent flow.</p>
+      </div>
+    </div>
+    <form class="form-grid" hx-post="/ui/antigravity" hx-target="find .ag-result" hx-swap="innerHTML">
+      <label class="model-field-label"><span class="field-hint" title="The OAuth client id of the Google Cloud application that issues Antigravity credentials.">Client ID</span>
+        <div class="model-field">
+          <input class="field grow" type="text" name="antigravity_client_id" value="{{.AntigravityClientID}}" placeholder="123456-xxxx.apps.googleusercontent.com" autocomplete="off" spellcheck="false">
+        </div>
+      </label>
+      <label class="model-field-label"><span class="field-hint" title="The OAuth client secret paired with the client id above.">Client secret</span>
+        <div class="model-field">
+          <input class="field grow" type="password" name="antigravity_client_secret" value="{{.AntigravityClientSecret}}" placeholder="GOCSPX-…" autocomplete="off" spellcheck="false">
+        </div>
+      </label>
+      <div class="btn-row">
+        <button class="btn primary sm" type="submit">Save Antigravity credentials</button>
+      </div>
+      <div class="ag-result" aria-live="polite"></div>
+    </form>
+  </section>
 </section>
 {{end}}
 
