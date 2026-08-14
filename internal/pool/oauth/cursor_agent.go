@@ -398,6 +398,10 @@ func cursorAgentToChatStream(body io.ReadCloser, fallbackModel string) io.ReadCl
 			update := decodeAgentServerMessage(payload)
 			switch {
 			case update.Ended:
+				// The real terminal. Measured live: ENDED arrives only after the final
+				// TEXT/TOKENS, and what follows are endless idle heartbeats — reading
+				// past it would hang until the connection drops. The conversation
+				// state blobs arrive just before it, so the cache still commits.
 				return errCursorTurnEnded
 			case update.Idle:
 				// Before any tool call an idle frame is just a keep-alive. After one the
@@ -421,21 +425,11 @@ func cursorAgentToChatStream(body io.ReadCloser, fallbackModel string) io.ReadCl
 			case update.Thinking != "":
 				return emit(map[string]any{"reasoning_content": update.Thinking})
 			case update.Tokens > 0:
+				// A delta of the token counter, emitted after every thinking/text
+				// chunk — not a terminal. Measured live: TOKENS arrives after each
+				// delta and the turn continues for a minute more. Ending here would
+				// cut a long-thinking turn off right after its first thought.
 				outputTokens += update.Tokens
-				// The token frame is the last the service sends in this turn: the
-				// conversation state blobs (agent_type "ide", the turn record) arrive
-				// before it, and the turn is what commit() needs to fold this
-				// exchange into the stored conversation. Everything after the token
-				// frame is an idle heartbeat that carries nothing new, so ending
-				// here keeps the response prompt — and makes the cache's turn
-				// complete instead of waiting on a terminator that never comes.
-				// The one exception is a turn whose output has only ever been the
-				// token count — a blank answer. There commit() would have nothing to
-				// fold, so the turn is left to run until the next real update.
-				if !emittedTool && outputTokens < 32 {
-					break
-				}
-				return errCursorTurnEnded
 			}
 			return nil
 		})
