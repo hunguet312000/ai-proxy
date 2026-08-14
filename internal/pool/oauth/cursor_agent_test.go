@@ -143,6 +143,42 @@ func TestAgentPromptFoldsHistoryIncludingToolResults(t *testing.T) {
 	}
 }
 
+func TestAgentPromptFlagsRepeatedToolCalls(t *testing.T) {
+	// The model called read_file("/tmp/notes.txt") and got "banana". When it calls the
+	// same tool with the same arguments again, the folded prompt must flag it rather
+	// than present it as a fresh call — otherwise the agent re-runs a tool whose
+	// result is already in the conversation (dangerous for write/Bash).
+	prompt := agentPromptFromRequest(translator.OpenAIRequest{Messages: []translator.OpenAIMessage{
+		{Role: "user", Content: "Call read_file, then answer."},
+		{Role: "assistant", ToolCalls: []translator.OpenAIToolCall{{ID: "call-1", Type: "function",
+			Function: translator.OpenAIFunctionCall{Name: "read_file", Arguments: `{"path":"/tmp/notes.txt"}`}}}},
+		{Role: "tool", ToolCallID: "call-1", Content: "banana"},
+		{Role: "assistant", ToolCalls: []translator.OpenAIToolCall{{ID: "call-2", Type: "function",
+			Function: translator.OpenAIFunctionCall{Name: "read_file", Arguments: `{"path":"/tmp/notes.txt"}`}}}},
+	}})
+	if !strings.Contains(prompt, "ALREADY called earlier") {
+		t.Fatalf("repeated call was not flagged:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Tool call: read_file({\"path\":\"/tmp/notes.txt\"})\n\nTool call") {
+		t.Fatalf("repeated call was presented as a fresh call:\n%s", prompt)
+	}
+}
+
+func TestAgentPromptDoesNotFlagDistinctToolCalls(t *testing.T) {
+	// Different arguments are not a loop — the model legitimately wants another read.
+	prompt := agentPromptFromRequest(translator.OpenAIRequest{Messages: []translator.OpenAIMessage{
+		{Role: "user", Content: "Read two files."},
+		{Role: "assistant", ToolCalls: []translator.OpenAIToolCall{{ID: "call-1", Type: "function",
+			Function: translator.OpenAIFunctionCall{Name: "read_file", Arguments: `{"path":"/tmp/a.txt"}`}}}},
+		{Role: "tool", ToolCallID: "call-1", Content: "a"},
+		{Role: "assistant", ToolCalls: []translator.OpenAIToolCall{{ID: "call-2", Type: "function",
+			Function: translator.OpenAIFunctionCall{Name: "read_file", Arguments: `{"path":"/tmp/b.txt"}`}}}},
+	}})
+	if strings.Contains(prompt, "ALREADY called earlier") {
+		t.Fatalf("distinct call was wrongly flagged:\n%s", prompt)
+	}
+}
+
 func TestDecodeAgentToolCallReadsNameAndMapArguments(t *testing.T) {
 	// McpArgs.args is a map<string, Value>: each entry is its own occurrence of field 2,
 	// so a decoder that reads only the first drops every argument but one.

@@ -574,7 +574,19 @@ func cursorOSVersion() string {
 func agentPromptFromRequest(request translator.OpenAIRequest) string {
 	var out strings.Builder
 	seen := make(map[string]struct{})
+	// completed tracks tool calls whose results have arrived, keyed by
+	// name+arguments. When the model calls the exact same tool with the exact same
+	// arguments again, the agent stream has no way to tell the folded text result
+	// from a real tool result, so it loops — flag it instead of silently letting it
+	// re-run a tool the client has already executed (dangerous for non-idempotent
+	// tools like Bash or write).
+	completed := make(map[string]struct{})
+	pendingID := make(map[string]struct {
+		name string
+		args string
+	})
 	duplicates := 0
+	repeats := 0
 	for _, message := range request.Messages {
 		text := strings.TrimSpace(openAIContentText(message.Content))
 		// An assistant turn that only called tools has no text at all; it must still
@@ -599,9 +611,24 @@ func agentPromptFromRequest(request translator.OpenAIRequest) string {
 				if call.Function.Name == "" {
 					continue
 				}
-				out.WriteString("\n\nTool call: " + call.Function.Name + "(" + call.Function.Arguments + ")")
+				args := strings.TrimSpace(call.Function.Arguments)
+				signature := call.Function.Name + "\x00" + args
+				if _, done := completed[signature]; done {
+					repeats++
+					out.WriteString("\n\nNOTE: " + call.Function.Name + "(" + args + ") was ALREADY called earlier and its result is above. Do not call it again — answer directly using that result.")
+					continue
+				}
+				pendingID[call.ID] = struct {
+					name string
+					args string
+				}{call.Function.Name, args}
+				out.WriteString("\n\nTool call: " + call.Function.Name + "(" + args + ")")
 			}
 		case "tool":
+			if sig, ok := pendingID[message.ToolCallID]; ok {
+				completed[sig.name+"\x00"+sig.args] = struct{}{}
+				delete(pendingID, message.ToolCallID)
+			}
 			if _, repeat := seen[text]; repeat {
 				duplicates++
 				continue
@@ -609,6 +636,10 @@ func agentPromptFromRequest(request translator.OpenAIRequest) string {
 			seen[text] = struct{}{}
 			out.WriteString("\n\nTool result: " + text)
 		}
+	}
+	if repeats > 0 {
+		slog.Info("cursor prompt flagged repeated tool calls", "repeated_calls", repeats,
+			"messages", len(request.Messages))
 	}
 	if duplicates > 0 {
 		slog.Info("cursor prompt deduplicated repeated tool results", "duplicate_results", duplicates,
