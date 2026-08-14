@@ -112,6 +112,45 @@ func TestOneRefusalIsNotEnoughToRuleASizeOut(t *testing.T) {
 	}
 }
 
+func TestNonContextProviderErrorDoesNotBoundOrChargeTheSearch(t *testing.T) {
+	upstream := &probeErrorUpstream{err: &provider.ProviderError{
+		Provider: "cursor", StatusCode: http.StatusBadRequest, Code: "ERROR_RATE_LIMITED_CHANGEABLE",
+		Message: "You've hit your usage limit: Get Cursor Pro for more Agent usage",
+	}}
+	service := New(Options{OAuthInference: upstream, ContextWindow: func(context.Context, string) (int, error) {
+		return 150_000, nil
+	}})
+
+	probe := service.ProbeContextWindow(context.Background(), "cursor/composer-2.5", 80_000)
+	if probe.Accepted || probe.Refused || probe.Reached {
+		t.Fatalf("probe classified a plan refusal as context evidence: %+v", probe)
+	}
+	if probe.Effective() != 0 || !strings.Contains(probe.Error, "usage limit") {
+		t.Fatalf("probe = %+v, want zero cost and actionable error", probe)
+	}
+
+	result := service.SearchContextWindow(context.Background(), "cursor/composer-2.5", 0, 0)
+	if result.SmallestRefused != 0 || result.Window != 0 || result.TokensSpent != 0 {
+		t.Fatalf("search fabricated context evidence: %+v", result)
+	}
+	if !strings.Contains(result.Error, "usage limit") {
+		t.Fatalf("search error = %q, want usage limit", result.Error)
+	}
+}
+
+type probeErrorUpstream struct{ err error }
+
+func (fake *probeErrorUpstream) DoJSON(context.Context, translator.OpenAIRequest, string) (translator.OpenAIResponse, error) {
+	return translator.OpenAIResponse{}, fake.err
+}
+func (fake *probeErrorUpstream) DoStream(context.Context, translator.OpenAIRequest, string) (io.ReadCloser, error) {
+	return nil, errors.New("unused")
+}
+func (fake *probeErrorUpstream) SupportsAnthropicPassthrough(string) bool { return false }
+func (fake *probeErrorUpstream) DoAnthropicStream(context.Context, []byte, string, string, string) (io.ReadCloser, error) {
+	return nil, errors.New("unused")
+}
+
 // Two refusals at one size is the signal, and the search has to act on it.
 func TestConfirmedRefusalsBoundTheSearch(t *testing.T) {
 	upstream := &sizedUpstream{limit: 0} // refuses everything, twice per size

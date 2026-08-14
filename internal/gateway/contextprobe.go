@@ -41,6 +41,10 @@ type ContextProbe struct {
 	// This is the authoritative number: Tokens is only what the filler was sized for.
 	Reported int  `json:"reported,omitempty"`
 	Accepted bool `json:"accepted"`
+	// Refused distinguishes a genuine context-window rejection from an upstream error that
+	// says nothing about the prompt size. Only a context refusal may move the search ceiling.
+	// A plan/usage-limit response such as Cursor's HTTP 400 must surface as Error instead.
+	Refused bool `json:"refused,omitempty"`
 	// TimedOut separates "the upstream never answered" from "the upstream said no". Only
 	// the second bounds a window; treating the first as a refusal would invent a ceiling.
 	TimedOut bool `json:"timed_out,omitempty"`
@@ -51,10 +55,10 @@ type ContextProbe struct {
 	Started bool `json:"started,omitempty"`
 	// Attempt numbers the retry within one size, since a refusal is probed twice.
 	Attempt int `json:"attempt,omitempty"`
-	// Reached records whether the prompt got as far as the upstream. It is what makes the
-	// reported cost honest: a probe that failed before sending — an unknown model, a
-	// misconfigured provider — spent nothing, and counting its intended size claimed
-	// 628,000 tokens for a search whose every attempt failed in under a second.
+	// Reached records whether this response is evidence that the upstream consumed the
+	// prompt for context measurement. Plan, quota, auth, and model-availability failures
+	// may reach the HTTP endpoint but do not prove prompt tokens were accepted or billed;
+	// keeping them false makes the reported cost honest.
 	Reached  bool   `json:"reached,omitempty"`
 	Error    string `json:"error,omitempty"`
 	Duration string `json:"duration,omitempty"`
@@ -142,11 +146,14 @@ func (s *Service) ProbeContextWindow(ctx context.Context, model string, tokens i
 	probe.Duration = time.Since(start).Round(time.Millisecond).String()
 	defer func() { logProbe(model, probe) }()
 	if err != nil {
-		// An upstream that answers at all — even to refuse — has read the prompt, so the
-		// tokens were sent. A timeout on a large prompt has sent them too. Anything else
-		// failed before the wire.
+		// A provider error is not automatically a context refusal. Cursor, for example,
+		// returns HTTP 400 for plan/usage-limit and model-availability failures; treating
+		// those as a size boundary fabricates a false ceiling in the dashboard.
 		var providerErr *provider.ProviderError
-		probe.Reached = errors.As(err, &providerErr)
+		isProviderError := errors.As(err, &providerErr)
+		isContextError := isProviderError && isUpstreamContextError(providerErr)
+		probe.Reached = isContextError
+		probe.Refused = isContextError
 		// A deadline is not a refusal. Reporting it as one would tell the search that this
 		// size is too large and quietly install a ceiling that nothing measured.
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
@@ -171,7 +178,7 @@ func (s *Service) ProbeContextWindow(ctx context.Context, model string, tokens i
 // reaches for when something looks wrong — leaves the same trail as a full search.
 func logProbe(model string, probe ContextProbe) {
 	slog.Info("context probe", "model", model, "tokens", probe.Tokens,
-		"accepted", probe.Accepted, "timed_out", probe.TimedOut, "reported", probe.Reported,
+		"accepted", probe.Accepted, "refused", probe.Refused, "timed_out", probe.TimedOut, "reported", probe.Reported,
 		"duration", probe.Duration, "error", probe.Error)
 }
 
@@ -344,6 +351,12 @@ func (s *Service) SearchContextWindowStreaming(ctx context.Context, model string
 			result.LargestAccepted = max(result.LargestAccepted, probe.effective())
 			continue
 		}
+		if !probe.Refused {
+			// An auth, plan, quota, model-availability, or transport error says nothing about
+			// the context window. Abort instead of turning it into a false upper bound.
+			result.Error = probe.Error
+			break
+		}
 		high = size
 		if result.SmallestRefused == 0 || size < result.SmallestRefused {
 			result.SmallestRefused = size
@@ -394,10 +407,10 @@ func (s *Service) probeWithConfirmation(ctx context.Context, model string, size 
 	return probe
 }
 
-// effective is the size to credit this probe with: what the upstream counted when it said
+// Effective is the size to credit this probe with: what the upstream counted when it said
 // so, else what the filler was aimed at — and nothing at all when the prompt never left,
 // because a cost that was not paid must not be reported as one.
-func (probe ContextProbe) effective() int {
+func (probe ContextProbe) Effective() int {
 	if probe.Reported > 0 {
 		return probe.Reported
 	}
@@ -406,6 +419,8 @@ func (probe ContextProbe) effective() int {
 	}
 	return probe.Tokens
 }
+
+func (probe ContextProbe) effective() int { return probe.Effective() }
 
 // EstimateProbeCost reports roughly how many input tokens a search will upload, so the
 // dashboard can say what a button press costs before it is pressed.

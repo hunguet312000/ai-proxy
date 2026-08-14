@@ -120,6 +120,7 @@ type ContextProbeStep struct {
 	Tokens   int  `json:"tokens"`
 	Reported int  `json:"reported,omitempty"`
 	Accepted bool `json:"accepted"`
+	Refused  bool `json:"refused,omitempty"`
 	TimedOut bool `json:"timed_out,omitempty"`
 	// Started marks the event sent when an attempt begins, not when it ends. Without it
 	// the dashboard has nothing to show until the first attempt returns, which can be two

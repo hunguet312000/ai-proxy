@@ -450,7 +450,7 @@ func run() int {
 					return
 				}
 				onStep(ui.ContextProbeStep{
-					Tokens: step.Tokens, Reported: step.Reported, Accepted: step.Accepted,
+					Tokens: step.Tokens, Reported: step.Reported, Accepted: step.Accepted, Refused: step.Refused,
 					TimedOut: step.TimedOut, Started: step.Started, Attempt: step.Attempt,
 					Duration: step.Duration, Error: step.Error,
 				})
@@ -464,9 +464,11 @@ func run() int {
 				report(gateway.ContextProbe{Tokens: tokens, Started: true, Attempt: 1})
 				probe := gatewayService.ProbeContextWindow(ctx, id, tokens)
 				report(probe)
-				out.Steps, out.TokensSpent, out.Error = 1, tokens, probe.Error
+				out.Steps, out.TokensSpent, out.Error = 1, probe.Effective(), probe.Error
 				if !probe.Accepted {
-					out.SmallestRefused = tokens
+					if probe.Refused {
+						out.SmallestRefused = tokens
+					}
 					return out, nil
 				}
 				// The upstream's own count, not the size aimed at. They differ — filler

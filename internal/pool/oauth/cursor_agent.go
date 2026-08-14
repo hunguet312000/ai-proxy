@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"literouter/internal/contextguard"
@@ -95,16 +97,33 @@ func encodeAgentModelDetails(model string) []byte {
 	)
 }
 
+func cursorEffortEnabled() bool {
+	enabled, _ := strconv.ParseBool(strings.TrimSpace(os.Getenv("LITEROUTER_CURSOR_EFFORT")))
+	return enabled
+}
+
+func validCursorEffort(effort string) bool {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "medium", "high", "xhigh", "max":
+		return true
+	default:
+		return false
+	}
+}
+
 // encodeAgentRunRequest builds agent.v1.AgentClientMessage carrying an AgentRunRequest.
 // The stream's first frame must be this message; later frames carry blob replies.
 func encodeAgentRunRequest(text, conversationID, messageID, model string, tools []translator.OpenAITool) []byte {
-	return encodeAgentRunRequestWithState(text, conversationID, messageID, model, tools, nil)
+	return encodeAgentRunRequestWithState(text, conversationID, messageID, model, tools, nil, "")
 }
 
 // encodeAgentRunRequestWithState replays a stored ConversationStateStructure so the
 // service rebuilds the history itself instead of receiving it again in the prompt.
 func encodeAgentRunRequestWithState(text, conversationID, messageID, model string,
-	tools []translator.OpenAITool, state []byte) []byte {
+	tools []translator.OpenAITool, state []byte, effort string) []byte {
+	// Cursor's agent schema exposes RequestedModel.parameters as generic id/value pairs.
+	// Forwarding is opt-in because Composer support for the `effort` parameter is not
+	// guaranteed by the private service; older/default behavior remains byte-identical.
 	mode := cursorAgentModeAsk
 	if len(tools) > 0 {
 		mode = cursorAgentModeAgent
@@ -117,12 +136,22 @@ func encodeAgentRunRequestWithState(text, conversationID, messageID, model strin
 	if state == nil {
 		state = []byte{} // no prior turns
 	}
+	requestedModel := protoConcat(protoField(1, protoBytes, model))
+	if effort = strings.ToLower(strings.TrimSpace(effort)); validCursorEffort(effort) && cursorEffortEnabled() {
+		requestedModel = protoConcat(
+			requestedModel,
+			protoField(3, protoBytes, protoConcat(
+				protoField(1, protoBytes, "effort"),
+				protoField(2, protoBytes, effort),
+			)),
+		)
+	}
 	runRequest := protoConcat(
 		protoField(1, protoBytes, state),
 		protoField(2, protoBytes, action),
 		protoField(3, protoBytes, encodeAgentModelDetails(model)),
 		protoField(5, protoBytes, conversationID),
-		protoField(9, protoBytes, protoField(1, protoBytes, model)), // requested_model
+		protoField(9, protoBytes, requestedModel), // requested_model
 	)
 	return connectFrame(protoField(1, protoBytes, runRequest), false)
 }
@@ -329,7 +358,7 @@ func cursorAgentRequestBody(request translator.OpenAIRequest, model string,
 	// the cache exists to produce.
 	sent := contextguard.EstimateText(prompt)
 	return encodeAgentRunRequestWithState(prompt, conversationID, messageID,
-		resolveCursorModel(model), request.Tools, state), conversationID, sent, nil
+		resolveCursorModel(model), request.Tools, state, request.Effort), conversationID, sent, nil
 }
 
 // cursorAgentToChatStream converts the agent frame stream into OpenAI chat chunks.

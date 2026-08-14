@@ -917,6 +917,7 @@ function measureModelContext(modelId, provider, tokens, button, statusEl, chip, 
     var size = formatTokens(step.reported || step.tokens);
     if (step.timed_out) return "· " + size + attempt + " — no answer in " + (step.duration || "?") + ", not a refusal";
     if (step.accepted) return "· " + size + " accepted in " + (step.duration || "?");
+    if (!step.refused) return "· " + formatTokens(step.tokens) + attempt + " — unable to measure in " + (step.duration || "?") + (step.error ? ": " + step.error : "");
     return "· " + formatTokens(step.tokens) + attempt + " refused in " + (step.duration || "?");
   }
 

@@ -73,6 +73,15 @@ func TestCursorLiveProbe(t *testing.T) {
 		t.Run("agent "+model, func(t *testing.T) {
 			t.Logf("%s", probeAgentRun(credentials, model, "Reply with the single word: pong", nil))
 		})
+		for _, effort := range strings.Split(os.Getenv("LITEROUTER_CURSOR_PROBE_EFFORTS"), ",") {
+			effort = strings.TrimSpace(effort)
+			if effort == "" {
+				continue
+			}
+			t.Run("agent-effort "+model+"/"+effort, func(t *testing.T) {
+				t.Logf("%s", probeAgentRunWithEffort(credentials, model, effort))
+			})
+		}
 		t.Run("agent-tools "+model, func(t *testing.T) {
 			tools := []translator.OpenAITool{{
 				Type: "function",
@@ -92,6 +101,14 @@ func TestCursorLiveProbe(t *testing.T) {
 // probeAgentRun opens the bidi Run stream and reports what comes back. The request
 // body stays open, which is what makes it a bidi stream rather than a unary post.
 func probeAgentRun(credentials CursorCredentials, model, prompt string, tools []translator.OpenAITool) string {
+	return probeAgentRunWithEffortAndTools(credentials, model, "", prompt, tools)
+}
+
+func probeAgentRunWithEffort(credentials CursorCredentials, model, effort string) string {
+	return probeAgentRunWithEffortAndTools(credentials, model, effort, "Reply with the single word: pong", nil)
+}
+
+func probeAgentRunWithEffortAndTools(credentials CursorCredentials, model, effort, prompt string, tools []translator.OpenAITool) string {
 	headers, err := cursorHeaders(credentials, false)
 	if err != nil {
 		return "headers: " + err.Error()
@@ -101,6 +118,7 @@ func probeAgentRun(credentials CursorCredentials, model, prompt string, tools []
 		Model:    model,
 		Messages: []translator.OpenAIMessage{{Role: "user", Content: prompt}},
 		Tools:    tools,
+		Effort:   effort,
 	}, model, nil, nil)
 	if err != nil {
 		return "encode: " + err.Error()

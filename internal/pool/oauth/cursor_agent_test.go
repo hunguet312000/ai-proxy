@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -53,6 +54,41 @@ func TestEncodeAgentRunRequestCarriesModelPromptAndMode(t *testing.T) {
 	}
 	if mode := message[4][0].Varint; mode != cursorAgentModeAsk {
 		t.Errorf("mode = %d, want ask (%d) when no tools are declared", mode, cursorAgentModeAsk)
+	}
+}
+
+func TestEncodeAgentRunRequestEffortParameterIsOptIn(t *testing.T) {
+	previous := os.Getenv("LITEROUTER_CURSOR_EFFORT")
+	t.Cleanup(func() { _ = os.Setenv("LITEROUTER_CURSOR_EFFORT", previous) })
+	_ = os.Setenv("LITEROUTER_CURSOR_EFFORT", "true")
+	frame := encodeAgentRunRequestWithState("hello", "c", "m", "composer-2.5", nil, nil, "high")
+	fields := parseProtoFields(parseProtoFields(frame[5:])[1][0].Bytes)
+	requested := parseProtoFields(fields[9][0].Bytes)
+	if got, _ := agentString(requested, 1); got != "composer-2.5" {
+		t.Fatalf("requested model = %q, want composer-2.5", got)
+	}
+	parameters := requested[3]
+	if len(parameters) != 1 {
+		t.Fatalf("parameters = %d, want 1", len(parameters))
+	}
+	parameter := parseProtoFields(parameters[0].Bytes)
+	if id, _ := agentString(parameter, 1); id != "effort" {
+		t.Fatalf("parameter id = %q, want effort", id)
+	}
+	if value, _ := agentString(parameter, 2); value != "high" {
+		t.Fatalf("parameter value = %q, want high", value)
+	}
+}
+
+func TestEncodeAgentRunRequestEffortDisabledKeepsRequestedModelBare(t *testing.T) {
+	previous := os.Getenv("LITEROUTER_CURSOR_EFFORT")
+	t.Cleanup(func() { _ = os.Setenv("LITEROUTER_CURSOR_EFFORT", previous) })
+	_ = os.Setenv("LITEROUTER_CURSOR_EFFORT", "false")
+	frame := encodeAgentRunRequestWithState("hello", "c", "m", "composer-2.5", nil, nil, "high")
+	fields := parseProtoFields(parseProtoFields(frame[5:])[1][0].Bytes)
+	requested := parseProtoFields(fields[9][0].Bytes)
+	if len(requested[3]) != 0 {
+		t.Fatalf("disabled effort emitted %d parameters", len(requested[3]))
 	}
 }
 

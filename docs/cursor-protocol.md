@@ -87,7 +87,7 @@ Check these first. Each is a constant in `cursor_agent.go` or `cursor_cache.go`.
 | 2 | `action` | `ConversationAction{1: user_message_action}` |
 | 3 | `model_details` | `{1: model_id, 3: display_model_id, 4: display_name}` |
 | 5 | `conversation_id` | |
-| 9 | `requested_model` | `{1: model_id}` — must agree with `model_details` |
+| 9 | `requested_model` | `{1: model_id}` — must agree with `model_details`; with `LITEROUTER_CURSOR_EFFORT=true`, LiteRouter may also append field 3 `parameters` entries such as `{1: "effort", 2: "high"}` |
 
 **`agent.v1.McpToolDefinition`** — declaring the caller's tools
 | # | field | note |
@@ -278,8 +278,13 @@ supplies its own estimate of the prompt it actually sent — the delta when a co
 is replayed — tagged `prompt_tokens_estimated`, which keeps the dashboard's `~` marker
 honest. "Estimated" means *the upstream did not report it*, not *the value was zero*.
 
-Effort is **not** sent on this path: the agent request carries no such field. The Models
-tab hides the reasoning-effort control for Cursor for that reason
+Effort is **not** sent on this path by default: the agent request has no dedicated effort
+field. The installed AgentService schema does expose `requested_model.parameters` as
+repeated `{id, value}` pairs, so setting `LITEROUTER_CURSOR_EFFORT=true` makes LiteRouter
+forward its internal effort as `{id: "effort", value: "low|medium|high|xhigh|max"}`.
+Composer acceptance of that private parameter is model- and plan-dependent and is not
+proven by protobuf decoding alone; the Models tab therefore keeps Cursor's reasoning
+effort control hidden until a live Composer validation establishes that it has an effect
 (`providerHonoursEffort`).
 
 ---
