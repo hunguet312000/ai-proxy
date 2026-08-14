@@ -1169,7 +1169,7 @@ func (s *Service) prepareContextStages(ctx context.Context, request provider.Req
 	if prepared.Compacted {
 		outcome.stage = "compact"
 	}
-	if !prepared.NeedsSummary || skipPreemptiveTrimFor(request.Model) {
+	if !prepared.NeedsSummary || skipPreemptiveTrimFor(request.Model, window) {
 		// A client that believes a larger window than the model has sends every turn
 		// past the soft ratio, and trimming on that belief loses history the upstream
 		// would have taken — the Cursor path measured 45 messages dropped per turn
@@ -1258,8 +1258,18 @@ func (s *Service) prepareContextStages(ctx context.Context, request provider.Req
 // larger window than the model has (the 1M beta on a ~194k model), which puts every
 // turn past the soft ratio — trimming on the estimate then loses history the
 // upstream would have served. The refusal path is the ground truth and still works.
-func skipPreemptiveTrimFor(model string) bool {
-	return providerNameForModel(model) == "cursor"
+//
+// Only cursor models with a large enough window (composer ~194k) skip; the small
+// window grok variants (161k) must still trim, or a long session overflows the
+// window and the upstream hangs instead of answering.
+func skipPreemptiveTrimFor(model string, window int) bool {
+	if providerNameForModel(model) != "cursor" {
+		return false
+	}
+	// Cursor models whose window is at or above the composer floor keep their
+	// history; smaller windows (grok 161k) trim preemptively so a long session
+	// still fits.
+	return window >= 190000
 }
 
 // resolveSummaryModel picks who writes proxy summaries: the explicit configured

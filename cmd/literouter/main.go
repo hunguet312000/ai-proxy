@@ -1126,7 +1126,7 @@ base_url = "http://127.0.0.1:8317/v1"
 wire_api = "responses"
 
 [agents.subagent]
-model = "xai/grok-4.5"`
+model = "opencode/deepseek-v4-flash"`
 
 	var result string
 	if filteredContent == "" {
