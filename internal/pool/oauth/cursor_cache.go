@@ -54,6 +54,9 @@ type cursorConversation struct {
 	// history fingerprints the client messages already folded into this conversation.
 	// A request whose history is not an extension of this cannot reuse the state.
 	history []string
+	// seenToolCalls persists the tool-call signatures already emitted in this
+	// conversation, so the repeated-call suppression survives across turns.
+	seenToolCalls map[string]struct{}
 	// bytes is the resident size of state plus blobs, kept so eviction can bound memory
 	// rather than conversation count.
 	bytes   int
@@ -257,6 +260,15 @@ type cursorRunSession struct {
 	// root_prompt_messages_json expects.
 	written []blobEntry
 	roots   int
+
+	// seenToolCalls remembers every tool call this conversation has emitted, keyed
+	// by name+arguments. It persists across turns through the conversation object,
+	// so the "survey the pipeline" loop — the agent calling the same tool with the
+	// same arguments on every turn — is suppressed even when it spans turns.
+	seenToolCalls map[string]struct{}
+	// turnBlobSeen marks that the turn blob for this run has been received; the
+	// streaming path waits for it after ENDED before committing.
+	turnBlobSeen bool
 }
 
 type blobEntry struct {
@@ -265,7 +277,14 @@ type blobEntry struct {
 }
 
 func newCursorRunSession(key string, conversation *cursorConversation, writer *io.PipeWriter) *cursorRunSession {
-	return &cursorRunSession{key: key, conversation: conversation, writer: writer}
+	session := &cursorRunSession{key: key, conversation: conversation, writer: writer}
+	if conversation != nil {
+		// Seed the suppression set from what this conversation has already called,
+		// so a tool call that repeated across turns is suppressed on the very first
+		// frame of this turn rather than rediscovered mid-stream.
+		session.seenToolCalls = conversation.seenToolCalls
+	}
+	return session
 }
 
 // promptTokens reports what this run sent upstream. Nil-safe: the offline decoder
@@ -330,12 +349,34 @@ const agentClientKvField = 3 // AgentClientMessage.kv_client_message
 func (s *cursorRunSession) putBlob(id string, data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conversation != nil {
+	// A turn blob is new on every turn and must always be recorded, even when its
+	// id repeats a stored blob: commit() needs the turn record of THIS turn to fold
+	// into the conversation, and skipping it on the id match left written without a
+	// turn — which dropped every continuation. Other blobs (state, roots) are
+	// deduplicated against the conversation store.
+	isTurn := turnBlobID(blobEntry{id: id, data: data}) != nil
+	if isTurn {
+		s.turnBlobSeen = true
+	}
+	if !isTurn && s.conversation != nil {
 		if _, seen := s.conversation.blobs[id]; seen {
 			return
 		}
 	}
+	slog.Debug("cursor blob received", "id", id[:min(16, len(id))], "bytes", len(data),
+		"kind", blobKind(data), "turn", isTurn)
 	s.written = append(s.written, blobEntry{id: id, data: data})
+}
+
+// blobKind names what a blob looks like, for the cache debugging logs.
+func blobKind(data []byte) string {
+	if kind, ok := agentString(parseProtoFields(data), cursorStateAgentTypeField); ok && kind == cursorStateAgentType {
+		return "state"
+	}
+	if strings.HasPrefix(string(data), `{"role":`) {
+		return "root"
+	}
+	return "other"
 }
 
 func (s *cursorRunSession) getBlob(id string) ([]byte, bool) {
@@ -364,6 +405,26 @@ func (s *cursorRunSession) finish() {
 		_ = s.writer.Close()
 	}
 	s.commit(s.pendingHistory)
+}
+
+// turnPending reports whether this session is still waiting for its turn blob —
+// the record commit() needs to fold the turn into the stored conversation.
+func (s *cursorRunSession) turnPending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnBlobSeen {
+		return false
+	}
+	return true
+}
+
+// waitForTurnBlob drains a few more frames from the upstream after ENDED so the
+// kv channel delivers the turn blob, then marks it seen. commit() runs after this
+// in the streaming path, so the turn is no longer lost.
+func (s *cursorRunSession) waitForTurnBlob() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.turnBlobSeen = true
 }
 
 // commit folds the turn the service just produced into the stored conversation, so the
@@ -400,10 +461,18 @@ func (s *cursorRunSession) commit(history []string) {
 		}
 	}
 	if turnID == nil {
-		// Without a turn there is nothing to continue from; the next request falls back
-		// to sending the transcript, which is correct but not cached.
-		cursorConversations.drop(s.key)
-		return
+		// A tool-call turn ends on an idle frame without a turn record — the service
+		// sends state+roots but no turn blob. Continuing from state+roots alone is
+		// still correct (the turn's messages are already folded into roots), so cache
+		// the conversation with what arrived rather than dropping it. Only a turn
+		// with neither state nor roots is un-cacheable.
+		if state == nil && len(roots) == 0 {
+			slog.Debug("cursor turn dropped: no state, roots or turn", "key", s.key != "", "blobs", len(written))
+			cursorConversations.drop(s.key)
+			return
+		}
+		slog.Debug("cursor turn cached without a turn blob", "key", s.key != "", "blobs", len(written),
+			"state", state != nil, "roots", len(roots))
 	}
 	if state == nil {
 		state = conversation.state
@@ -422,10 +491,17 @@ func (s *cursorRunSession) commit(history []string) {
 	for _, id := range roots {
 		parts = append(parts, protoField(cursorStateRootsField, protoBytes, id))
 	}
-	parts = append(parts, protoField(cursorStateTurnsField, protoBytes, turnID))
+	if turnID != nil {
+		parts = append(parts, protoField(cursorStateTurnsField, protoBytes, turnID))
+	}
 
 	conversation.state = protoConcat(parts...)
 	conversation.history = history
+	if len(s.seenToolCalls) > 0 {
+		conversation.seenToolCalls = s.seenToolCalls
+	}
+	slog.Debug("cursor commit persisted", "key", s.key != "", "seen_tools", len(s.seenToolCalls),
+		"stored_seen", len(conversation.seenToolCalls))
 	if conversation.blobs == nil {
 		conversation.blobs = map[string][]byte{}
 	}
@@ -471,4 +547,16 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func blobIDs(blobs []blobEntry) []string {
+	out := make([]string, 0, len(blobs))
+	for _, b := range blobs {
+		id := b.id
+		if len(id) > 16 {
+			id = id[:16]
+		}
+		out = append(out, id)
+	}
+	return out
 }

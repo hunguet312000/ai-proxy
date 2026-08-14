@@ -374,6 +374,22 @@ func cursorAgentToChatStream(body io.ReadCloser, fallbackModel string) io.ReadCl
 		toolIndex := 0
 		emittedTool := false
 		outputTokens := 0
+		// endedAt bounds how many frames are read after ENDED while waiting for the
+		// turn blob: the service sends endless heartbeats after the turn, so the
+		// grace is small and measured.
+		endedFrames := 0
+		// seenToolCalls remembers every tool call this turn emitted, keyed by
+		// name+arguments. A second call with the same signature is the Composer
+		// loop (it re-runs "survey the pipeline" forever), and it is suppressed so
+		// the client never executes the tool twice. Persisted across turns on the
+		// session, so the loop is caught even when it spans turns.
+		var seenToolCalls map[string]struct{}
+		if session != nil {
+			seenToolCalls = session.seenToolCalls
+		}
+		if seenToolCalls == nil {
+			seenToolCalls = map[string]struct{}{}
+		}
 
 		emit := func(delta map[string]any) error {
 			chunk := map[string]any{
@@ -402,6 +418,15 @@ func cursorAgentToChatStream(body io.ReadCloser, fallbackModel string) io.ReadCl
 				// TEXT/TOKENS, and what follows are endless idle heartbeats — reading
 				// past it would hang until the connection drops. The conversation
 				// state blobs arrive just before it, so the cache still commits.
+				//
+				// The turn blob (what commit() needs) can arrive a frame or two after
+				// ENDED on the kv channel, and rushing the commit loses every
+				// continuation. Read on for a few more frames — bounded — until it
+				// lands or the grace is spent.
+				if session != nil && session.turnPending() && endedFrames < cursorTurnBlobGrace {
+					endedFrames++
+					return nil // keep reading; the callback continues the loop
+				}
 				return errCursorTurnEnded
 			case update.Idle:
 				// Before any tool call an idle frame is just a keep-alive. After one the
@@ -412,6 +437,24 @@ func cursorAgentToChatStream(body io.ReadCloser, fallbackModel string) io.ReadCl
 				}
 			case update.ToolCall != nil:
 				call := update.ToolCall
+				signature := call.Name + "\x00" + strings.TrimSpace(call.Arguments)
+				if _, repeat := seenToolCalls[signature]; repeat {
+					// The agent is calling the exact same tool with the exact same
+					// arguments again — the loop that makes Composer re-run "survey
+					// the pipeline" forever. Suppress the call: surface it as text so
+					// the client does not execute the tool a second time.
+					slog.Warn("cursor suppressed repeated tool call", "tool", call.Name, "repeat", len(seenToolCalls))
+					if err := emit(map[string]any{"content": "\n\n[repeated tool call " + call.Name + " suppressed — already called with these arguments. Continue from its result or answer directly.]"}); err != nil {
+						return err
+					}
+					return nil
+				}
+				seenToolCalls[signature] = struct{}{}
+				if session != nil {
+					session.mu.Lock()
+					session.seenToolCalls = seenToolCalls
+					session.mu.Unlock()
+				}
 				if err := emit(map[string]any{"tool_calls": []any{map[string]any{
 					"index": toolIndex, "id": call.ID, "type": "function",
 					"function": map[string]string{"name": call.Name, "arguments": call.Arguments},
@@ -653,3 +696,8 @@ func agentPromptFromRequest(request translator.OpenAIRequest) string {
 func cursorAgentConversationID(prompt string) string {
 	return uuidV5DNS("literouter-agent:" + prompt)
 }
+
+// cursorTurnBlobGrace bounds how many frames are read after ENDED while waiting
+// for the turn blob that commit() needs. The service streams heartbeats forever
+// after the turn, so the wait is small and measured.
+const cursorTurnBlobGrace = 8

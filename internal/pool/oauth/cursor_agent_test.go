@@ -288,6 +288,42 @@ func TestAgentStreamEndsTheTurnWhenAToolCallLeavesItIdle(t *testing.T) {
 	}
 }
 
+func TestAgentStreamSuppressesRepeatedToolCalls(t *testing.T) {
+	// The agent calls the same tool with the same arguments twice — the Composer
+	// loop. The second call must be suppressed and surfaced as text, so the client
+	// never executes the tool twice (dangerous for write/Bash).
+	args := protoConcat(
+		protoField(1, protoBytes, "get_weather"),
+		protoField(2, protoBytes, `{"city":"Hanoi"}`),
+		protoField(3, protoBytes, "tool_1"),
+		protoField(5, protoBytes, "get_weather"),
+	)
+	toolCall := func() []byte {
+		return agentServerFrame(protoField(agentUpdateToolCallStarted, protoBytes, protoConcat(
+			protoField(1, protoBytes, "tool_1"),
+			protoField(agentToolCallField, protoBytes,
+				protoField(agentMcpToolCallField, protoBytes,
+					protoField(agentMcpArgsField, protoBytes, args)))),
+		))
+	}
+	body := bytes.NewBuffer(nil)
+	body.Write(toolCall())
+	body.Write(toolCall())
+	body.Write(agentServerFrame(protoField(agentUpdateTurnEnded, protoBytes, []byte{})))
+
+	out, err := io.ReadAll(cursorAgentToChatStream(io.NopCloser(body), "m"))
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	text := string(out)
+	if !strings.Contains(text, "suppressed") {
+		t.Errorf("repeated tool call was not suppressed:\n%s", text)
+	}
+	if strings.Count(text, `"name":"get_weather"`) > 1 {
+		t.Errorf("tool call was emitted more than once:\n%s", text)
+	}
+}
+
 func TestAgentStreamKeepsRunningThroughIdleFramesBeforeAnyToolCall(t *testing.T) {
 	// A heartbeat before the model has produced anything is just a keep-alive. Ending
 	// there would truncate every slow first token.
