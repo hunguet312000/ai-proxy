@@ -337,8 +337,20 @@ func decodeProtoValue(payload []byte) any {
 // Otherwise the whole transcript is folded into the prompt, which is always correct.
 func cursorAgentRequestBody(request translator.OpenAIRequest, model string,
 	conversation *cursorConversation, pending []translator.OpenAIMessage) ([]byte, string, int, error) {
-	prompt := agentPromptFromRequest(request)
-	conversationID := cursorAgentConversationID(prompt)
+	// A cache miss folds the whole transcript — a long session (500k+ tokens) then
+	// costs a minute of upstream processing before the first token. The model does
+	// not need every old turn to answer the current one, so the fold keeps only the
+	// tail within the model's trim budget (see cursor_trim.go) and marks what was
+	// dropped. The conversation id is derived from the full transcript so two
+	// sessions that start differently still get different ids.
+	fullPrompt := agentPromptFromRequest(request)
+	trimmed := trimCursorFold(request, model)
+	if len(trimmed.Messages) < len(request.Messages) {
+		slog.Debug("cursor prompt folded with truncated history",
+			"messages", len(request.Messages), "kept", len(trimmed.Messages))
+	}
+	prompt := agentPromptFromRequest(trimmed)
+	conversationID := cursorAgentConversationID(fullPrompt)
 	var state []byte
 	if conversation != nil && len(pending) > 0 {
 		delta := agentPromptFromRequest(translator.OpenAIRequest{Messages: pending})
@@ -701,3 +713,4 @@ func cursorAgentConversationID(prompt string) string {
 // for the turn blob that commit() needs. The service streams heartbeats forever
 // after the turn, so the wait is small and measured.
 const cursorTurnBlobGrace = 8
+

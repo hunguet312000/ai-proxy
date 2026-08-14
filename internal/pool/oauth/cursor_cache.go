@@ -153,6 +153,7 @@ func (c *cursorConversationCache) lookup(key string, request translator.OpenAIRe
 	defer c.mu.Unlock()
 	entry, ok := c.entries[key]
 	if !ok {
+		slog.Debug("cursor cache miss", "key", shortKey(key), "entries", len(c.entries))
 		return nil, nil
 	}
 	if time.Since(entry.updated) > cursorCacheTTL || len(entry.state) == 0 {
@@ -560,4 +561,11 @@ func blobIDs(blobs []blobEntry) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+func shortKey(key string) string {
+	if len(key) <= 24 {
+		return key
+	}
+	return key[:24] + "..."
 }
