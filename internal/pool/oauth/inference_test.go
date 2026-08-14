@@ -33,6 +33,20 @@ func TestOpenAIToCodexRequestPreservesTools(t *testing.T) {
 	}
 }
 
+func TestUnknownModelRefusalIsNotRetriedAcrossAccounts(t *testing.T) {
+	// "AI Model Not Found: Model name is not valid: \"grok-4.5\"" arrives as a 502 with
+	// no retryable code. Retrying it across accounts is a loop: the model is not in the
+	// catalog on any account.
+	err := &provider.ProviderError{Provider: "cursor", StatusCode: 502, Code: "ai_model_not_found",
+		Message: "AI Model Not Found: Model name is not valid: \"grok-4.5\""}
+	if retryAcrossOAuthAccounts(err) {
+		t.Fatal("a named-model refusal must not be retried across accounts")
+	}
+	if retryableOAuthTransient(err) {
+		t.Fatal("a named-model refusal must not be treated as a transient failure")
+	}
+}
+
 func TestOpenAIToCodexRequestPreservesEffort(t *testing.T) {
 	for _, test := range []struct {
 		effort string

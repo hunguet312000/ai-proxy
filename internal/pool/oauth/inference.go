@@ -282,8 +282,9 @@ func retryAcrossOAuthAccounts(err error) bool {
 	}
 	var providerErr *provider.ProviderError
 	if errors.As(err, &providerErr) {
-		switch providerErr.Code {
-		case "context_length_exceeded", "max_tokens_exceeded", "invalid_prompt", "invalid_tool_schema":
+		switch strings.ToLower(strings.TrimSpace(providerErr.Code)) {
+		case "context_length_exceeded", "max_tokens_exceeded", "invalid_prompt", "invalid_tool_schema",
+			"ai_model_not_found", "model_not_found", "model_name_not_valid":
 			return false
 		}
 		switch providerErr.StatusCode {
@@ -292,6 +293,14 @@ func retryAcrossOAuthAccounts(err error) bool {
 			// Request/model/payload failures are deterministic across accounts.
 			return false
 		default:
+			// A named-model refusal is deterministic too: another account faces the same
+			// catalog. Retrying it only burns waves on a loop that cannot resolve.
+			message := strings.ToLower(providerErr.Message)
+			for _, phrase := range []string{"model name is not valid", "ai model not found", "model not found", "not supported"} {
+				if strings.Contains(message, phrase) {
+					return false
+				}
+			}
 			return true
 		}
 	}
@@ -304,6 +313,14 @@ func retryableOAuthTransient(err error) bool {
 	}
 	var providerErr *provider.ProviderError
 	if errors.As(err, &providerErr) {
+		switch strings.ToLower(strings.TrimSpace(providerErr.Code)) {
+		case "ai_model_not_found", "model_not_found", "model_name_not_valid":
+			return false
+		}
+		message := strings.ToLower(providerErr.Message)
+		if strings.Contains(message, "model name is not valid") || strings.Contains(message, "ai model not found") {
+			return false
+		}
 		return providerErr.StatusCode == http.StatusRequestTimeout ||
 			providerErr.StatusCode == http.StatusTooEarly ||
 			providerErr.StatusCode == http.StatusTooManyRequests ||

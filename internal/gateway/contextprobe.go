@@ -400,6 +400,12 @@ func (s *Service) probeWithConfirmation(ctx context.Context, model string, size 
 		if probe.Accepted {
 			return probe
 		}
+		if !probe.Refused {
+			// A deterministic failure — a model id the upstream does not know, a plan gate,
+			// an auth error — will repeat identically. Probing it again only doubles the
+			// loop the confirmation exists to catch, which is session-scoped refusals.
+			return probe
+		}
 		if ctx.Err() != nil {
 			return probe
 		}

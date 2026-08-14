@@ -136,6 +136,11 @@ func TestNonContextProviderErrorDoesNotBoundOrChargeTheSearch(t *testing.T) {
 	if !strings.Contains(result.Error, "usage limit") {
 		t.Fatalf("search error = %q, want usage limit", result.Error)
 	}
+	// A deterministic failure must not be re-probed: the confirmation exists for
+	// session-scoped refusals, and re-running a plan gate doubles the loop for nothing.
+	if len(result.Steps) != 1 {
+		t.Fatalf("deterministic failure was probed %d times, want 1: %+v", len(result.Steps), result.Steps)
+	}
 }
 
 type probeErrorUpstream struct{ err error }
