@@ -1169,7 +1169,12 @@ func (s *Service) prepareContextStages(ctx context.Context, request provider.Req
 	if prepared.Compacted {
 		outcome.stage = "compact"
 	}
-	if !prepared.NeedsSummary {
+	if !prepared.NeedsSummary || skipPreemptiveTrimFor(request.Model) {
+		// A client that believes a larger window than the model has sends every turn
+		// past the soft ratio, and trimming on that belief loses history the upstream
+		// would have taken — the Cursor path measured 45 messages dropped per turn
+		// while the model never refused. For such models the trim runs only after the
+		// upstream actually refuses, where trimAfterContextRejection is the backstop.
 		return prepared.Request, outcome, nil
 	}
 	// summaryRecentTurns probes by rebuilding and re-estimating the whole request once
@@ -1246,6 +1251,15 @@ func (s *Service) prepareContextStages(ctx context.Context, request provider.Req
 	}
 	outcome.afterTokens = verified.AfterTokens
 	return verified.Request, outcome, nil
+}
+
+// skipPreemptiveTrimFor reports whether a model should skip the pipeline's
+// estimate-based trim and rely on trim-after-refusal only. The client may believe a
+// larger window than the model has (the 1M beta on a ~194k model), which puts every
+// turn past the soft ratio — trimming on the estimate then loses history the
+// upstream would have served. The refusal path is the ground truth and still works.
+func skipPreemptiveTrimFor(model string) bool {
+	return providerNameForModel(model) == "cursor"
 }
 
 // resolveSummaryModel picks who writes proxy summaries: the explicit configured

@@ -48,7 +48,7 @@ services:
       LITEROUTER_XAI_BASE_URL: "https://api.x.ai/v1"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       XAI_API_KEY: "${XAI_API_KEY:-}"
-      LITEROUTER_LOG_LEVEL: "info"
+      LITEROUTER_LOG_LEVEL: "${LITEROUTER_LOG_LEVEL:-info}"
     volumes:
       - literouter-data:/data
       # Host home so CLI Apply/Reset can write ~/.claude and ~/.codex like 9router.

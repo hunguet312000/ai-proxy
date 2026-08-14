@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"runtime"
@@ -421,6 +422,20 @@ func cursorAgentToChatStream(body io.ReadCloser, fallbackModel string) io.ReadCl
 				return emit(map[string]any{"reasoning_content": update.Thinking})
 			case update.Tokens > 0:
 				outputTokens += update.Tokens
+				// The token frame is the last the service sends in this turn: the
+				// conversation state blobs (agent_type "ide", the turn record) arrive
+				// before it, and the turn is what commit() needs to fold this
+				// exchange into the stored conversation. Everything after the token
+				// frame is an idle heartbeat that carries nothing new, so ending
+				// here keeps the response prompt — and makes the cache's turn
+				// complete instead of waiting on a terminator that never comes.
+				// The one exception is a turn whose output has only ever been the
+				// token count — a blank answer. There commit() would have nothing to
+				// fold, so the turn is left to run until the next real update.
+				if !emittedTool && outputTokens < 32 {
+					break
+				}
+				return errCursorTurnEnded
 			}
 			return nil
 		})
@@ -552,8 +567,21 @@ func cursorOSVersion() string {
 // request carries. The agent schema keeps prior turns in conversation_state, which a
 // stateless proxy cannot reproduce, so history is folded into the prompt instead —
 // losing it would silently change the model's answer.
+//
+// Tool results are deduplicated, which the fold makes safe in a way the generic
+// pipeline cannot: when the whole transcript becomes one prompt, an exact repeated
+// result is a copy of what still appears later, so dropping the earlier copy keeps
+// the model seeing every result once — it cannot walk away without a result it was
+// shown before. Distinct results are never touched, and the repeated copy is left as
+// a short marker so the model can tell the earlier read happened. Only the fold path
+// gets this: a model that asks for the same file twice must still see the second
+// read (edit quoting), but the first occurrence in the same fold is redundant by
+// definition. The conversation cache keys off this prompt, so the dedup is a fixed
+// transformation, not a moving target between turns.
 func agentPromptFromRequest(request translator.OpenAIRequest) string {
 	var out strings.Builder
+	seen := make(map[string]struct{})
+	duplicates := 0
 	for _, message := range request.Messages {
 		text := strings.TrimSpace(openAIContentText(message.Content))
 		if text == "" {
@@ -567,8 +595,17 @@ func agentPromptFromRequest(request translator.OpenAIRequest) string {
 		case "assistant":
 			out.WriteString("\n\nAssistant: " + text)
 		case "tool":
+			if _, repeat := seen[text]; repeat {
+				duplicates++
+				continue
+			}
+			seen[text] = struct{}{}
 			out.WriteString("\n\nTool result: " + text)
 		}
+	}
+	if duplicates > 0 {
+		slog.Info("cursor prompt deduplicated repeated tool results", "duplicate_results", duplicates,
+			"messages", len(request.Messages))
 	}
 	return strings.TrimSpace(out.String())
 }

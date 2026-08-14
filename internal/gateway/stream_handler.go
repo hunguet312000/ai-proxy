@@ -167,6 +167,7 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 		if err != nil {
 			return messagesGatewayError(c, err)
 		}
+		malformed := false
 		state := &anthropicStreamState{tools: make(map[int]*bufferedToolCall), toolSchemas: toolSchemas,
 			promptTokens: promptTokens, toolsAllowed: len(upstream.Tools) > 0}
 		readErr := readOpenAIStreamWithIdleTimeout(c.Request().Context(), body, upstreamStreamIdleTimeout, func(chunk OpenAIStreamChunk) error {
@@ -180,8 +181,15 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 			switch {
 			case !state.producedOutput():
 				readErr = errEmptyUpstreamStream
-			case !state.terminalSent:
-				readErr = fmt.Errorf("upstream stream ended without finish reason")
+			case !state.terminalSent && state.producedOutput():
+				// The stream ended cleanly with output on the wire but no terminal
+				// token — an upstream whose last event was a tool call. The tool call
+				// is the completion; deliver it (opening the message if need be) rather
+				// than reporting a truncation the client would retry.
+				malformed = true
+				if err := state.finish(c); err != nil {
+					return err
+				}
 			}
 		}
 		if readErr != nil {
@@ -191,6 +199,15 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 			// overflow is deterministic across candidates, so it is never retried.
 			retryable := !state.started && !state.producedOutput()
 			if retryable && !opener.exhausted() && !isContextOverflow(readErr) {
+				// Retrying a stream that ended with output on the wire — a Cursor turn
+				// that ended on a tool call — is a second upstream call on a turn that
+				// already answered. With a single candidate that call is wasted and it
+				// surfaces to the client as a stalled retry after the model has already
+				// responded; deliver the produced turn instead.
+				if state.producedOutput() {
+					slog.Debug("stream ended with output; delivering rather than retrying", "endpoint", "/v1/messages", "model", request.Model, "error", readErr)
+					return s.closeBrokenStream(c, request, state, opener.servedModel(), opener.sentEffort, readErr)
+				}
 				slog.Warn("retrying upstream stream before first token", "endpoint", "/v1/messages", "model", request.Model, "error", readErr)
 				continue
 			}
@@ -275,6 +292,18 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 		}
 		if completionEstimated {
 			usage.CompletionTokens = estimateTextBytes(state.completionBytes)
+		}
+		// A turn the upstream finished without a terminal token was delivered because
+		// its tool call was usable. For a Cursor agent stream that ending is the
+		// protocol itself — the turn ends on the tool call — so it is not a truncation
+		// to report; recording it as malformed would turn the stability metric against
+		// the normal shape of this provider.
+		if malformed && providerNameForModel(opener.servedModel()) != "cursor" {
+			s.recordUsage(UsageEvent{Provider: s.providerNameFor(opener.servedModel()), Model: opener.servedModel(), RequestModel: request.Model, Endpoint: "/v1/messages",
+				Status: "malformed_stream", PromptTokens: usage.PromptTokens, PromptTokensEstimated: promptEstimated,
+				CompletionTokens: usage.CompletionTokens, CompletionTokensEstimated: completionEstimated,
+				Effort: opener.sentEffort})
+			return writeSSE(c, "message_stop", map[string]string{"type": "message_stop"})
 		}
 		// The one place all three numbers for the same payload exist at once: the bytes
 		// that arrived, what LiteRouter thought they were, and what the upstream says they
@@ -409,7 +438,19 @@ func (s *anthropicStreamState) emit(c echo.Context, chunk OpenAIStreamChunk) err
 			}
 		}
 		if choice.FinishReason != nil {
-			if err := s.sendTerminal(c, anthropicStreamStop(*choice.FinishReason)); err != nil {
+			reason := *choice.FinishReason
+			if reason == "tool_calls" || reason == "function_call" {
+				// The finish_reason token is what marks the turn complete. A Cursor agent
+				// stream can carry a tool call and then keep the stream alive (an idle
+				// heartbeat, or a tool call that is not the last one); taking "tool_calls"
+				// as the terminal here closes the turn while the model may still be
+				// writing, and the client retries a mid-stream truncation as a network
+				// fault. Only a terminal token is authoritative — a lone tool call with
+				// no terminal behind it is a genuine truncation.
+				s.sawTool = true
+				continue
+			}
+			if err := s.sendTerminal(c, anthropicStreamStop(reason)); err != nil {
 				return err
 			}
 		}
@@ -551,7 +592,10 @@ func (s *anthropicStreamState) flushTools(c echo.Context) error {
 }
 
 func (s *anthropicStreamState) finish(c echo.Context) error {
-	if !s.started || s.terminalSent {
+	if s.terminalSent {
+		return nil
+	}
+	if !s.started && !s.producedOutput() {
 		return nil
 	}
 	reason := "end_turn"
