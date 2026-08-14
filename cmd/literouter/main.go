@@ -748,6 +748,13 @@ func run() int {
 			return model, textOnly, nil
 		},
 		SetImageRoute: func(ctx context.Context, model, textOnly string) error {
+			// The Cursor agent path (composer/grok) folds everything into a single text
+			// prompt and cannot see images — a base64 data URI in the prompt text is not
+			// decoded, so a transcription through it cogitates and hangs. Refuse it as an
+			// image model up front instead of failing every image turn at runtime.
+			if lower := strings.ToLower(strings.TrimSpace(model)); strings.HasPrefix(lower, "cursor/") || strings.HasPrefix(lower, "cu/") {
+				return fmt.Errorf("Cursor models cannot transcribe images (they are text-only on this proxy); pick a vision model like opencode/mimo-v2.5")
+			}
 			if err := store.SetSetting(ctx, "router.image_model", model); err != nil {
 				return err
 			}

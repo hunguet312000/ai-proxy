@@ -675,6 +675,17 @@ func openAIContentText(content any) string {
 	var text strings.Builder
 	for _, part := range openAIContentParts(content) {
 		text.WriteString(part.Text)
+		if part.ImageURL != nil && part.ImageURL.URL != "" {
+			// The Cursor agent prompt is a single flat string — the image parts
+			// would otherwise be dropped and a transcription call would reach the
+			// model with no image at all, which is what made it cogitate and hang.
+			// Embedding the data URI lets the vision model actually see the image.
+			if strings.HasPrefix(part.ImageURL.URL, "data:") {
+				text.WriteString(" [image data: " + part.ImageURL.URL + "]")
+			} else {
+				text.WriteString(" [image url: " + part.ImageURL.URL + "]")
+			}
+		}
 	}
 	return text.String()
 }
