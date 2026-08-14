@@ -183,10 +183,19 @@ func (s *Service) messagesStream(c echo.Context, request translator.AnthropicReq
 				readErr = errEmptyUpstreamStream
 			case !state.terminalSent && state.producedOutput():
 				// The stream ended cleanly with output on the wire but no terminal
-				// token — an upstream whose last event was a tool call. The tool call
-				// is the completion; deliver it (opening the message if need be) rather
-				// than reporting a truncation the client would retry.
-				malformed = true
+				// token. For providers whose protocol ends the turn without one —
+				// the Cursor agent, custom OpenAI-compatible upstreams, or an
+				// upstream that hit its output cap and closed the stream — this is
+				// a normal ending and the turn is complete. It is a malformed
+				// truncation only when a tool call is still buffered with JSON
+				// that never terminated, which is what a broken upstream looks
+				// like.
+				for _, index := range state.toolOrder {
+					if tool := state.tools[index]; tool != nil && !toolArgumentsComplete(tool.arguments) {
+						malformed = true
+						break
+					}
+				}
 				if err := state.finish(c); err != nil {
 					return err
 				}

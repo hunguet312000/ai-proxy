@@ -389,10 +389,43 @@ func TestAnthropicStreamingRejectsMissingToolTerminalAtCleanEOF(t *testing.T) {
 	if !strings.Contains(body, `"name":"read"`) || !strings.Contains(body, `"stop_reason":"tool_use"`) || !strings.Contains(body, "event: message_stop") {
 		t.Fatalf("truncated tool turn not closed cleanly: %q", body)
 	}
+	// A complete tool call at clean EOF is the provider's normal ending, not a
+	// malformed stream — recording it as one turns the stability metric against
+	// every provider that closes the stream after its final chunk.
+	select {
+	case event := <-usageEvents:
+		if event.Status != "ok" {
+			t.Fatalf("usage event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("usage event was not recorded")
+	}
+}
+
+func TestAnthropicStreamingTruncatedToolJSONAtCleanEOFIsMalformed(t *testing.T) {
+	// A tool call whose JSON never terminated is a genuinely broken upstream: the
+	// turn cannot be delivered as tool_use, so it is recorded as malformed rather
+	// than hiding the truncation as ok.
+	stream := &fakeStreamClient{content: strings.Join([]string{
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-a","type":"function","function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}]}`,
+		"",
+		"data: [DONE]", "",
+	}, "\n")}
+	usageEvents := make(chan UsageEvent, 1)
+	service := New(Options{OpenAIStream: stream, OnUsage: func(event UsageEvent) { usageEvents <- event }})
+	e := echo.New()
+	service.Register(e)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"model","messages":[{"role":"user","content":"use tool"}],"tools":[{"name":"read","input_schema":{"type":"object"}}],"max_tokens":100,"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
 	select {
 	case event := <-usageEvents:
 		if event.Status != "malformed_stream" {
-			t.Fatalf("usage event = %#v", event)
+			t.Fatalf("usage event = %#v, want malformed_stream", event)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("malformed stream usage event was not recorded")

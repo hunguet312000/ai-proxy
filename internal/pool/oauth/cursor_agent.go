@@ -461,7 +461,6 @@ func cursorAgentToChatStream(body io.ReadCloser, fallbackModel string) io.ReadCl
 			}
 			if sent := session.promptTokens(); sent > 0 {
 				usage["prompt_tokens"] = sent
-				usage["prompt_tokens_estimated"] = true
 				usage["total_tokens"] = outputTokens + sent
 			}
 			terminal["usage"] = usage
