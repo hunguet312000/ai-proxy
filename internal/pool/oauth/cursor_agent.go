@@ -577,7 +577,10 @@ func agentPromptFromRequest(request translator.OpenAIRequest) string {
 	duplicates := 0
 	for _, message := range request.Messages {
 		text := strings.TrimSpace(openAIContentText(message.Content))
-		if text == "" {
+		// An assistant turn that only called tools has no text at all; it must still
+		// surface the tool calls, or the model sees the following tool result with
+		// nothing to pair it to and calls the tool again.
+		if text == "" && len(message.ToolCalls) == 0 {
 			continue
 		}
 		switch message.Role {
@@ -586,7 +589,18 @@ func agentPromptFromRequest(request translator.OpenAIRequest) string {
 		case "user":
 			out.WriteString("\n\n" + text)
 		case "assistant":
-			out.WriteString("\n\nAssistant: " + text)
+			if text != "" {
+				out.WriteString("\n\nAssistant: " + text)
+			}
+			// The tool calls this assistant turn made must survive the fold: without
+			// them the model sees a bare tool result with no tool_use it can pair it
+			// to, and answers by calling the tool again — the repeated-tool-call loop.
+			for _, call := range message.ToolCalls {
+				if call.Function.Name == "" {
+					continue
+				}
+				out.WriteString("\n\nTool call: " + call.Function.Name + "(" + call.Function.Arguments + ")")
+			}
 		case "tool":
 			if _, repeat := seen[text]; repeat {
 				duplicates++
