@@ -261,16 +261,18 @@ func TestCursorCacheFingerprintSeparatesToolResultsByCallID(t *testing.T) {
 // The stored conversation id and state belong to one account and one model. The session
 // key says nothing about either — without X-Conversation-ID it is derived from the first
 // user message — so the key has to carry them.
-func TestCursorCacheKeyScopesByAccountAndModel(t *testing.T) {
+func TestCursorCacheKeyScopesByAccountNotModel(t *testing.T) {
 	base := cursorCacheKey("session", "acct-1", "gpt-5.6-luna")
 	if base == cursorCacheKey("session", "acct-2", "gpt-5.6-luna") {
 		t.Fatal("two accounts must not share a conversation entry")
 	}
-	if base == cursorCacheKey("session", "acct-1", "gpt-5.6-sol") {
-		t.Fatal("two models must not share a conversation entry")
+	// The conversation state is model-agnostic: switching models mid-session must
+	// continue the same conversation, or every switch re-sends the whole transcript.
+	if base != cursorCacheKey("session", "acct-1", "gpt-5.6-sol") {
+		t.Fatal("the key must survive a model switch on the same account")
 	}
 	if base != cursorCacheKey("session", "acct-1", "gpt-5.6-luna") {
-		t.Fatal("the key must be stable for the same session, account and model")
+		t.Fatal("the key must be stable for the same session and account")
 	}
 	// An empty session is the signal that disables the cache; scoping must not turn it
 	// into a usable key.

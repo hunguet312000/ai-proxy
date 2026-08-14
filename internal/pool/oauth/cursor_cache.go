@@ -100,22 +100,23 @@ func messageFingerprint(message translator.OpenAIMessage) string {
 	return hex.EncodeToString(hash.Sum(nil)[:8])
 }
 
-// cursorCacheKey scopes a conversation to the account and model that own it.
+// cursorCacheKey scopes a conversation to the account that owns it.
 //
-// The upstream conversation id and its replayable state belong to one account and one
-// model, but the session key they were filed under is derived from the transcript alone
-// — and, absent an X-Conversation-ID header the client does not send, from the first user
-// message. That is enough for two sessions that open the same way to collide, and it says
-// nothing about who the conversation belongs to: sticky_soft migrates accounts mid-session,
-// so the next turn could have replayed one account's conversation through another's
-// credentials, or a conversation from a different model entirely.
+// The model is deliberately left out: the upstream conversation id and its
+// replayable state belong to one account, but they are model-agnostic — switching
+// the model mid-session (default → grok) must continue the same conversation, not
+// start a fresh one that re-sends the whole transcript. Scoping by model made
+// every model switch a cache miss and a full resend, which is exactly the slow
+// path. The session key is derived from the transcript (the first user message
+// when the client sends no X-Conversation-ID), so two sessions that open the same
+// way still collide safely: the history prefix check rejects a mismatched one.
 //
 // An empty session stays empty: that is the signal that disables the cache.
 func cursorCacheKey(session, accountID, model string) string {
 	if session == "" {
 		return ""
 	}
-	return session + "\x00" + accountID + "\x00" + model
+	return session + "\x00" + accountID
 }
 
 func requestFingerprints(request translator.OpenAIRequest) []string {
