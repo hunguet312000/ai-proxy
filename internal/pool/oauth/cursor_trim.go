@@ -17,37 +17,17 @@ package oauth
 //     The budget below is the largest context that still answers fast enough.
 
 import (
-	"strings"
 
 	"literouter/internal/contextguard"
 	"literouter/internal/translator"
 )
-
-// cursorTrimBudget returns the per-model token budget a cache-miss fold may send.
-// It is the latency sweet spot, not the window: the largest context that still
-// answers in interactive time.
-func cursorTrimBudget(model string) int {
-	lower := strings.ToLower(model)
-	switch {
-	case strings.Contains(lower, "grok"):
-		// Measured: 267k → 26s, 133k → 13s. 180k keeps a long tail of history
-		// while answering in ~18s.
-		return 180_000
-	case strings.Contains(lower, "composer"):
-		// Composer's window is ~194k; its agent loop is slow even at small
-		// contexts, so it gets the smaller end of its own window.
-		return 140_000
-	default:
-		return 120_000
-	}
-}
 
 // trimCursorFold bounds a cache-miss fold to the model's trim budget. The system
 // preamble and the most recent messages survive; older turns are dropped. The
 // conversation id is unaffected — it is derived from the full transcript in the
 // caller, so two sessions that start differently still differ.
 func trimCursorFold(request translator.OpenAIRequest, model string) translator.OpenAIRequest {
-	budget := cursorTrimBudget(model)
+	budget := cursorLatencyBudget(model)
 	if estimateRequestTokens(request) <= budget {
 		return request
 	}
