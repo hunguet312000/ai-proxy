@@ -54,8 +54,10 @@ func TestInjectEditLoopReminderAppendsOnlyWhenStuck(t *testing.T) {
 		t.Fatalf("messages = %d, want %d", len(got.Messages), len(request.Messages)+1)
 	}
 	last := got.Messages[len(got.Messages)-1]
-	if last.Role != "system" || !strings.Contains(last.Content.(string), "STOP retrying") {
-		t.Fatalf("last message = %#v, want the loop reminder", last)
+	// The reminder is a user message: it lands at the end of the transcript, and
+	// Qwen3's template rejects a system message anywhere but the beginning.
+	if last.Role != "user" || !strings.Contains(last.Content.(string), "STOP retrying") {
+		t.Fatalf("last message = %#v, want the loop reminder as user", last)
 	}
 
 	// Normal traffic: unchanged.

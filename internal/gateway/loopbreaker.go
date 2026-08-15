@@ -120,12 +120,18 @@ Then proceed with one attempt only; do not repeat the same edit.`
 // injectEditLoopReminder appends the corrective message to the request when a
 // stuck edit loop is detected. It returns the request unchanged when there is
 // no loop, so normal traffic pays nothing.
+//
+// The reminder is a user message, not a system message: it arrives at the end
+// of the transcript, and templates like Qwen3's reject a system message
+// anywhere but the very beginning ("System message must be at the beginning").
+// As user text it reads naturally as the operator's own instruction to stop
+// retrying the same edit.
 func injectEditLoopReminder(request translator.OpenAIRequest) translator.OpenAIRequest {
 	if !detectEditLoop(request.Messages) {
 		return request
 	}
 	request.Messages = append(request.Messages, translator.OpenAIMessage{
-		Role:    "system",
+		Role:    "user",
 		Content: editLoopReminder,
 	})
 	return request
