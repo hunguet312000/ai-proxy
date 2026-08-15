@@ -173,4 +173,13 @@ func (s *Service) applyModelCapabilities(request *translator.OpenAIRequest, mode
 	if rejected[request.ReasoningEffort] {
 		request.ReasoningEffort = knownSafeReasoningEffort
 	}
+	// vLLM Qwen3 with thinking enabled deliberates first and then either calls a
+	// tool or ends with a bare "\n\n" — the stall. For agent/coding traffic the
+	// reasoning is rarely worth it; disable it so the model answers directly.
+	if request.ChatTemplateKwargs == nil {
+		request.ChatTemplateKwargs = map[string]any{}
+	}
+	if _, ok := request.ChatTemplateKwargs["enable_thinking"]; !ok {
+		request.ChatTemplateKwargs["enable_thinking"] = false
+	}
 }

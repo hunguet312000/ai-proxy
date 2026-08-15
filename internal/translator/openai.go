@@ -41,6 +41,12 @@ type OpenAIRequest struct {
 	// means "nothing decided yet" — and the unified-rebuild path would otherwise
 	// resurrect the client's ask from the provider form.
 	ForceNoEffort bool `json:"-"`
+	// ChatTemplateKwargs carries vLLM template controls for custom
+	// OpenAI-compatible upstreams — enable_thinking=false turns off the
+	// <think> block, which is what makes Qwen3-vLLM answer directly instead of
+	// deliberating and then either calling a tool or ending with "\n\n". Built-in
+	// providers never set it.
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
 
 type OpenAIStreamOptions struct {
