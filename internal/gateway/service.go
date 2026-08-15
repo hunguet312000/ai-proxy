@@ -235,11 +235,16 @@ type Service struct {
 	disableContextLearning bool
 	// modelEfforts overrides the reasoning effort per model. Held as a pointer so a
 	// catalog edit is visible to in-flight requests without locking the hot path.
-	modelEfforts    atomic.Pointer[map[string]string]
-	learnedMu       sync.RWMutex
-	onOutputLimit   func(model string, limit int)
-	onContextWindow func(model string, window int)
-	onCalibration   func(TokenCalibration)
+	modelEfforts atomic.Pointer[map[string]string]
+	// noAutoToolChoice and rejectedReasoningEfforts record, per model,
+	// capabilities the upstream rejected once (see capability.go). Guarded by
+	// learnedMu alongside the other learned maps.
+	noAutoToolChoice         map[string]bool
+	rejectedReasoningEfforts map[string]map[string]bool
+	learnedMu                sync.RWMutex
+	onOutputLimit            func(model string, limit int)
+	onContextWindow          func(model string, window int)
+	onCalibration            func(TokenCalibration)
 	// contextMode is the runtime state of the proxy pipeline: off, safe, or
 	// aggressive. Atomic so the dashboard can flip it without a restart.
 	contextMode      atomic.Pointer[string]
@@ -425,7 +430,7 @@ func New(options Options) *Service {
 		contextGuard:    options.ContextGuard, contextLimits: options.ContextLimits, contextWindow: options.ContextWindow, contextPolicy: options.ContextPolicy,
 		customProviders: options.CustomProviders, touchCustomKey: options.TouchCustomKey,
 		disableContextLearning: options.DisableContextLearning,
-		summarizer: options.Summarizer, summaryCache: options.SummaryCache, summaryModel: options.SummaryModel,
+		summarizer:             options.Summarizer, summaryCache: options.SummaryCache, summaryModel: options.SummaryModel,
 		summaryMaxTokens: options.SummaryMaxTokens, summaryTimeout: options.SummaryTimeout,
 		onUsage:   options.OnUsage,
 		toolStore: options.ToolStore,
@@ -645,6 +650,10 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 			lastErr = err
 			continue
 		}
+		// Learned capability quirks shape the final form here, after preparation
+		// rebuilt it from the unified request, so the cache key below is keyed on
+		// exactly what will be sent.
+		s.applyModelCapabilities(&candidate, model)
 		key := ""
 		if cacheEligible {
 			key, err = responseKey(candidate)
@@ -690,6 +699,13 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 		if err != nil {
 			lastErr = err
 			s.learnContextWindow(model, 0, err)
+			// A capability rejection is not retryable as sent, but it is recoverable:
+			// learn the missing feature, re-attempt this candidate shaped accordingly,
+			// and the caller never sees the 400.
+			if s.recoverIncompatibleCapabilities(model, &candidate, err) {
+				index--
+				continue
+			}
 			if s.learnOutputLimit(model, requestedOutputTokens(candidate), clampAttempts[model], err) {
 				clampAttempts[model]++
 				index--
@@ -794,7 +810,11 @@ func (s *Service) prepareStreamCandidate(ctx context.Context, request translator
 		return translator.OpenAIRequest{}, 0, err
 	}
 	result.PromptCacheKey = request.PromptCacheKey
-	return injectEditLoopReminder(result), contextguard.EstimateRequest(candidate), nil
+	result = injectEditLoopReminder(result)
+	// Learned capability quirks shape the final form here, so the caller's cache
+	// key and the sent payload agree.
+	s.applyModelCapabilities(&result, request.Model)
+	return result, contextguard.EstimateRequest(candidate), nil
 }
 
 // stripProviderImages replaces every image block in a provider request with a text
@@ -845,7 +865,12 @@ func (s *Service) prepareOpenAIRequest(ctx context.Context, request translator.O
 	result.PromptCacheKey = request.PromptCacheKey
 	// A stuck edit loop is visible here, on the final OpenAI form, before any
 	// provider serialization. Inject the corrective reminder once detected.
-	return injectEditLoopReminder(result), nil
+	result = injectEditLoopReminder(result)
+	// Learned capability quirks shape the final form, so the caller's cache key
+	// and the sent payload agree — applyModelCapabilities runs here as well as in
+	// the send loop, so both callers see a shaped request.
+	s.applyModelCapabilities(&result, request.Model)
+	return result, nil
 }
 
 func (s *Service) Messages(ctx context.Context, request translator.AnthropicRequest) (translator.AnthropicResponse, error) {
@@ -937,6 +962,9 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		if err != nil {
 			return provider.Response{}, err
 		}
+		// Learned capability quirks shape the final form here, so the cache key
+		// below matches exactly what will be sent.
+		s.applyModelCapabilities(&upstream, model)
 		key := ""
 		if cacheEligible {
 			key, err = responseKey(upstream)
@@ -989,6 +1017,13 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 			// The rejection teaches the real window first, so the trim retry below
 			// budgets against what the upstream just revealed.
 			s.learnContextWindow(model, 0, err)
+			// A capability rejection is not retryable as sent, but it is recoverable:
+			// learn the missing feature, re-attempt this candidate shaped accordingly,
+			// and the caller never sees the 400.
+			if s.recoverIncompatibleCapabilities(model, &upstream, err) {
+				index--
+				continue
+			}
 			// An output-cap rejection is not retryable as sent, but it is retryable once
 			// the cap it just revealed is applied. Learn it and re-attempt this candidate
 			// so the caller never sees the 400.

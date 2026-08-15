@@ -1130,6 +1130,9 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 		// from the unified request whenever context work is enabled, which restores the
 		// caller's own max_tokens and would undo an earlier clamp.
 		s.clampOpenAIOutput(&candidate)
+		// Capabilities that a rejection proved this upstream lacks — auto tool choice,
+		// an effort value — are shaped here, on the form that is actually serialized.
+		s.applyModelCapabilities(&candidate, model)
 		s.applyOpenAIPromptCache(ctx, &candidate)
 		// Sizing the payload means marshalling the entire history. At info level that
 		// ran several times per turn purely to produce a log line, which is real
@@ -1167,6 +1170,13 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 			}
 			o.lastErr = streamErr
 			o.service.learnContextWindow(model, o.sentTokens(), streamErr)
+			// A capability rejection is not retryable as sent — the upstream lacks the
+			// feature, not capacity — but it is recoverable: learn the fact, re-attempt
+			// this candidate shaped accordingly, and the caller never sees the 400.
+			if o.service.recoverIncompatibleCapabilities(model, &candidate, streamErr) {
+				o.index--
+				continue
+			}
 			if o.retryAfterTrimmingContext(ctx, model, streamErr) {
 				continue
 			}
@@ -1202,6 +1212,12 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 		}
 		o.lastErr = err
 		o.service.learnContextWindow(model, o.sentTokens(), err)
+		// Same capability recovery as the custom-provider branch above: learn the
+		// missing feature and re-attempt this candidate shaped accordingly.
+		if o.service.recoverIncompatibleCapabilities(model, &candidate, err) {
+			o.index--
+			continue
+		}
 		if o.retryAfterTrimmingContext(ctx, model, err) {
 			continue
 		}
