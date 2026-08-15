@@ -136,6 +136,35 @@ func TestChatCompletionsRecordsTheEffortItSent(t *testing.T) {
 	}
 }
 
+// The "off" override strips reasoning_effort from the payload entirely, even
+// when the route would force a level (plan/compact turns) — an upstream that
+// rejects effort must never receive one.
+func TestEffortOffStripsEffortFromTheWire(t *testing.T) {
+	oauth := &effortRecordingInference{}
+	events := make(chan UsageEvent, 4)
+	service := productionShapedEffortService(oauth, events)
+	service.ReplaceModelEfforts(map[string]string{"cx/gpt-5.6-luna": "off"})
+	// A forced route effort must not resurrect the value the operator turned off.
+	service.SetCompactModel("cx/gpt-5.6-luna")
+
+	recorder := postAnthropic(t, service, compactBody(t))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+	if len(oauth.efforts) != 1 {
+		t.Fatalf("upstream efforts = %v, want a single attempt", oauth.efforts)
+	}
+	if oauth.efforts[0] != "off" {
+		t.Fatalf("upstream Effort = %q, want off", oauth.efforts[0])
+	}
+	if !oauth.noEffort[0] {
+		t.Fatal("the payload still carried reasoning_effort despite the off override")
+	}
+	if event := awaitUsage(t, events); event.Effort != "off" {
+		t.Fatalf("usage Effort = %q, want off", event.Effort)
+	}
+}
+
 // A route-forced effort still wins over the per-model override, and the row must show the
 // level that actually went up rather than the one the catalog would have chosen.
 func TestForcedRouteEffortIsTheOneRecorded(t *testing.T) {

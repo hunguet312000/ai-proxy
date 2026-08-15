@@ -18,6 +18,7 @@ import (
 	"literouter/internal/cache"
 	"literouter/internal/contextguard"
 	"literouter/internal/provider"
+	"literouter/internal/storage"
 	"literouter/internal/toolstore"
 	"literouter/internal/translator"
 )
@@ -635,10 +636,13 @@ func (s *Service) chat(ctx context.Context, request translator.OpenAIRequest, en
 		candidate := request
 		candidate.Model = model
 		// A route-forced effort describes the task, so it wins over the per-model
-		// catalog override, which describes the model.
-		if forced := forcedEffort(ctx); forced != "" {
+		// catalog override, which describes the model — except "off", which the
+		// operator set for this model and which must strip effort entirely.
+		if effort := s.effortFor(model); effort == storage.EffortOff {
+			candidate.Effort = storage.EffortOff
+		} else if forced := forcedEffort(ctx); forced != "" {
 			candidate.Effort = forced
-		} else if effort := s.effortFor(model); effort != "" {
+		} else if effort != "" {
 			candidate.Effort = effort
 		}
 		// Per candidate, not once per request: an alias chain can mix models whose
@@ -922,9 +926,13 @@ func (s *Service) complete(ctx context.Context, request provider.Request) (provi
 		client := s.clientForModel(model)
 		candidate := cloneProviderRequest(request)
 		candidate.Model = model
-		if forced := forcedEffort(ctx); forced != "" {
+		// Same precedence as the other loops: a route-forced effort describes the
+		// task, except the operator's explicit "off" for this model.
+		if effort := s.effortFor(model); effort == storage.EffortOff {
+			candidate.Effort = storage.EffortOff
+		} else if forced := forcedEffort(ctx); forced != "" {
 			candidate.Effort = forced
-		} else if effort := s.effortFor(model); effort != "" {
+		} else if effort != "" {
 			candidate.Effort = effort
 		}
 		s.clampProviderOutput(&candidate)

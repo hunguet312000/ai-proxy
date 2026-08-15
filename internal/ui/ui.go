@@ -645,23 +645,15 @@ func pct64(part, total int64) int {
 	return v
 }
 
-// providerHonoursEffort reports whether a reasoning-effort override reaches the wire.
+// providerHonoursEffort reports whether a reasoning-effort override reaches the
+// wire.
 //
-// Only the Codex path sends it — as `reasoning.effort` on the Responses payload. Every
-// other upstream drops it: Cursor's agent request has no such field, Antigravity's
-// envelope has none, and for OpenAI-compatible upstreams the field is `json:"-"` and is
-// never serialised. Offering the control everywhere let the dashboard claim an override
-// was in force on a model that never saw it.
-//
-// If another provider learns to carry effort, this is the list to extend — it is the
-// only thing standing between the setting and a promise the proxy cannot keep.
+// Every route carries it today: Codex as `reasoning.effort` on the Responses
+// payload, and OpenAI-compatible upstreams — opencode, FPT AI, any custom
+// provider, the local vLLM — as `reasoning_effort` on the chat payload. The
+// "off" override strips it, which is the one control every upstream honours.
 func providerHonoursEffort(provider string) bool {
-	switch normalizeProviderID(provider) {
-	case "codex", "cx", "openai", "opencode":
-		return true
-	default:
-		return false
-	}
+	return true
 }
 
 // providerLogo picks the asset for a provider id.

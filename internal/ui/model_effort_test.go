@@ -114,9 +114,11 @@ func TestModelChipShowsAnActiveEffortOverride(t *testing.T) {
 	}
 }
 
-func TestEffortControlOnlyAppearsWhereItReachesTheWire(t *testing.T) {
-	// An upstream that ignores effort must not offer the control — the setting
-	// would save nothing while the chip claimed it was in force.
+func TestEffortControlAppearsForEveryProvider(t *testing.T) {
+	// Every route carries effort today — Codex as reasoning.effort, chat
+	// upstreams as reasoning_effort — so the control belongs on every model,
+	// including custom providers, and "off" is offered for those that must not
+	// receive it.
 	service, err := New(pool.New(nil), "token", nil, nil, nil, nil, nil,
 		APIKeyHooks{}, ModelHooks{}, SettingsHooks{}, UsageHooks{})
 	if err != nil {
@@ -130,14 +132,17 @@ func TestEffortControlOnlyAppearsWhereItReachesTheWire(t *testing.T) {
 		return out.String()
 	}
 
-	noEffort := render([]storage.CatalogModel{
-		{Provider: "antigravity", ID: "ag/gemini", ContextWindow: 400_000, Effort: "high"},
+	local := render([]storage.CatalogModel{
+		{Provider: "local", ID: "local/qwen3.8-27B", ContextWindow: 122_049, Effort: "high"},
 	})
-	if strings.Contains(noEffort, "/effort") {
-		t.Error("an upstream that ignores effort must not offer the control")
+	if !strings.Contains(local, "/effort") {
+		t.Error("a custom provider must offer the effort control")
 	}
-	if strings.Contains(noEffort, "model-effort-chip") {
-		t.Error("no chip may claim an override that never reaches the upstream")
+	if !strings.Contains(local, "model-effort-chip") {
+		t.Error("an override on a custom provider must be visible")
+	}
+	if !strings.Contains(local, `value="off"`) {
+		t.Error("the control must offer Off — don't send effort")
 	}
 
 	codex := render([]storage.CatalogModel{
@@ -151,15 +156,12 @@ func TestEffortControlOnlyAppearsWhereItReachesTheWire(t *testing.T) {
 	}
 }
 
-func TestProviderHonoursEffortMatchesTheOnlySender(t *testing.T) {
-	for _, provider := range []string{"codex", "cx", "openai"} {
+func TestProviderHonoursEffortMatchesEveryRoute(t *testing.T) {
+	// Every route carries a reasoning effort today, and the "off" override
+	// strips it on all of them — so the control is offered everywhere.
+	for _, provider := range []string{"codex", "cx", "openai", "opencode", "local", "fpt-ai", "custom:fpt-ai", "antigravity", "xai", "claude", ""} {
 		if !providerHonoursEffort(provider) {
 			t.Errorf("providerHonoursEffort(%q) = false, want true", provider)
-		}
-	}
-	for _, provider := range []string{"antigravity", "xai", "claude", "custom:fpt-ai", ""} {
-		if providerHonoursEffort(provider) {
-			t.Errorf("providerHonoursEffort(%q) = true, but that path drops the field", provider)
 		}
 	}
 }

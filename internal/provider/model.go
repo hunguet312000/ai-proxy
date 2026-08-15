@@ -3,6 +3,8 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+
+	"literouter/internal/storage"
 )
 
 type Request struct {
@@ -103,7 +105,7 @@ func (request Request) Validate() error {
 		return fmt.Errorf("max tokens cannot be negative")
 	}
 	switch request.Effort {
-	case "", "low", "medium", "high", "xhigh", "max":
+	case "", "low", "medium", "high", "xhigh", "max", storage.EffortOff:
 	default:
 		return fmt.Errorf("unsupported effort %q", request.Effort)
 	}

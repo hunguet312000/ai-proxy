@@ -27,6 +27,10 @@ type CatalogModel struct {
 // allowed and means "leave the request alone".
 var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
 
+// EffortOff is the explicit "do not send reasoning effort" override. It differs
+// from empty in that it also strips whatever effort the client asked for.
+const EffortOff = "off"
+
 // NormalizeEffort validates an override. It rejects rather than silently dropping an
 // unknown level, because a typo that becomes "no override" looks like the setting was
 // saved and ignored.
@@ -35,12 +39,15 @@ func NormalizeEffort(effort string) (string, error) {
 	if effort == "" {
 		return "", nil
 	}
+	if effort == EffortOff {
+		return effort, nil
+	}
 	for _, level := range EffortLevels {
 		if effort == level {
 			return effort, nil
 		}
 	}
-	return "", fmt.Errorf("effort must be one of %s, or empty to follow the request", strings.Join(EffortLevels, ", "))
+	return "", fmt.Errorf("effort must be one of %s, %s, or empty to follow the request", strings.Join(EffortLevels, ", "), EffortOff)
 }
 
 func normalizeCatalogProvider(provider string) string {

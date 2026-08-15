@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"literouter/internal/provider"
+	"literouter/internal/storage"
 )
 
 type OpenAIRequest struct {
@@ -34,6 +35,12 @@ type OpenAIRequest struct {
 	// from Effort, which is the internal routing effort; serializing Effort directly would
 	// break the codex/OAuth paths that read it off the struct. Set in ToOpenAIRequest.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// ForceNoEffort is the "off" override: the request must not carry
+	// reasoning_effort at all, whatever the client asked for. It has to travel as
+	// its own flag because an empty ReasoningEffort alone is ambiguous — it also
+	// means "nothing decided yet" — and the unified-rebuild path would otherwise
+	// resurrect the client's ask from the provider form.
+	ForceNoEffort bool `json:"-"`
 }
 
 type OpenAIStreamOptions struct {
@@ -158,6 +165,12 @@ func ToOpenAIRequest(request provider.Request) (OpenAIRequest, error) {
 		MaxTokens: request.MaxTokens, MaxCompletionTokens: request.MaxCompletionTokens, Stream: request.Stream,
 		ParallelToolCalls: request.ParallelToolCalls, Effort: request.Effort,
 		ReasoningEffort: request.Effort,
+	}
+	// The "off" override strips the effort the client asked for, so the wire
+	// carries no reasoning_effort at all.
+	if request.Effort == storage.EffortOff {
+		result.ReasoningEffort = ""
+		result.ForceNoEffort = true
 	}
 	if request.Stream {
 		result.StreamOptions = &OpenAIStreamOptions{IncludeUsage: true}

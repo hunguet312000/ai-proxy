@@ -19,6 +19,7 @@ import (
 
 	"literouter/internal/contextguard"
 	"literouter/internal/provider"
+	"literouter/internal/storage"
 	"literouter/internal/toolvalidate"
 	"literouter/internal/translator"
 )
@@ -1107,9 +1108,14 @@ func (o *streamOpener) next() (io.ReadCloser, error) {
 		client := s.streamClientForModel(model)
 		candidate := o.request
 		candidate.Model = model
-		if forced := forcedEffort(ctx); forced != "" {
+		// The "off" override must beat the route's own forced effort: a model the
+		// operator says sends no reasoning effort sends none, even on a plan turn
+		// that would otherwise be routed at a fixed level.
+		if effort := s.effortFor(model); effort == storage.EffortOff {
+			candidate.Effort = storage.EffortOff
+		} else if forced := forcedEffort(ctx); forced != "" {
 			candidate.Effort = forced
-		} else if effort := s.effortFor(model); effort != "" {
+		} else if effort != "" {
 			candidate.Effort = effort
 		}
 		candidate, sentEstimate, err := s.prepareStreamCandidate(ctx, candidate, o.unified)

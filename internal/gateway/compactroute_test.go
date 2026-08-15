@@ -172,6 +172,9 @@ func TestCompactRoutePrecedence(t *testing.T) {
 type effortRecordingInference struct {
 	models  []string
 	efforts []string
+	// noEffort flags record whether the translated chat payload carried
+	// reasoning_effort at all, for the "off" override test.
+	noEffort []bool
 }
 
 func (f *effortRecordingInference) DoJSON(context.Context, translator.OpenAIRequest, string) (translator.OpenAIResponse, error) {
@@ -181,6 +184,7 @@ func (f *effortRecordingInference) DoJSON(context.Context, translator.OpenAIRequ
 func (f *effortRecordingInference) DoStream(_ context.Context, request translator.OpenAIRequest, _ string) (io.ReadCloser, error) {
 	f.models = append(f.models, request.Model)
 	f.efforts = append(f.efforts, request.Effort)
+	f.noEffort = append(f.noEffort, request.ForceNoEffort && request.ReasoningEffort == "")
 	return io.NopCloser(strings.NewReader(
 		"data: {\"id\":\"one\",\"model\":\"served\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")), nil
 }

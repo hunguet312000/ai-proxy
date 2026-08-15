@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"literouter/internal/provider"
+	"literouter/internal/storage"
 	"literouter/internal/translator"
 )
 
@@ -155,6 +156,15 @@ func (s *Service) applyModelCapabilities(request *translator.OpenAIRequest, mode
 		if choice, ok := request.ToolChoice.(string); ok && choice == "auto" {
 			request.ToolChoice = "none"
 		}
+	}
+	// The "off" override is the operator's explicit "send no effort", and it
+	// wins over recovery. On the untranslated form the override rides as Effort
+	// ("off"); after translation it becomes ForceNoEffort. A model that had its
+	// empty value rejected gets "low" only when the request was not told to
+	// stay effort-free.
+	if request.ForceNoEffort || request.Effort == storage.EffortOff {
+		request.ReasoningEffort = ""
+		return
 	}
 	// The empty string is a value like any other: an absent reasoning_effort is
 	// defaulted by the template (to "high" on Qwen3), so it can be the very

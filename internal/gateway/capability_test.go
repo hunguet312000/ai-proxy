@@ -200,6 +200,33 @@ func TestCustomProviderRecoversFromDefaultEffortRejection(t *testing.T) {
 	}
 }
 
+// TestCustomProviderEffortOffStripsEffort proves the "off" override on a
+// custom provider: the wire must carry no reasoning_effort at all, in a single
+// request, even though the client asked for "high" (which this upstream
+// rejects).
+func TestCustomProviderEffortOffStripsEffort(t *testing.T) {
+	upstream := newQwenUpstream()
+	service := New(Options{CustomProviders: qwenRegistry(t, upstream)})
+	service.ReplaceModelEfforts(map[string]string{"local/qwen3.8-27B": "off"})
+
+	request := qwenChatRequest("local/qwen3.8-27B")
+	request.Effort = "high" // what the client would send; off must strip it
+	response, err := service.Chat(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Choices) == 0 || response.Choices[0].Message.Content != "hi" {
+		t.Fatalf("response = %#v", response)
+	}
+	_, efforts, _ := upstream.snapshot()
+	// Two attempts: the first carries tool_choice:"auto" (rejected, recovered),
+	// the second is served — both must carry no reasoning_effort. The client
+	// asked for "high"; off won over it and over the capability recovery.
+	if len(efforts) != 2 || efforts[0] != "" || efforts[1] != "" {
+		t.Fatalf("reasoning_effort = %v; want two attempts with no effort", efforts)
+	}
+}
+
 // TestAutoToolChoiceRecoveryDoesNotLoop keeps a same-candidate retry from
 // repeating once the fact is known: the first rejection earns one recovery
 // retry, but a second refusal of the already-shaped request must surface the

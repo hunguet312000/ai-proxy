@@ -731,7 +731,7 @@ wire_api = "responses"</pre>
         <em class="model-window-live" title="Every request for this model is budgeted against {{$window.Effective}} tokens, not the {{.ContextWindow}} stored here.{{if gt $window.Served 0}} That number is the largest prompt this model has actually served — {{$window.Served}} tokens, counted by the upstream itself on a turn it answered — which proves the stored figure too low.{{end}}{{if gt $window.Refused 0}} An upstream rejection also named {{$window.Refused}} as a limit.{{end}} Save the measured value to make the two agree.">using {{formatContextWindow $window.Effective}}</em>
         {{end}}
         {{if gt .MaxOutputTokens 0}}<span title="Output cap learned from an upstream rejection">· out {{formatContextWindow .MaxOutputTokens}}</span>{{end}}
-        {{if and .Effort (honoursEffort .Provider)}}<em class="model-effort-chip" title="Reasoning effort is forced to {{.Effort}} for this model, whatever the client asks for">{{.Effort}}</em>{{end}}
+        {{if .Effort}}<em class="model-effort-chip" title="{{if eq .Effort "off"}}Reasoning effort is never sent for this model{{else}}Reasoning effort is forced to {{.Effort}} for this model, whatever the client asks for{{end}}">{{.Effort}}</em>{{end}}
       </summary>
       <form class="model-context-form" hx-post="/ui/models/{{urlquery .ID}}/context" hx-target="#model-catalog" hx-swap="innerHTML">
         <input type="hidden" name="provider" value="{{.Provider}}">
@@ -749,7 +749,6 @@ wire_api = "responses"</pre>
         <button class="btn sm" type="submit">Measure</button>
         <p class="model-probe-status" hidden></p>
       </form>
-      {{if honoursEffort .Provider}}
       <form class="model-context-form" hx-post="/ui/models/{{urlquery .ID}}/effort" hx-target="#model-catalog" hx-swap="innerHTML">
         <input type="hidden" name="provider" value="{{.Provider}}">
         <label>
@@ -758,13 +757,11 @@ wire_api = "responses"</pre>
           <select class="field" name="effort">
             <option value=""{{if not $effort}} selected{{end}}>Follow the request</option>
             {{range effortLevels}}<option value="{{.}}"{{if eq $effort .}} selected{{end}}>{{.}}</option>{{end}}
+            <option value="off"{{if eq $effort "off"}} selected{{end}}>Off — don't send effort</option>
           </select>
         </label>
         <button class="btn sm" type="submit">Save</button>
       </form>
-      {{else}}
-      <p class="model-effort-note">This upstream carries no reasoning effort, so the setting would have no effect here.</p>
-      {{end}}
     </details>
     <div class="model-test-status" hidden></div>
   </article>

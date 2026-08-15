@@ -17,6 +17,7 @@ import (
 
 	"literouter/internal/pool"
 	"literouter/internal/provider"
+	"literouter/internal/storage"
 	"literouter/internal/toolvalidate"
 	"literouter/internal/translator"
 )
@@ -531,6 +532,12 @@ func openAIToCodexRequest(request translator.OpenAIRequest, model string) map[st
 		// Measured: dropping the reasoning summary saves no billed output tokens, and
 		// output is 0.36% of all tokens spent, so there is nothing to tune here.
 		"reasoning": map[string]string{"effort": effort, "summary": "auto"},
+	}
+	// The "off" override means no reasoning effort at all — the reasoning block is
+	// dropped from the payload rather than defaulted to "high" like an absent
+	// effort would be.
+	if request.Effort == storage.EffortOff {
+		delete(payload, "reasoning")
 	}
 	if len(tools) > 0 {
 		payload["tools"] = tools
