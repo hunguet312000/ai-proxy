@@ -89,14 +89,14 @@ func (m *CredentialManager) LoadFresh(ctx context.Context, accountID string) (st
 	if err := json.Unmarshal(account.Credentials, &token); err != nil {
 		return storage.Account{}, TokenSet{}, AccountInfo{}, fmt.Errorf("decode account credentials: %w", err)
 	}
-	if provider == nil {
-		// Some providers have no authorization endpoint at all — a Cursor session is
-		// copied out of the IDE, and there is nothing to refresh or to ask for account
-		// info. Those accounts are served straight from what was imported. An expired
-		// one is reported here rather than sent upstream, where it would come back as
+	if provider == nil || token.RefreshToken == "" {
+		// No provider or no refresh token means there is nothing to refresh: an
+		// imported Cursor IDE session, or a token that does not carry one. Those
+		// accounts are served straight from what was stored. An expired one is
+		// reported here rather than sent upstream, where it would come back as
 		// an opaque auth failure with no hint that a re-import is what fixes it.
 		if !token.ExpiresAt.IsZero() && time.Now().After(token.ExpiresAt) {
-			reason := fmt.Sprintf("the imported %s session expired on %s; import a fresh one",
+			reason := fmt.Sprintf("the %s session expired on %s; import a fresh one",
 				account.Provider, token.ExpiresAt.Format("2006-01-02"))
 			if updateErr := m.store.DisableAccountWithReason(ctx, account.ID, reason); updateErr != nil {
 				return storage.Account{}, TokenSet{}, AccountInfo{}, updateErr

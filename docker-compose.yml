@@ -56,6 +56,12 @@ services:
       # Read-only, and only so Cursor's product.json can be read: its version and
       # commit have to match the installed IDE or every Cursor request is refused.
       - /Applications:/host-apps:ro
+      # Cursor CLI for the ACP-based integration: the binary lives in
+      # ~/.local/bin/agent (symlink) and its runtime under ~/.local/share/cursor-agent.
+      # Mounted read-only — the CLI authenticates through the token LiteRouter stores
+      # in its own DB, so it never needs to write its own auth state.
+      - ${HOME}/.local/bin/agent:/host-cursor-cli/agent:ro
+      - ${HOME}/.local/share/cursor-agent:/host-cursor-cli/runtime:ro
     healthcheck:
       test: ["CMD", "/literouter", "-healthcheck"]
       interval: 10s

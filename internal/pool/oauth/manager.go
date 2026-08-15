@@ -88,6 +88,49 @@ func (m *Manager) SetAntigravityProvider(provider *AntigravityProvider) {
 	m.antigravity = provider
 }
 
+// StartCursorCLI begins the Cursor CLI login flow: it creates the deep link the
+// user opens in a browser, stores the verifier in an OAuth session row, and
+// returns the URL. Unlike the browser-callback providers there is no callback
+// server; the flow completes when CompleteCursorCLI polls the Cursor auth
+// endpoint.
+func (m *Manager) StartCursorCLI(ctx context.Context) (StartResult, error) {
+	provider := NewCursorCLIProvider(nil)
+	link, err := newCursorCLIDeepLink(provider.websiteBase)
+	if err != nil {
+		return StartResult{}, err
+	}
+	state, err := m.signer.Sign("cursor", flowTTL)
+	if err != nil {
+		return StartResult{}, err
+	}
+	expiresAt := time.Now().Add(flowTTL).UTC()
+	if err := m.store.PutOAuthSession(ctx, storage.OAuthSession{
+		State: state, Provider: "cursor", Verifier: link.Verifier, ExpiresAt: expiresAt,
+	}); err != nil {
+		return StartResult{}, err
+	}
+	return StartResult{
+		Provider: "cursor", Flow: "cursor_cli_deeplink",
+		AuthURL: link.AuthURL, ExpiresAt: expiresAt.Format(time.RFC3339),
+	}, nil
+}
+
+// CompleteCursorCLI finishes the Cursor CLI login by polling the auth endpoint
+// with the stored verifier. The user must have finished logging in at the deep
+// link first.
+func (m *Manager) CompleteCursorCLI(ctx context.Context) (pool.Account, error) {
+	session, err := m.store.TakeLatestOAuthSession(ctx, "cursor")
+	if err != nil {
+		return pool.Account{}, fmt.Errorf("no active Cursor CLI session — click Connect again, authorize in browser, then submit")
+	}
+	provider := NewCursorCLIProvider(nil)
+	token, err := provider.pollToken(ctx, session.Verifier, session.ExpiresAt)
+	if err != nil {
+		return pool.Account{}, err
+	}
+	return m.saveAccount(ctx, provider, token)
+}
+
 func (m *Manager) StartAntigravity(ctx context.Context) (StartResult, error) {
 	provider := m.antigravity
 	if provider == nil {

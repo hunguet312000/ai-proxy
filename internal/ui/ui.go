@@ -55,10 +55,12 @@ var oauthModalTemplate = template.Must(template.New("oauth-modal").Parse(`
       <p class="oauth-hint">{{.Step2Hint}}</p>
       <form class="oauth-complete-form" hx-post="/ui/oauth/complete" hx-target="#oauth-complete-result" hx-swap="innerHTML" hx-disabled-elt="find button[type=submit]" data-oauth-complete-form>
         <input type="hidden" name="provider" value="{{.Provider}}">
+        {{if .ManualCallback}}
         <input class="field" name="callback" placeholder="{{.Placeholder}}" autocomplete="off" spellcheck="false" required data-oauth-callback-input>
+        {{end}}
         <div id="oauth-complete-result" class="oauth-complete-result" aria-live="polite"></div>
         <div class="oauth-actions">
-          <button class="btn primary" type="submit">Connect</button>
+          <button class="btn primary" type="submit">{{.SubmitLabel}}</button>
           <button class="btn ghost" type="button" data-oauth-close>Cancel</button>
         </div>
       </form>
@@ -2169,6 +2171,8 @@ func (s *Service) oauthHandler(c echo.Context) error {
 	step2 := "Step 2: Paste the callback URL here"
 	step2hint := "After authorization, copy the full URL from your browser."
 	placeholder := "http://localhost/callback?code=…"
+	manualCallback := true
+	submitLabel := "Connect"
 	switch provider {
 	case "codex":
 		title = "Connect OpenAI Codex"
@@ -2185,6 +2189,15 @@ func (s *Service) oauthHandler(c echo.Context) error {
 		step2 = "Step 2: Paste the full callback URL here"
 		step2hint = "Prefer the full localhost callback URL. If the browser only shows a broken page, paste the bare code= value and LiteRouter will pair it with the open session."
 		placeholder = "http://127.0.0.1:1456/callback?code=…&state=…  or bare code"
+	case "cursor":
+		title = "Connect Cursor"
+		waiting = "Waiting for Cursor login…"
+		step1 = "Step 1: Open this Cursor login link in your browser"
+		step2 = "Step 2: After logging in, click Done"
+		step2hint = "No callback URL to paste. Just log in with your Cursor account, then click Done — LiteRouter finishes the login in the background."
+		placeholder = ""
+		manualCallback = false
+		submitLabel = "Done — I've logged in"
 	}
 
 	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
@@ -2192,6 +2205,8 @@ func (s *Service) oauthHandler(c echo.Context) error {
 		"Provider": provider, "Title": title, "Waiting": waiting,
 		"Step1": step1, "Step2": step2, "Step2Hint": step2hint,
 		"Placeholder": placeholder, "AuthURL": href, "UserCode": result.UserCode,
+		"ManualCallback": map[bool]string{true: "1", false: ""}[manualCallback],
+		"SubmitLabel":    submitLabel,
 	})
 }
 
@@ -2210,7 +2225,11 @@ func (s *Service) oauthCompleteHandler(c echo.Context) error {
 	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
 	if err := s.completeOAuth(c.Request().Context(), provider, raw); err != nil {
 		// Return 200 HTML so HTMX swaps the error into the modal (4xx is not swapped by default).
-		_, werr := fmt.Fprintf(c.Response(), `<div class="oauth-modal-error" role="alert"><strong>Connect failed</strong><p>%s</p><p class="oauth-error-hint">Best: full URL <code>http://127.0.0.1:1456/callback?code=…&amp;state=…</code>. Also OK: bare <code>code</code> right after clicking Connect (uses the open session).</p></div>`, template.HTMLEscapeString(err.Error()))
+		hint := `<p class="oauth-error-hint">Best: full URL <code>http://127.0.0.1:1456/callback?code=…&amp;state=…</code>. Also OK: bare <code>code</code> right after clicking Connect (uses the open session).</p>`
+		if strings.EqualFold(provider, "cursor") {
+			hint = `<p class="oauth-error-hint">Open the login link, complete login in the browser, then click Done again. If it keeps failing, click Connect to start a fresh session.</p>`
+		}
+		_, werr := fmt.Fprintf(c.Response(), `<div class="oauth-modal-error" role="alert"><strong>Connect failed</strong><p>%s</p>%s</div>`, template.HTMLEscapeString(err.Error()), hint)
 		return werr
 	}
 	_, err := c.Response().Write([]byte(`<div class="oauth-modal-success" data-oauth-done="1"><strong>Connected</strong><p>Account saved. You can close this dialog.</p></div>`))

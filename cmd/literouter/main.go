@@ -128,6 +128,7 @@ func run() int {
 	claudeProvider := pooloauth.NewClaudeProvider(nil)
 	grokProvider := pooloauth.NewGrokProvider(nil)
 	antigravityProvider := pooloauth.NewAntigravityProvider(nil)
+	cursorCLIProvider := pooloauth.NewCursorCLIProvider(nil)
 	// The OAuth app identity comes from LiteRouter's own settings, configured in the UI —
 	// never hardcoded and never from env. Restore it here so a restart keeps the login.
 	if clientID, storedErr := store.GetSetting(context.Background(), "antigravity.client_id"); storedErr == nil {
@@ -142,7 +143,7 @@ func run() int {
 	// The OAuth flows must use the same provider instance that carries the configured
 	// credentials; a fresh one inside the manager would authorize with an empty client id.
 	oauthManager.SetAntigravityProvider(antigravityProvider)
-	credentialManager := pooloauth.NewCredentialManager(store, accountPool, logger, codexProvider, claudeProvider, grokProvider, antigravityProvider)
+	credentialManager := pooloauth.NewCredentialManager(store, accountPool, logger, codexProvider, claudeProvider, grokProvider, antigravityProvider, cursorCLIProvider)
 	usageService := usage.NewService(store, accountPool, credentialManager)
 	usageService.SetLogger(logger)
 	oauthManager.SetOnAccountConnected(func(ctx context.Context, accountID string) {
@@ -356,6 +357,8 @@ func run() int {
 			result, err = oauthManager.StartGrok(ctx)
 		case "antigravity":
 			result, err = oauthManager.StartAntigravity(ctx)
+		case "cursor":
+			result, err = oauthManager.StartCursorCLI(ctx)
 		default:
 			return ui.OAuthResult{}, fmt.Errorf("unsupported provider")
 		}
@@ -832,6 +835,10 @@ func run() int {
 		return err
 	})
 	uiService.SetCompleteOAuth(func(ctx context.Context, provider, raw string) error {
+		if strings.EqualFold(provider, "cursor") {
+			_, err := oauthManager.CompleteCursorCLI(ctx)
+			return err
+		}
 		_, err := oauthManager.CompleteManualCallback(ctx, provider, raw)
 		return err
 	})
@@ -908,8 +915,10 @@ func run() int {
 			result, err = oauthManager.StartGrok(c.Request().Context())
 		case "antigravity":
 			result, err = oauthManager.StartAntigravity(c.Request().Context())
+		case "cursor":
+			result, err = oauthManager.StartCursorCLI(c.Request().Context())
 		default:
-			return echo.NewHTTPError(http.StatusBadRequest, "provider must be codex, claude, xai, or antigravity")
+			return echo.NewHTTPError(http.StatusBadRequest, "provider must be codex, claude, xai, antigravity, or cursor")
 		}
 		if err != nil {
 			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
