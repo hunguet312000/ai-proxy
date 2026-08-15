@@ -775,7 +775,7 @@ func (s *Service) prepareStreamCandidate(ctx context.Context, request translator
 		return translator.OpenAIRequest{}, 0, err
 	}
 	result.PromptCacheKey = request.PromptCacheKey
-	return result, contextguard.EstimateRequest(candidate), nil
+	return injectEditLoopReminder(result), contextguard.EstimateRequest(candidate), nil
 }
 
 // stripProviderImages replaces every image block in a provider request with a text
@@ -824,7 +824,9 @@ func (s *Service) prepareOpenAIRequest(ctx context.Context, request translator.O
 		return translator.OpenAIRequest{}, err
 	}
 	result.PromptCacheKey = request.PromptCacheKey
-	return result, nil
+	// A stuck edit loop is visible here, on the final OpenAI form, before any
+	// provider serialization. Inject the corrective reminder once detected.
+	return injectEditLoopReminder(result), nil
 }
 
 func (s *Service) Messages(ctx context.Context, request translator.AnthropicRequest) (translator.AnthropicResponse, error) {
