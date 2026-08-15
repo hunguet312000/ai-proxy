@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -46,6 +45,10 @@ type cursorACPAgent struct {
 	nextID    uint64
 	onNotify  func(method string, params json.RawMessage)
 	onRequest func(method string, params json.RawMessage, reply func(result any, err error))
+	// closed is set by close(); alive() consults it. Process.Wait() does not
+	// populate cmd.ProcessState, so the flag is the reliable "no longer usable"
+	// signal.
+	closed bool
 }
 
 // setNotify swaps the notification handler. The pool uses this to bind a
@@ -54,6 +57,22 @@ func (a *cursorACPAgent) setNotify(fn func(method string, params json.RawMessage
 	a.mu.Lock()
 	a.onNotify = fn
 	a.mu.Unlock()
+}
+
+// alive reports whether the underlying transport is still usable: the agent has
+// not been explicitly closed, the spawned process is still running (host mode),
+// or the bridge connection is open (bridge mode). The pool calls this before
+// handing an entry to a turn so a dead agent is replaced instead of resumed.
+func (a *cursorACPAgent) alive() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return false
+	}
+	// No peek: reading would consume bytes the read loop needs. The closed flag
+	// is set both by close() and by readLoop when the transport ends (EOF, reset,
+	// process crash), which covers every way an agent stops being usable.
+	return a.conn != nil || a.cmd != nil
 }
 
 func (a *cursorACPAgent) notify(method string, params json.RawMessage) {
@@ -131,14 +150,16 @@ func dialCursorACPAgent(host string, onNotify func(string, json.RawMessage), onR
 }
 
 func (a *cursorACPAgent) readLoop() {
+	defer func() {
+		// The transport ended (EOF, close, or crash). Mark the agent dead so the
+		// pool replaces it on the next acquire instead of resuming a zombie.
+		a.mu.Lock()
+		a.closed = true
+		a.mu.Unlock()
+	}()
 	for {
 		line, err := a.reader.ReadBytes('\n')
 		if err != nil {
-			// A nil cmd means bridge mode (dialCursorACPAgent); there is no process
-			// to inspect. EOF there just means the host closed the connection.
-			if !errors.Is(err, io.EOF) && a.cmd != nil && a.cmd.ProcessState == nil {
-				// process died unexpectedly
-			}
 			return
 		}
 		var msg struct {
@@ -233,6 +254,13 @@ func (a *cursorACPAgent) send(ctx context.Context, method string, params any) (j
 
 // close terminates the agent process.
 func (a *cursorACPAgent) close() {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return
+	}
+	a.closed = true
+	a.mu.Unlock()
 	_ = a.stdin.Close()
 	if a.conn != nil {
 		_ = a.conn.Close()
