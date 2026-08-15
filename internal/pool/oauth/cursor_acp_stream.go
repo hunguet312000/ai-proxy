@@ -43,16 +43,16 @@ func cursorACPAutoApprove() func(method string, params json.RawMessage, reply fu
 	}
 }
 
-// runCursorACPTurn spawns an ACP agent, creates a session in cwd, prompts it, and
-// returns a reader that yields OpenAI stream chunks until the turn ends.
-func runCursorACPTurn(ctx context.Context, cwd, prompt, fallbackModel string) (io.ReadCloser, error) {
+// runCursorACPTurn drives one turn through the session pool: the agent and
+// session are reused across turns of the same conversation, so only the first
+// turn pays the ~7.5s spawn/init/auth/session-new cost. Returns a reader that
+// yields OpenAI stream chunks until the turn ends.
+func runCursorACPTurn(ctx context.Context, conversationID, cwd, prompt, fallbackModel string) (io.ReadCloser, error) {
 	reader, writer := io.Pipe()
 	stream := &cursorACPStreamReader{reader: reader}
+	key := cursorACPKey(conversationID, fallbackModel, cwd)
 
-	// The ACP agent is spawned per turn. A long-lived process would survive many
-	// turns and keep its conversation state, but the IDE protocol's cache does the
-	// same job; a fresh process per turn is simpler and isolates failures.
-	agent, err := newCursorACPAgent(cwd, func(method string, params json.RawMessage) {
+	onUpdate := func(method string, params json.RawMessage) {
 		if method != "session/update" {
 			return
 		}
@@ -115,52 +115,43 @@ func runCursorACPTurn(ctx context.Context, cwd, prompt, fallbackModel string) (i
 				})
 			}
 		}
-	}, cursorACPAutoApprove())
+	}
+
+	entry, err := cursorACPPool.acquire(ctx, key, onUpdate)
 	if err != nil {
 		_ = reader.CloseWithError(err)
 		return nil, err
 	}
-	stream.agent = agent
+	stream.agent = entry.agent
 
 	go func() {
-		defer agent.close()
 		defer writer.Close()
-		if err := stream.runTurn(ctx, writer, prompt, fallbackModel); err != nil {
+		client := &cursorACPClient{agent: entry.agent}
+		// The session was created at acquire; only the prompt is per-turn now.
+		if _, err := client.prompt(ctx, entry.sessionID, prompt); err != nil {
+			_ = writer.CloseWithError(err)
+			cursorACPPool.release(key, entry, false)
+			return
+		}
+		cursorACPPool.release(key, entry, true)
+		// The prompt returned; the turn is done.
+		finish := "stop"
+		terminal := map[string]any{
+			"id": "cursor-response", "object": "chat.completion.chunk", "model": fallbackModel,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": finish}},
+		}
+		encoded, err := json.Marshal(terminal)
+		if err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+		_, err = fmt.Fprintf(writer, "data: %s\n\ndata: [DONE]\n\n", encoded)
+		if err != nil {
 			_ = writer.CloseWithError(err)
 		}
 	}()
 
 	return stream, nil
-}
-
-func (s *cursorACPStreamReader) runTurn(ctx context.Context, writer *io.PipeWriter, prompt, fallbackModel string) error {
-	client := &cursorACPClient{agent: s.agent}
-	if err := client.initialize(ctx); err != nil {
-		return err
-	}
-	if err := client.authenticate(ctx); err != nil {
-		return err
-	}
-	cwd := "."
-	sessionID, err := client.newSession(ctx, cwd)
-	if err != nil {
-		return err
-	}
-	if _, err := client.prompt(ctx, sessionID, prompt); err != nil {
-		return err
-	}
-	// The prompt returned; the turn is done.
-	finish := "stop"
-	terminal := map[string]any{
-		"id": "cursor-response", "object": "chat.completion.chunk", "model": fallbackModel,
-		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": finish}},
-	}
-	encoded, err := json.Marshal(terminal)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(writer, "data: %s\n\ndata: [DONE]\n\n", encoded)
-	return err
 }
 
 func emitACPChunk(writer *io.PipeWriter, fallbackModel string, delta map[string]any) error {
@@ -183,10 +174,9 @@ func (s *cursorACPStreamReader) Read(p []byte) (int, error) {
 func (s *cursorACPStreamReader) Close() error {
 	var err error
 	s.once.Do(func() {
+		// The agent lifecycle is owned by the pool, not the stream: closing the
+		// stream only closes the pipe, so a reused session survives to the next turn.
 		err = s.reader.Close()
-		if s.agent != nil {
-			s.agent.close()
-		}
 	})
 	return err
 }

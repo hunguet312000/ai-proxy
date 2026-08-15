@@ -39,6 +39,7 @@ type Inference struct {
 func NewInference(credentials *CredentialManager, selector *pool.Selector) *Inference {
 	// No client-level Timeout: Claude/Codex streams and long tool turns must not be hard-killed.
 	// Per-attempt deadlines stay on the request context where needed.
+	startACPPoolSweeper(context.Background())
 	return &Inference{credentials: credentials, selector: selector, client: &http.Client{}}
 }
 
@@ -398,7 +399,7 @@ func (inference *Inference) call(ctx context.Context, providerName string, crede
 	// force the legacy IDE-protocol path.
 	if providerName == "cursor" && cursorACPAvailable() {
 		trimmed := trimCursorFold(request, model)
-		return runCursorACPTurn(ctx, cursorACPWorkspace(), acpPromptFromRequest(trimmed), model)
+		return runCursorACPTurn(ctx, conversationID, cursorACPWorkspace(), acpPromptFromRequest(trimmed), model)
 	}
 	var endpoint string
 	var payload any

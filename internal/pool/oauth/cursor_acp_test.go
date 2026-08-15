@@ -89,7 +89,7 @@ func TestCursorACPLive(t *testing.T) {
 	if !cursorACPAvailable() {
 		t.Skip("cursor CLI agent not available")
 	}
-	reader, err := runCursorACPTurn(context.Background(), ".", "Reply with exactly: ACP2 works", "test-model")
+	reader, err := runCursorACPTurn(context.Background(), "test-conv-1", ".", "Reply with exactly: ACP2 works", "test-model")
 	if err != nil {
 		t.Fatalf("runCursorACPTurn: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestCursorACPLiveTool(t *testing.T) {
 	if !cursorACPAvailable() {
 		t.Skip("cursor CLI agent not available")
 	}
-	reader, err := runCursorACPTurn(context.Background(), ".",
+	reader, err := runCursorACPTurn(context.Background(), "test-conv-2", ".",
 		"Run the shell command `ls /tmp | head -2` then reply with exactly TOOL_DONE", "test-model")
 	if err != nil {
 		t.Fatalf("runCursorACPTurn: %v", err)

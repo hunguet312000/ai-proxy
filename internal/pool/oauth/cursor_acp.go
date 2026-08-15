@@ -48,6 +48,23 @@ type cursorACPAgent struct {
 	onRequest func(method string, params json.RawMessage, reply func(result any, err error))
 }
 
+// setNotify swaps the notification handler. The pool uses this to bind a
+// per-turn streaming handler while a prompt runs, then clear it.
+func (a *cursorACPAgent) setNotify(fn func(method string, params json.RawMessage)) {
+	a.mu.Lock()
+	a.onNotify = fn
+	a.mu.Unlock()
+}
+
+func (a *cursorACPAgent) notify(method string, params json.RawMessage) {
+	a.mu.Lock()
+	fn := a.onNotify
+	a.mu.Unlock()
+	if fn != nil {
+		fn(method, params)
+	}
+}
+
 // cursorACPClient is the high-level ACP client used by inference.
 type cursorACPClient struct {
 	agent *cursorACPAgent
@@ -174,10 +191,8 @@ func (a *cursorACPAgent) readLoop() {
 				})
 				continue
 			}
-			if a.onNotify != nil {
-				a.onNotify(msg.Method, msg.Params)
-				continue
-			}
+			a.notify(msg.Method, msg.Params)
+			continue
 		}
 	}
 }
