@@ -388,10 +388,17 @@ func (inference *Inference) call(ctx context.Context, providerName string, crede
 	// the CLI as an agent, authenticates with the token LiteRouter stored, and
 	// streams the turn back. It needs no HTTP request at all, so it returns early.
 	//
+	// The prompt fold is bounded by the same latency budget the IDE path uses
+	// (cursorTrimFold): Cursor answers ~5s per 25k tokens of context, so a 300k
+	// transcript shipped raw would take the agent a minute before it started
+	// answering. Trimming first keeps the turn interactive — the system preamble
+	// and recent messages survive, older turns are dropped.
+	//
 	// Enabled by default when the CLI is on PATH. Set LITEROUTER_CURSOR_ACP=0 to
 	// force the legacy IDE-protocol path.
 	if providerName == "cursor" && cursorACPAvailable() {
-		return runCursorACPTurn(ctx, cursorACPWorkspace(), acpPromptFromRequest(request), model)
+		trimmed := trimCursorFold(request, model)
+		return runCursorACPTurn(ctx, cursorACPWorkspace(), acpPromptFromRequest(trimmed), model)
 	}
 	var endpoint string
 	var payload any
@@ -775,11 +782,15 @@ func collectOpenAIStream(body io.Reader, fallbackModel string) (translator.OpenA
 }
 
 // cursorACPAvailable reports whether the Cursor CLI agent is usable for the ACP
-// path. It is on when the binary is found and the opt-out env is not set.
+// path. It is on when either a bridge host is configured (container mode) or the
+// binary is found (host mode), and the opt-out env is not set.
 // LITEROUTER_CURSOR_ACP=0 forces the legacy IDE-protocol path.
 func cursorACPAvailable() bool {
 	if os.Getenv("LITEROUTER_CURSOR_ACP") == "0" {
 		return false
+	}
+	if os.Getenv("LITEROUTER_CURSOR_ACP_HOST") != "" {
+		return true
 	}
 	return cursorACPBinary() != ""
 }

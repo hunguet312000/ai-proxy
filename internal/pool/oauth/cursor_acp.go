@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -29,10 +31,14 @@ import (
 // The CLI authenticates through the token LiteRouter stores in the DB (Phase 1),
 // so no keychain access is needed inside the container.
 
-// cursorACPAgent wraps one spawned `agent acp` process and speaks JSON-RPC to it.
+// cursorACPAgent wraps one spawned `agent acp` process (or one TCP connection to
+// the host bridge) and speaks JSON-RPC to it.
 type cursorACPAgent struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
+	cmd   *exec.Cmd
+	stdin io.WriteCloser
+	// conn is set only in bridge mode (dialCursorACPAgent); closing it ends the
+	// host-side agent.
+	conn   net.Conn
 	reader *bufio.Reader
 	// responses keyed by id
 	mu        sync.Mutex
@@ -48,9 +54,16 @@ type cursorACPClient struct {
 }
 
 func newCursorACPAgent(cwd string, onNotify func(string, json.RawMessage), onRequest func(string, json.RawMessage, func(any, error))) (*cursorACPAgent, error) {
+	// The CLI ships a macOS binary, so inside a Linux container it cannot be
+	// spawned directly. When LITEROUTER_CURSOR_ACP_HOST is set, LiteRouter talks
+	// to a host-side bridge (scripts/cursor-acp-bridge.js) over TCP instead:
+	// each connection there spawns a fresh `agent acp` and relays stdio.
+	if host := os.Getenv("LITEROUTER_CURSOR_ACP_HOST"); host != "" {
+		return dialCursorACPAgent(host, onNotify, onRequest)
+	}
 	binary := cursorACPBinary()
 	if binary == "" {
-		return nil, fmt.Errorf("cursor CLI agent not found (no agent on PATH and no /host-cursor-cli/versions)")
+		return nil, fmt.Errorf("cursor CLI agent not found (no agent on PATH, no /host-cursor-cli/versions, and LITEROUTER_CURSOR_ACP_HOST unset)")
 	}
 	cmd := exec.Command(binary, "acp")
 	cmd.Dir = cwd
@@ -82,11 +95,31 @@ func newCursorACPAgent(cwd string, onNotify func(string, json.RawMessage), onReq
 	return agent, nil
 }
 
+// dialCursorACPAgent connects to the host bridge over TCP. Each dial maps to one
+// `agent acp` process on the host; the connection is per turn, matching the
+// spawn-per-turn lifecycle of the local path.
+func dialCursorACPAgent(host string, onNotify func(string, json.RawMessage), onRequest func(string, json.RawMessage, func(any, error))) (*cursorACPAgent, error) {
+	conn, err := net.DialTimeout("tcp", host, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("connect cursor acp bridge %s: %w", host, err)
+	}
+	agent := &cursorACPAgent{
+		stdin: conn, reader: bufio.NewReader(conn),
+		pending:  make(map[uint64]chan json.RawMessage),
+		onNotify: onNotify, onRequest: onRequest,
+		conn: conn,
+	}
+	go agent.readLoop()
+	return agent, nil
+}
+
 func (a *cursorACPAgent) readLoop() {
 	for {
 		line, err := a.reader.ReadBytes('\n')
 		if err != nil {
-			if !errors.Is(err, io.EOF) && a.cmd.ProcessState == nil {
+			// A nil cmd means bridge mode (dialCursorACPAgent); there is no process
+			// to inspect. EOF there just means the host closed the connection.
+			if !errors.Is(err, io.EOF) && a.cmd != nil && a.cmd.ProcessState == nil {
 				// process died unexpectedly
 			}
 			return
@@ -186,10 +219,13 @@ func (a *cursorACPAgent) send(ctx context.Context, method string, params any) (j
 // close terminates the agent process.
 func (a *cursorACPAgent) close() {
 	_ = a.stdin.Close()
-	if a.cmd.Process != nil {
-		_ = a.cmd.Process.Kill()
+	if a.conn != nil {
+		_ = a.conn.Close()
 	}
-	_, _ = a.cmd.Process.Wait()
+	if a.cmd != nil && a.cmd.Process != nil {
+		_ = a.cmd.Process.Kill()
+		_, _ = a.cmd.Process.Wait()
+	}
 }
 
 // initialize handshakes and returns agent capabilities.

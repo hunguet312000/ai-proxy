@@ -49,10 +49,13 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       XAI_API_KEY: "${XAI_API_KEY:-}"
       LITEROUTER_LOG_LEVEL: "${LITEROUTER_LOG_LEVEL:-info}"
-      # The ACP agent is found by name on PATH. The versions dir is scanned for
-      # the newest build at runtime (see cursorACPBinary), so an auto-update of
-      # the CLI does not require touching this file.
-      PATH: "/host-cursor-cli/versions:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      # The Cursor CLI ships a macOS binary that cannot run in this Linux
+      # container, so LiteRouter talks to a host-side bridge over TCP instead:
+      # scripts/cursor-acp-bridge.js spawns `agent acp` on the host and relays
+      # newline-delimited JSON-RPC. Start it with:
+      #   node scripts/cursor-acp-bridge.js
+      # (Port 1459 is bound on the host and published below.)
+      LITEROUTER_CURSOR_ACP_HOST: "host.docker.internal:1459"
     volumes:
       - literouter-data:/data
       # Host home so CLI Apply/Reset can write ~/.claude and ~/.codex like 9router.

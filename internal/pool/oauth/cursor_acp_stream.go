@@ -130,7 +130,7 @@ func runCursorACPTurn(ctx context.Context, cwd, prompt, fallbackModel string) (i
 		}
 	}()
 
-	return reader, nil
+	return stream, nil
 }
 
 func (s *cursorACPStreamReader) runTurn(ctx context.Context, writer *io.PipeWriter, prompt, fallbackModel string) error {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1296,8 +1297,17 @@ func requestAlreadySummarized(request provider.Request) bool {
 // Only cursor models with a large enough window (composer ~194k) skip; the small
 // window grok variants (161k) must still trim, or a long session overflows the
 // window and the upstream hangs instead of answering.
+//
+// The ACP transport (LITEROUTER_CURSOR_ACP_HOST set) feeds the whole transcript
+// to the CLI agent as one prompt fold, so trimming there directly cuts what the
+// agent must read — a 300k-token turn is otherwise shipped raw and costs tens of
+// seconds of agent time. With ACP enabled, cursor no longer skips: the pipeline
+// compacts/trims before the fold, keeping the payload bounded.
 func skipPreemptiveTrimFor(model string, window int) bool {
 	if providerNameForModel(model) != "cursor" {
+		return false
+	}
+	if os.Getenv("LITEROUTER_CURSOR_ACP_HOST") != "" {
 		return false
 	}
 	// Cursor models whose window is at or above the composer floor keep their
