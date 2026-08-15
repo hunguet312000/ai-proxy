@@ -394,30 +394,10 @@
 
     <div class="conn-add-row">
       {{if .Provider}}
-      {{if eq .Provider.ID "cursor"}}
-      <form class="cursor-import" hx-post="/ui/oauth/cursor/detect" hx-target="#oauth-result" hx-swap="innerHTML">
-        <p class="hint">Cursor has no sign-in flow to run. LiteRouter can read the session straight out of the installed IDE — it expires and has no refresh token, so this has to be repeated when it does.</p>
-        <button class="btn primary" type="submit">Detect local Cursor session</button>
-      </form>
-      <form class="cursor-import" hx-post="/ui/oauth/cursor/import" hx-target="#oauth-result" hx-swap="innerHTML">
-        <p class="hint">Or paste it by hand, for a Cursor installed somewhere this server cannot read.</p>
-        <details>
-          <summary>Where to find these</summary>
-          <pre><code>sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
-  "SELECT value FROM itemTable WHERE key='cursorAuth/accessToken'"
-sqlite3 ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb \
-  "SELECT value FROM itemTable WHERE key='storage.serviceMachineId'"</code></pre>
-        </details>
-        <textarea class="field grow" name="access_token" rows="3" placeholder="cursorAuth/accessToken" autocomplete="off" required></textarea>
-        <input class="field grow" name="machine_id" placeholder="storage.serviceMachineId (UUID)" autocomplete="off" required>
-        <button class="btn secondary" type="submit">Import pasted session</button>
-      </form>
-      {{else}}
       <form hx-post="/ui/oauth/start" hx-target="#oauth-result" hx-swap="innerHTML">
         <input type="hidden" name="provider" value="{{.Provider.OAuthValue}}">
         <button class="btn primary" type="submit">+ Add {{if eq .Provider.ID "xai"}}xAI OAuth{{else}}{{.Provider.Name}} OAuth{{end}}</button>
       </form>
-      {{end}}
       {{end}}
       <div id="oauth-result" class="flash" aria-live="polite"></div>
     </div>

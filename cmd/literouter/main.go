@@ -812,14 +812,6 @@ func run() int {
 		logger.Error("initialize UI", "error", err)
 		return 1
 	}
-	uiService.SetDetectCursor(func(ctx context.Context) (string, error) {
-		_, path, err := oauthManager.DetectAndImportCursorAccount(ctx)
-		return path, err
-	})
-	uiService.SetImportCursor(func(ctx context.Context, accessToken, machineID string) error {
-		_, err := oauthManager.ImportCursorAccount(ctx, accessToken, machineID)
-		return err
-	})
 	uiService.SetCustomProviderHooks(ui.CustomProviderHooks{
 		List:      store.ListCustomProviders,
 		Create:    store.CreateCustomProvider,

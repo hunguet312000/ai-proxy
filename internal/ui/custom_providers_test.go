@@ -2,7 +2,6 @@ package ui
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -486,144 +485,24 @@ func TestCustomProviderHeroShowsNameAndKeyCount(t *testing.T) {
 	}
 }
 
-func TestCursorDetailPageOffersImportNotOAuth(t *testing.T) {
-	// Cursor has no authorization endpoint, so an OAuth button there is a dead end.
+func TestCursorDetailPageOffersOAuth(t *testing.T) {
+	// Cursor connects through the CLI deep-link login like every other OAuth
+	// provider; the old IDE-session import form is gone.
 	e, _ := newCustomProviderUI(t, CustomProviderHooks{
 		List: func(context.Context) ([]storage.CustomProvider, error) { return nil, nil },
 	})
 	recorder := httptest.NewRecorder()
 	e.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/ui/providers/cursor", nil))
 	body := recorder.Body.String()
-	if strings.Contains(body, "Add Cursor OAuth") {
-		t.Fatalf("the Cursor page offers an OAuth flow that does not exist: %s", body)
+	if !strings.Contains(body, "Add Cursor OAuth") {
+		t.Fatalf("the Cursor page no longer offers the OAuth connect button: %s", body)
 	}
-	// Auto-detect is the primary path; the paste form stays for a Cursor installed
-	// where this server cannot read it.
-	for _, want := range []string{"Detect local Cursor session", "Import pasted session",
-		"cursorAuth/accessToken", "storage.serviceMachineId"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("import form missing %q", want)
+	for _, gone := range []string{"Detect local Cursor session", "Import pasted session",
+		"cursorAuth/accessToken", "storage.serviceMachineId", "agent.api5.cursor.sh"} {
+		if strings.Contains(body, gone) {
+			t.Fatalf("legacy IDE-import UI still present: %q in %s", gone, body)
 		}
 	}
 }
 
-func TestCursorImportRequiresBothValuesAndSameOrigin(t *testing.T) {
-	var gotToken, gotMachine string
-	service, e := (*Service)(nil), (*echo.Echo)(nil)
-	e, service = newCustomProviderUI(t, CustomProviderHooks{
-		List: func(context.Context) ([]storage.CustomProvider, error) { return nil, nil },
-	})
-	service.SetImportCursor(func(_ context.Context, token, machine string) error {
-		gotToken, gotMachine = token, machine
-		return nil
-	})
 
-	// Cross-origin must never reach the importer: it writes a credential.
-	cross := httptest.NewRequest(http.MethodPost, "/ui/oauth/cursor/import",
-		strings.NewReader("access_token=t&machine_id=m"))
-	cross.Header.Set(echo.HeaderContentType, echo.MIMEApplicationForm)
-	cross.Header.Set("Origin", "https://evil.example.com")
-	denied := httptest.NewRecorder()
-	e.ServeHTTP(denied, cross)
-	if denied.Code != http.StatusForbidden {
-		t.Fatalf("cross-origin import status = %d", denied.Code)
-	}
-	if gotToken != "" {
-		t.Fatal("a cross-origin request reached the importer")
-	}
-
-	// A half-filled form is refused rather than stored.
-	partial := httptest.NewRecorder()
-	e.ServeHTTP(partial, htmxPost("/ui/oauth/cursor/import", url.Values{"access_token": {"t"}}))
-	if partial.Code != http.StatusBadRequest {
-		t.Fatalf("partial import status = %d", partial.Code)
-	}
-
-	ok := httptest.NewRecorder()
-	e.ServeHTTP(ok, htmxPost("/ui/oauth/cursor/import", url.Values{
-		"access_token": {"token-value"}, "machine_id": {"machine-value"},
-	}))
-	if ok.Code != http.StatusOK {
-		t.Fatalf("import status = %d, body = %s", ok.Code, ok.Body.String())
-	}
-	if gotToken != "token-value" || gotMachine != "machine-value" {
-		t.Fatalf("importer got %q / %q", gotToken, gotMachine)
-	}
-	// The submitted token must not be echoed back into the page.
-	if strings.Contains(ok.Body.String(), "token-value") {
-		t.Fatal("the imported token was rendered back to the browser")
-	}
-}
-
-func TestCursorImportSurfacesTheReason(t *testing.T) {
-	service, e := (*Service)(nil), (*echo.Echo)(nil)
-	e, service = newCustomProviderUI(t, CustomProviderHooks{
-		List: func(context.Context) ([]storage.CustomProvider, error) { return nil, nil },
-	})
-	service.SetImportCursor(func(context.Context, string, string) error {
-		return errors.New("this Cursor session expired on 2026-05-07")
-	})
-	recorder := httptest.NewRecorder()
-	e.ServeHTTP(recorder, htmxPost("/ui/oauth/cursor/import", url.Values{
-		"access_token": {"t"}, "machine_id": {"m"},
-	}))
-	// An expired session is the common case and the message has to say so.
-	if !strings.Contains(recorder.Body.String(), "expired on 2026-05-07") {
-		t.Fatalf("reason not shown: %s", recorder.Body.String())
-	}
-}
-
-func TestCursorDetectReportsWhereItRead(t *testing.T) {
-	service, e := (*Service)(nil), (*echo.Echo)(nil)
-	e, service = newCustomProviderUI(t, CustomProviderHooks{
-		List: func(context.Context) ([]storage.CustomProvider, error) { return nil, nil },
-	})
-	service.SetDetectCursor(func(context.Context) (string, error) {
-		return "/host-home/Library/Application Support/Cursor/User/globalStorage/state.vscdb", nil
-	})
-	recorder := httptest.NewRecorder()
-	e.ServeHTTP(recorder, htmxPost("/ui/oauth/cursor/detect", url.Values{}))
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	// Naming the file is how one Cursor profile is told from another.
-	if !strings.Contains(recorder.Body.String(), "state.vscdb") {
-		t.Fatalf("result does not name the install: %s", recorder.Body.String())
-	}
-}
-
-func TestCursorDetectSurfacesTheFailure(t *testing.T) {
-	service, e := (*Service)(nil), (*echo.Echo)(nil)
-	e, service = newCustomProviderUI(t, CustomProviderHooks{
-		List: func(context.Context) ([]storage.CustomProvider, error) { return nil, nil },
-	})
-	service.SetDetectCursor(func(context.Context) (string, error) {
-		return "", errors.New("no Cursor session found on this machine")
-	})
-	recorder := httptest.NewRecorder()
-	e.ServeHTTP(recorder, htmxPost("/ui/oauth/cursor/detect", url.Values{}))
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d", recorder.Code)
-	}
-	if !strings.Contains(recorder.Body.String(), "no Cursor session found") {
-		t.Fatalf("reason not shown: %s", recorder.Body.String())
-	}
-}
-
-func TestCursorDetectRequiresSameOrigin(t *testing.T) {
-	service, e := (*Service)(nil), (*echo.Echo)(nil)
-	e, service = newCustomProviderUI(t, CustomProviderHooks{
-		List: func(context.Context) ([]storage.CustomProvider, error) { return nil, nil },
-	})
-	service.SetDetectCursor(func(context.Context) (string, error) {
-		t.Fatal("a cross-origin request reached local disk")
-		return "", nil
-	})
-	request := httptest.NewRequest(http.MethodPost, "/ui/oauth/cursor/detect", nil)
-	request.Header.Set("Origin", "https://evil.example.com")
-	recorder := httptest.NewRecorder()
-	e.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", recorder.Code)
-	}
-}

@@ -241,8 +241,6 @@ type Service struct {
 	apiKeys         APIKeyHooks
 	modelsHook      ModelHooks
 	customProviders CustomProviderHooks
-	importCursor    func(context.Context, string, string) error
-	detectCursor    func(context.Context) (string, error)
 	settings        SettingsHooks
 	usage           UsageHooks
 	apiToken        string
@@ -450,9 +448,9 @@ func knownProviders() []ProviderInfo {
 		{ID: "claude", Name: "Claude", Description: "Anthropic OAuth", Icon: "claude", OAuthValue: "claude"},
 		{ID: "xai", Name: "xAI (Grok)", Description: "Browser OAuth · auth.x.ai", Icon: "xai", OAuthValue: "xai"},
 		{ID: "antigravity", Name: "Antigravity", Description: "Google OAuth · Cloud Code", Icon: "antigravity", OAuthValue: "antigravity"},
-		// Cursor has no authorization endpoint: the session is imported from the IDE,
-		// so OAuthValue stays empty and the detail page offers an import form instead.
-		{ID: "cursor", Name: "Cursor", Description: "Imported IDE session · agent.api5.cursor.sh", Icon: "cursor"},
+		// Cursor connects through the CLI's deep-link login (like `agent login`):
+		// the token lands in LiteRouter's DB, encrypted, with a refresh token.
+		{ID: "cursor", Name: "Cursor", Description: "CLI OAuth · cursor.com login", Icon: "cursor", OAuthValue: "cursor"},
 	}
 }
 
@@ -1035,51 +1033,6 @@ func (s *Service) SetCustomProviderHooks(hooks CustomProviderHooks) {
 	s.customProviders = hooks
 }
 
-// SetImportCursor wires the Cursor session import. Cursor has no authorization
-// endpoint, so this replaces the OAuth start hook the other providers use.
-func (s *Service) SetImportCursor(fn func(context.Context, string, string) error) {
-	s.importCursor = fn
-}
-
-// SetDetectCursor wires local session discovery. It returns the path it read so the
-// result names the install it found, which is the only way to tell one Cursor
-// profile from another.
-func (s *Service) SetDetectCursor(fn func(context.Context) (string, error)) {
-	s.detectCursor = fn
-}
-
-func (s *Service) detectCursorHandler(c echo.Context) error {
-	if !sameOrigin(c.Request()) {
-		return echo.NewHTTPError(http.StatusForbidden, "cross-origin request denied")
-	}
-	if s.detectCursor == nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, "cursor detection unavailable")
-	}
-	path, err := s.detectCursor(c.Request().Context())
-	if err != nil {
-		return s.flash(c, http.StatusBadRequest, err.Error())
-	}
-	return s.flash(c, http.StatusOK, "Imported the session from "+path)
-}
-
-func (s *Service) importCursorHandler(c echo.Context) error {
-	if !sameOrigin(c.Request()) {
-		return echo.NewHTTPError(http.StatusForbidden, "cross-origin request denied")
-	}
-	if s.importCursor == nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, "cursor import unavailable")
-	}
-	accessToken := strings.TrimSpace(c.FormValue("access_token"))
-	machineID := strings.TrimSpace(c.FormValue("machine_id"))
-	if accessToken == "" || machineID == "" {
-		return s.flash(c, http.StatusBadRequest, "Both the access token and the machine id are required.")
-	}
-	if err := s.importCursor(c.Request().Context(), accessToken, machineID); err != nil {
-		return s.flash(c, http.StatusBadRequest, err.Error())
-	}
-	return s.flash(c, http.StatusOK, "Cursor session imported. It expires with the token; re-import when it does.")
-}
-
 // flash renders a one-line result into the slot the import form targets.
 func (s *Service) flash(c echo.Context, status int, message string) error {
 	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
@@ -1187,8 +1140,6 @@ func (s *Service) Register(e *echo.Echo) error {
 	e.DELETE("/ui/models/:id", s.deleteModelHandler)
 	e.POST("/ui/setup/:tool/:action", s.cliSetupHandler)
 	s.registerCustomProviderRoutes(e)
-	e.POST("/ui/oauth/cursor/import", s.importCursorHandler)
-	e.POST("/ui/oauth/cursor/detect", s.detectCursorHandler)
 	// Every dashboard response is a live reading and none of it may be cached.
 	//
 	// The mutation handlers each said so individually while the pages and fragments said
