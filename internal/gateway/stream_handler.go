@@ -393,6 +393,14 @@ type anthropicStreamState struct {
 	// produced no answer at all, and the reasoning is the only output it had. Emitting it
 	// as text beats an empty turn that gets retried and dropped to the fallback.
 	reasoningBuf string
+	// textOutput accumulates the text deltas actually written to the wire, so a
+	// whitespace-only turn (vLLM Qwen3 "\n\n" + stop) can be told apart from a
+	// real answer — producedOutput depends on it.
+	textOutput string
+	// pendingText buffers leading whitespace that has not been written yet. A
+	// turn that ends after whitespace only is empty and retryable; writing the
+	// whitespace first would deliver the stall as a completed turn.
+	pendingText string
 }
 
 type bufferedToolCall struct {
@@ -430,6 +438,23 @@ func (s *anthropicStreamState) emit(c echo.Context, chunk OpenAIStreamChunk) err
 		if choice.Delta.Content != "" {
 			s.reasoningBuf = ""
 			s.completionBytes += len(choice.Delta.Content)
+			if strings.TrimSpace(choice.Delta.Content) == "" && strings.TrimSpace(s.textOutput) == "" &&
+				s.nextIndex == 0 && len(s.toolOrder) == 0 && s.pendingText == "" && s.activeType == "" {
+				// Leading whitespace before any real content (vLLM Qwen3's bare
+				// "\n\n") must not reach the wire: if the turn ends here it is
+				// empty and retryable, and bytes already sent are not. Buffer it
+				// and only flush when real text follows.
+				s.pendingText += choice.Delta.Content
+				continue
+			}
+			if s.pendingText != "" {
+				s.textOutput += s.pendingText
+				if err := s.contentDelta(c, "text", map[string]any{"type": "text_delta", "text": s.pendingText}); err != nil {
+					return err
+				}
+				s.pendingText = ""
+			}
+			s.textOutput += choice.Delta.Content
 			if err := s.flushTools(c); err != nil {
 				return err
 			}
@@ -472,8 +497,17 @@ func (s *anthropicStreamState) emit(c echo.Context, chunk OpenAIStreamChunk) err
 // a block already written, or a tool call still buffered. It is deliberately
 // distinct from started, which only tracks whether bytes reached the client:
 // a turn holding an unflushed tool call has produced output but written none.
+//
+// A text block holding only whitespace is not output: vLLM-served reasoning
+// models (Qwen3 with tool_choice auto) end a turn it has nothing to add to
+// with a single "\n\n" text delta and finish_reason stop, and passing that on
+// as a completed turn is exactly the "it stops and I have to type continue"
+// stall. Only real text counts.
 func (s *anthropicStreamState) producedOutput() bool {
-	return s.nextIndex > 0 || len(s.toolOrder) > 0 || s.emittedTool
+	if s.nextIndex > 0 || len(s.toolOrder) > 0 || s.emittedTool {
+		return true
+	}
+	return strings.TrimSpace(s.textOutput) != ""
 }
 
 // ensureStarted commits the response headers and message_start on first real
@@ -619,6 +653,15 @@ func (s *anthropicStreamState) sendTerminal(c echo.Context, reason string) error
 	if s.terminalSent {
 		return nil
 	}
+	// Buffered leading whitespace is only real output if real content follows;
+	// on its own it is the empty-turn marker and must stay unwritten.
+	if s.pendingText != "" && strings.TrimSpace(s.textOutput) != "" {
+		s.textOutput += s.pendingText
+		if err := s.contentDelta(c, "text", map[string]any{"type": "text_delta", "text": s.pendingText}); err != nil {
+			return err
+		}
+		s.pendingText = ""
+	}
 	if s.nextIndex == 0 && len(s.toolOrder) == 0 {
 		// A thinking model that never produced content (GLM, DeepSeek) can finish having
 		// emitted only reasoning. With finish_reason=stop the reasoning IS the model's
@@ -636,13 +679,15 @@ func (s *anthropicStreamState) sendTerminal(c echo.Context, reason string) error
 			s.reasoningBuf = ""
 		}
 	}
-	if s.nextIndex == 0 && len(s.toolOrder) == 0 && s.reasoningBuf == "" {
-		// The upstream finished having produced no text and no tool call. Passing that
-		// on as a completed message — previously padded with a single space so the
-		// Anthropic shape stayed valid — reaches the agent as end_turn, so the client
-		// treats the task as done and waits for the user. That is the "it stops and I
-		// have to type continue" stall. Report it instead, so the caller can retry it
-		// on another candidate; only an exhausted caller falls back to the padding.
+	if (s.nextIndex == 0 && len(s.toolOrder) == 0 && s.reasoningBuf == "") ||
+		strings.TrimSpace(s.textOutput) == "" && len(s.toolOrder) == 0 && s.reasoningBuf == "" {
+		// The upstream finished having produced no real text and no tool call — a
+		// bare "\n\n" text block counts as nothing (vLLM Qwen3 does exactly this
+		// when it has nothing to add). Passing that on as a completed message
+		// reaches the agent as end_turn, so the client treats the task as done and
+		// waits for the user. That is the "it stops and I have to type continue"
+		// stall. Report it instead, so the caller can retry it on another
+		// candidate; only an exhausted caller falls back to the padding.
 		return errEmptyUpstreamStream
 	}
 	if err := s.flushTools(c); err != nil {

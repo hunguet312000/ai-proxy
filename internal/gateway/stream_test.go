@@ -1400,3 +1400,31 @@ func TestOpenAIStreamPassthroughCountsVLLMReasoning(t *testing.T) {
 		t.Fatalf("reasoning chunk was not forwarded: %q", body)
 	}
 }
+
+// A turn that ends with only whitespace text and stop — what vLLM-served
+// Qwen3 produces when it has nothing to add — must not be delivered as a
+// completed turn. It reads as the "stops and I have to type continue" stall;
+// treat it like an empty stream and let the caller retry.
+func TestAnthropicStreamWhitespaceOnlyTurnIsTreatedAsEmpty(t *testing.T) {
+	stream := &fakeStreamClient{content: strings.Join([]string{
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{"content":"\n\n"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		"data: [DONE]", "",
+	}, "\n")}
+	service := New(Options{OpenAIStream: stream})
+	e := echo.New()
+	service.Register(e)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"model","messages":[{"role":"user","content":"continue"}],"max_tokens":1024,"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, request)
+	body := recorder.Body.String()
+	// The turn must not reach the client as a completed message with only "\n\n":
+	// with no other candidate the proxy finishes with an empty turn, but it must
+	// have gone through the retry path first, which is the signal the caller acts on.
+	if strings.Contains(body, `"text":"\n\n"`) {
+		t.Fatalf("whitespace-only turn was delivered as output: %q", body)
+	}
+}
