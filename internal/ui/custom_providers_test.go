@@ -301,6 +301,10 @@ func TestNormalizeCatalogModelID(t *testing.T) {
 		{"xai", "grok-4.5", "xai/grok-4.5"},
 		// Anthropic ids are bare, so nothing is prepended.
 		{"claude", "claude-opus-4-5", "claude-opus-4-5"},
+		// Org/name model ids keep their slash — "Qwen/" is part of the model name,
+		// not a routing prefix.
+		{"local", "Qwen/Qwen3.8-27B", "local/Qwen/Qwen3.8-27B"},
+		{"fpt-ai", "deepseek-ai/DeepSeek-V4", "fpt-ai/deepseek-ai/DeepSeek-V4"},
 	} {
 		got, err := normalizeCatalogModelID(test.prefix, test.in)
 		if err != nil || got != test.want {

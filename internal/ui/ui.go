@@ -1997,8 +1997,31 @@ func canonicalModelPrefix(providerID string) string {
 	}
 }
 
+// knownRoutingPrefixes are the prefixes the built-in routing answers to. A model
+// id that starts with one of these belongs to that provider, so typing it under
+// another provider is a routing mistake worth refusing. Anything else before the
+// slash — like the org half of "Qwen/Qwen3.8-27B" — is part of the model name,
+// not a routing prefix, and is accepted as-is.
+var knownRoutingPrefixes = map[string]struct{}{
+	// Codex.
+	"cx": {}, "codex": {},
+	// OpenAI / generic GPT.
+	"openai": {}, "gpt": {},
+	// Claude / Anthropic.
+	"claude": {}, "anthropic": {},
+	// xAI / Grok.
+	"xai": {}, "grok": {},
+	// Antigravity / Gemini.
+	"antigravity": {}, "ag": {}, "gemini": {},
+	// Custom provider prefixes are dynamic, so a typed id starting with the same
+	// provider's own prefix is handled by the EqualFold check below; a foreign
+	// custom prefix cannot be enumerated here and falls through to "keep as model
+	// name", which is the correct call for org/name models.
+}
+
 // normalizeCatalogModelID turns a typed model name into the callable catalog id by
-// applying the provider's prefix. Typing the prefix is accepted but never required.
+// applying the provider's prefix. Typing the prefix is accepted but never required,
+// and an id that already carries an org-style slash ("Qwen/Qwen3.8-27B") keeps it.
 func normalizeCatalogModelID(providerID, id string) (string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -2013,9 +2036,14 @@ func normalizeCatalogModelID(providerID, id string) (string, error) {
 		return prefix + "/" + id, nil
 	}
 	if !strings.EqualFold(before, prefix) {
-		// Another provider's prefix produces an id that routes elsewhere, or nowhere.
-		// Refusing beats storing something that silently never works.
-		return "", fmt.Errorf("%q is another provider's prefix; type just the model name and %q is added for you", before+"/", prefix+"/")
+		// Only refuse a genuine foreign routing prefix. A slash here usually marks a
+		// provider boundary, but for org/name model ids it is just part of the model —
+		// "Qwen/Qwen3.8-27B" is a single model, so it stays whole under our prefix.
+		if _, known := knownRoutingPrefixes[strings.ToLower(before)]; known {
+			return "", fmt.Errorf("%q is another provider's prefix; type just the model name and %q is added for you", before+"/", prefix+"/")
+		}
+		// Org/name style: the typed id is the full model name, keep the slash.
+		return prefix + "/" + id, nil
 	}
 	if strings.TrimSpace(after) == "" {
 		return "", errors.New("model id is missing the model name after the prefix")
