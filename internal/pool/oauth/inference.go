@@ -3,6 +3,8 @@ package oauth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -497,10 +499,10 @@ func openAIToCodexRequest(request translator.OpenAIRequest, model string) map[st
 				input = append(input, map[string]any{"type": "message", "role": message.Role, "content": content})
 			}
 			for _, call := range message.ToolCalls {
-				input = append(input, map[string]any{"type": "function_call", "call_id": call.ID, "name": call.Function.Name, "arguments": call.Function.Arguments})
+				input = append(input, map[string]any{"type": "function_call", "call_id": codexCallID(call.ID), "name": call.Function.Name, "arguments": call.Function.Arguments})
 			}
 		case "tool":
-			input = append(input, map[string]any{"type": "function_call_output", "call_id": message.ToolCallID, "output": openAIContentText(message.Content)})
+			input = append(input, map[string]any{"type": "function_call_output", "call_id": codexCallID(message.ToolCallID), "output": openAIContentText(message.Content)})
 		}
 	}
 	instruction := strings.Join(instructions, "\n\n")
@@ -556,6 +558,17 @@ func openAIToCodexRequest(request translator.OpenAIRequest, model string) map[st
 		payload["prompt_cache_key"] = request.PromptCacheKey
 	}
 	return payload
+}
+
+// codexCallID keeps tool-call identifiers within the Responses API's 64-byte
+// limit while preserving short IDs unchanged. The hash is deterministic, so a
+// later function_call_output still references the matching function_call.
+func codexCallID(id string) string {
+	if len(id) <= 64 {
+		return id
+	}
+	digest := sha256.Sum256([]byte(id))
+	return "call_" + hex.EncodeToString(digest[:])[:58]
 }
 
 func codexToolChoice(choice any) any {

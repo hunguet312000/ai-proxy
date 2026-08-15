@@ -33,11 +33,34 @@ func TestOpenAIToCodexRequestPreservesTools(t *testing.T) {
 	}
 }
 
+func TestOpenAIToCodexRequestShortensLongCallIDsConsistently(t *testing.T) {
+	longID := "call_" + strings.Repeat("x", 80)
+	payload := openAIToCodexRequest(translator.OpenAIRequest{
+		Messages: []translator.OpenAIMessage{
+			{Role: "assistant", ToolCalls: []translator.OpenAIToolCall{{ID: longID, Type: "function", Function: translator.OpenAIFunctionCall{Name: "read", Arguments: `{}`}}}},
+			{Role: "tool", ToolCallID: longID, Content: "result"},
+		},
+	}, "gpt-5.6-sol")
+	input := payload["input"].([]map[string]any)
+	functionCallID := input[0]["call_id"].(string)
+	functionOutputID := input[1]["call_id"].(string)
+	if len(functionCallID) > 64 || len(functionOutputID) > 64 {
+		t.Fatalf("call IDs exceed Codex limit: function=%d output=%d", len(functionCallID), len(functionOutputID))
+	}
+	if functionCallID != functionOutputID {
+		t.Fatalf("call IDs do not match: function=%q output=%q", functionCallID, functionOutputID)
+	}
+	if functionCallID == longID {
+		t.Fatal("long call ID was forwarded unchanged")
+	}
+	if got := codexCallID("short"); got != "short" {
+		t.Fatalf("short ID changed to %q", got)
+	}
+}
+
 func TestUnknownModelRefusalIsNotRetriedAcrossAccounts(t *testing.T) {
-	// "AI Model Not Found: Model name is not valid: \"grok-4.5\"" arrives as a 502 with
-	// no retryable code. Retrying it across accounts is a loop: the model is not in the
-	// catalog on any account.
-	err := &provider.ProviderError{Provider: "cursor", StatusCode: 502, Code: "ai_model_not_found",
+	// A named-model refusal must not be retried across accounts.
+	err := &provider.ProviderError{Provider: "codex", StatusCode: 502, Code: "ai_model_not_found",
 		Message: "AI Model Not Found: Model name is not valid: \"grok-4.5\""}
 	if retryAcrossOAuthAccounts(err) {
 		t.Fatal("a named-model refusal must not be retried across accounts")
