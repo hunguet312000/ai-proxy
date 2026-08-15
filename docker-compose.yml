@@ -49,6 +49,10 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       XAI_API_KEY: "${XAI_API_KEY:-}"
       LITEROUTER_LOG_LEVEL: "${LITEROUTER_LOG_LEVEL:-info}"
+      # The ACP agent is found by name on PATH. The versions dir is scanned for
+      # the newest build at runtime (see cursorACPBinary), so an auto-update of
+      # the CLI does not require touching this file.
+      PATH: "/host-cursor-cli/versions:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     volumes:
       - literouter-data:/data
       # Host home so CLI Apply/Reset can write ~/.claude and ~/.codex like 9router.
@@ -57,11 +61,11 @@ services:
       # commit have to match the installed IDE or every Cursor request is refused.
       - /Applications:/host-apps:ro
       # Cursor CLI for the ACP-based integration: the binary lives in
-      # ~/.local/bin/agent (symlink) and its runtime under ~/.local/share/cursor-agent.
-      # Mounted read-only — the CLI authenticates through the token LiteRouter stores
-      # in its own DB, so it never needs to write its own auth state.
-      - ${HOME}/.local/bin/agent:/host-cursor-cli/agent:ro
-      - ${HOME}/.local/share/cursor-agent:/host-cursor-cli/runtime:ro
+      # ~/.local/share/cursor-agent/versions/<ver>/ (the ~/.local/bin/agent symlink
+      # points there), and the node runtime is bundled alongside it. Mounted
+      # read-only — the CLI authenticates through the token LiteRouter stores in its
+      # own DB, so it never needs to write its own auth state.
+      - ${HOME}/.local/share/cursor-agent:/host-cursor-cli:ro
     healthcheck:
       test: ["CMD", "/literouter", "-healthcheck"]
       interval: 10s

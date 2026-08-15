@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -64,6 +66,11 @@ func (inference *Inference) DoStream(ctx context.Context, request translator.Ope
 		return codexSSEToChatStream(body, request.Model), nil
 	}
 	if providerName == "cursor" {
+		if _, isACPTurn := body.(*cursorACPStreamReader); isACPTurn {
+			// The ACP path already yields OpenAI chunks; wrapping it in the IDE
+			// protocol converter would double-parse the SSE it already produces.
+			return body, nil
+		}
 		return cursorAgentToChatStream(body, request.Model), nil
 	}
 	if providerName == "antigravity" {
@@ -122,7 +129,12 @@ func (inference *Inference) complete(ctx context.Context, request translator.Ope
 		case "antigravity":
 			response, err = antigravitySSEToOpenAI(body, request.Model, antigravitySessionKey(request, conversationID))
 		case "cursor":
-			response, err = cursorAgentToOpenAI(body, request.Model)
+			if _, isACPTurn := body.(*cursorACPStreamReader); isACPTurn {
+				// The ACP path yields OpenAI chunks; read them all into one response.
+				response, err = collectOpenAIStream(body, request.Model)
+			} else {
+				response, err = cursorAgentToOpenAI(body, request.Model)
+			}
 		default:
 			response, err = openAISSEToResponse(body, request.Model)
 		}
@@ -372,6 +384,15 @@ func (inference *Inference) call(ctx context.Context, providerName string, crede
 	}
 	providerName = strings.ToLower(strings.TrimSpace(providerName))
 	model = resolveUpstreamModel(providerName, model)
+	// The Cursor CLI ACP path replaces the private IDE protocol entirely: it spawns
+	// the CLI as an agent, authenticates with the token LiteRouter stored, and
+	// streams the turn back. It needs no HTTP request at all, so it returns early.
+	//
+	// Enabled by default when the CLI is on PATH. Set LITEROUTER_CURSOR_ACP=0 to
+	// force the legacy IDE-protocol path.
+	if providerName == "cursor" && cursorACPAvailable() {
+		return runCursorACPTurn(ctx, cursorACPWorkspace(), acpPromptFromRequest(request), model)
+	}
 	var endpoint string
 	var payload any
 	// rawBody is set by providers whose wire format is not JSON.
@@ -744,4 +765,97 @@ func decodeOAuthInferenceError(providerName string, response *http.Response) err
 		return decodeCursorHTTPError(response)
 	}
 	return provider.DecodeProviderError(providerName+" OAuth", response, io.LimitReader(response.Body, 1<<20))
+}
+
+// collectOpenAIStream reads an OpenAI-format SSE stream (the shape the ACP
+// reader emits) into a single response. It is the non-streaming twin of
+// runCursorACPTurn.
+func collectOpenAIStream(body io.Reader, fallbackModel string) (translator.OpenAIResponse, error) {
+	return openAISSEToResponse(body, fallbackModel)
+}
+
+// cursorACPAvailable reports whether the Cursor CLI agent is usable for the ACP
+// path. It is on when the binary is found and the opt-out env is not set.
+// LITEROUTER_CURSOR_ACP=0 forces the legacy IDE-protocol path.
+func cursorACPAvailable() bool {
+	if os.Getenv("LITEROUTER_CURSOR_ACP") == "0" {
+		return false
+	}
+	return cursorACPBinary() != ""
+}
+
+// cursorACPBinary locates the `cursor-agent` executable.
+//
+// Priority:
+//  1. LITEROUTER_CURSOR_BINARY, an explicit path.
+//  2. `agent` on PATH (the CLI's own symlink on the host).
+//  3. The mounted container path /host-cursor-cli/versions/<ver>/cursor-agent,
+//     choosing the newest version so an auto-updated CLI keeps working without
+//     touching docker-compose.
+func cursorACPBinary() string {
+	if explicit := os.Getenv("LITEROUTER_CURSOR_BINARY"); explicit != "" {
+		if _, err := os.Stat(explicit); err == nil {
+			return explicit
+		}
+	}
+	if path, err := exec.LookPath("agent"); err == nil {
+		return path
+	}
+	entries, err := os.ReadDir("/host-cursor-cli/versions")
+	if err != nil {
+		return ""
+	}
+	var best string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidate := "/host-cursor-cli/versions/" + entry.Name() + "/cursor-agent"
+		if _, err := os.Stat(candidate); err != nil {
+			continue
+		}
+		if best == "" || entry.Name() > best {
+			best = candidate
+		}
+	}
+	return best
+}
+
+// cursorACPWorkspace is the directory the ACP agent treats as its repo root.
+// LiteRouter runs in a container with the host home mounted; the CLI's agent
+// loop reads files relative to this root, so /host-home gives it the user's
+// real files. A configured LITEROUTER_CURSOR_WORKSPACE overrides it.
+func cursorACPWorkspace() string {
+	if workspace := os.Getenv("LITEROUTER_CURSOR_WORKSPACE"); workspace != "" {
+		return workspace
+	}
+	if _, err := os.Stat("/host-home"); err == nil {
+		return "/host-home"
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home
+	}
+	return "."
+}
+
+// acpPromptFromRequest folds the OpenAI request into the single text prompt the
+// ACP agent takes, mirroring how the IDE-protocol fold works: the system prompt
+// plus the conversation flattened, with the latest user message last.
+func acpPromptFromRequest(request translator.OpenAIRequest) string {
+	var out strings.Builder
+	for _, message := range request.Messages {
+		text := strings.TrimSpace(openAIContentText(message.Content))
+		if text == "" {
+			continue
+		}
+		switch message.Role {
+		case "system", "developer":
+			out.WriteString(text)
+		case "user":
+			out.WriteString("\n\n" + text)
+		case "assistant":
+			out.WriteString("\n\nAssistant: " + text)
+		}
+	}
+	return strings.TrimSpace(out.String())
 }
