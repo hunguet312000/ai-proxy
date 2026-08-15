@@ -53,10 +53,22 @@ type OpenAIMessage struct {
 	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	Name       string           `json:"name,omitempty"`
-	// Reasoning captures reasoning_content on non-stream responses. A thinking model
-	// (GLM, DeepSeek) can finish having emitted only reasoning and no content; that
-	// reasoning is its only answer and must not be dropped as empty.
-	Reasoning string `json:"reasoning_content,omitempty"`
+	// Reasoning captures reasoning_content on non-stream responses — vLLM 0.26
+	// sends the same text as plain "reasoning", hence the second tag. A thinking
+	// model (GLM, DeepSeek, Qwen3) can finish having emitted only reasoning and
+	// no content; that reasoning is its only answer and must not be dropped as
+	// empty.
+	Reasoning    string `json:"reasoning_content,omitempty"`
+	ReasoningAlt string `json:"reasoning,omitempty"`
+}
+
+// ReasoningText returns the deliberation text whichever spelling the upstream
+// used.
+func (m OpenAIMessage) ReasoningText() string {
+	if m.Reasoning != "" {
+		return m.Reasoning
+	}
+	return m.ReasoningAlt
 }
 
 type OpenAIContentPart struct {
@@ -276,14 +288,14 @@ func FromOpenAIResponse(response OpenAIResponse) (provider.Response, error) {
 	if err != nil {
 		return provider.Response{}, err
 	}
-	// A thinking model can finish having produced only reasoning_content and no content.
+	// A thinking model can finish having produced only reasoning and no content.
 	// With finish_reason=stop the reasoning is the model's answer; without it the response
 	// is empty and gets retried into the fallback. With finish_reason=length the model ran
 	// out of tokens mid-reasoning — its deliberation is not an answer, so it stays dropped.
 	// Emit reasoning as text only when there is nothing else and the model actually stopped.
 	if len(content) == 0 && len(choice.Message.ToolCalls) == 0 &&
-		choice.FinishReason == "stop" && strings.TrimSpace(choice.Message.Reasoning) != "" {
-		content = append(content, provider.Content{Type: "text", Text: choice.Message.Reasoning})
+		choice.FinishReason == "stop" && strings.TrimSpace(choice.Message.ReasoningText()) != "" {
+		content = append(content, provider.Content{Type: "text", Text: choice.Message.ReasoningText()})
 	}
 	for _, call := range choice.Message.ToolCalls {
 		input := json.RawMessage(call.Function.Arguments)

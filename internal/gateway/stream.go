@@ -48,10 +48,25 @@ type OpenAIStreamChoice struct {
 }
 
 type OpenAIStreamDelta struct {
-	Role      string                 `json:"role,omitempty"`
-	Content   string                 `json:"content,omitempty"`
-	Reasoning string                 `json:"reasoning_content,omitempty"`
-	ToolCalls []OpenAIStreamToolCall `json:"tool_calls,omitempty"`
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+	// Reasoning is the deliberation text under the OpenAI spelling
+	// (reasoning_content). vLLM 0.26 sends the same content as plain
+	// "reasoning"; ReasoningAlt catches that spelling, so a turn where the
+	// model only reasoned is still visible to the gateway instead of reading
+	// as an empty stream.
+	Reasoning    string                 `json:"reasoning_content,omitempty"`
+	ReasoningAlt string                 `json:"reasoning,omitempty"`
+	ToolCalls    []OpenAIStreamToolCall `json:"tool_calls,omitempty"`
+}
+
+// ReasoningText returns the deliberation text whichever spelling the upstream
+// used.
+func (d OpenAIStreamDelta) ReasoningText() string {
+	if d.Reasoning != "" {
+		return d.Reasoning
+	}
+	return d.ReasoningAlt
 }
 
 type OpenAIStreamToolCall struct {

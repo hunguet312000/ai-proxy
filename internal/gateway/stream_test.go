@@ -1338,3 +1338,65 @@ func TestAnthropicStreamEmitsReasoningOnlyAsText(t *testing.T) {
 		t.Fatalf("reasoning-only output not emitted as text: %q", body)
 	}
 }
+
+// vLLM 0.26 sends the deliberation text as plain "reasoning" instead of
+// "reasoning_content". A turn where the model only reasoned must still be
+// visible, or the proxy reads an empty stream and the client hangs.
+func TestAnthropicStreamEmitsVLLMReasoningSpellingAsText(t *testing.T) {
+	stream := &fakeStreamClient{content: strings.Join([]string{
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{"reasoning":"thinking through"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{"reasoning":" the plan"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		"data: [DONE]", "",
+	}, "\n")}
+	service := New(Options{OpenAIStream: stream})
+	e := echo.New()
+	service.Register(e)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"model","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, request)
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %q", recorder.Code, body)
+	}
+	if !strings.Contains(body, "thinking through the plan") {
+		t.Fatalf("vLLM reasoning spelling not emitted as text: %q", body)
+	}
+}
+
+// The raw /v1/chat/completions passthrough must carry the vLLM spelling into
+// its output accounting, or a reasoning-only turn is reported with zero
+// completion tokens.
+func TestOpenAIStreamPassthroughCountsVLLMReasoning(t *testing.T) {
+	stream := &fakeStreamClient{content: strings.Join([]string{
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{"reasoning":"hidden deliberation"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"one","model":"model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		"data: [DONE]", "",
+	}, "\n")}
+	service := New(Options{OpenAIStream: stream})
+	e := echo.New()
+	service.Register(e)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"model","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %q", recorder.Code, recorder.Body.String())
+	}
+	// The stream itself is forwarded verbatim; what must not happen is the turn
+	// reading as empty and being replayed to the fallback. The proof is the
+	// [DONE] reaching the client exactly once, from this candidate.
+	body := recorder.Body.String()
+	if strings.Count(body, "data: [DONE]") != 1 {
+		t.Fatalf("reasoning-only turn was not completed in one pass: %q", body)
+	}
+	if !strings.Contains(body, `"reasoning":"hidden deliberation"`) {
+		t.Fatalf("reasoning chunk was not forwarded: %q", body)
+	}
+}

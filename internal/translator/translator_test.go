@@ -503,6 +503,28 @@ func TestFromOpenAIResponseEmitsReasoningOnlyAsText(t *testing.T) {
 	}
 }
 
+// vLLM 0.26 spells the deliberation field "reasoning" instead of
+// "reasoning_content". A reasoning-only response in that spelling must still
+// surface as text.
+func TestFromOpenAIResponseEmitsVLLMReasoningSpellingAsText(t *testing.T) {
+	response := OpenAIResponse{
+		Model: "qwen3.8-27B",
+		Choices: []OpenAIChoice{{
+			Message:      OpenAIMessage{Role: "assistant", ReasoningAlt: "thinking through the answer"},
+			FinishReason: "stop",
+		}},
+		Usage: OpenAIUsage{PromptTokens: 10, CompletionTokens: 20},
+	}
+	result, err := FromOpenAIResponse(response)
+	if err != nil {
+		t.Fatalf("FromOpenAIResponse() = %v", err)
+	}
+	if len(result.Content) != 1 || result.Content[0].Type != "text" ||
+		!strings.Contains(result.Content[0].Text, "thinking through the answer") {
+		t.Fatalf("vLLM reasoning-only response not surfaced as text: %+v", result.Content)
+	}
+}
+
 // A model cut off mid-reasoning (finish_reason=length) has no answer — its deliberation
 // must not leak into the content the user reads.
 func TestFromOpenAIResponseDropsReasoningOnLength(t *testing.T) {

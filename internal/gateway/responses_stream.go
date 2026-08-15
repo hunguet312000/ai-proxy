@@ -128,8 +128,8 @@ func (state *responsesStreamState) emit(c echo.Context, chunk OpenAIStreamChunk)
 		state.usage = *chunk.Usage
 	}
 	for _, choice := range chunk.Choices {
-		if choice.Delta.Reasoning != "" {
-			if err := state.reasoningDelta(c, choice.Delta.Reasoning); err != nil {
+		if reasoning := choice.Delta.ReasoningText(); reasoning != "" {
+			if err := state.reasoningDelta(c, reasoning); err != nil {
 				return err
 			}
 		}

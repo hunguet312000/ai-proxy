@@ -52,7 +52,7 @@ func (s *Service) chatStream(c echo.Context, request translator.OpenAIRequest) e
 			}
 			for _, choice := range chunk.Choices {
 				output.WriteString(choice.Delta.Content)
-				output.WriteString(choice.Delta.Reasoning)
+				output.WriteString(choice.Delta.ReasoningText())
 			}
 			payload, err := json.Marshal(chunk)
 			if err != nil {
@@ -416,19 +416,19 @@ func (s *anthropicStreamState) emit(c echo.Context, chunk OpenAIStreamChunk) err
 		s.lastUsage = *chunk.Usage
 	}
 	for _, choice := range chunk.Choices {
-		if choice.Delta.Reasoning != "" {
-			// OpenAI reasoning_content has no Anthropic thinking signature, so it used
-			// to be forwarded as assistant text. That put internal deliberation into
-			// the transcript, where the model re-read it as its own final answer and
-			// repeated work it had already done. Count it for usage and buffer it — if
-			// the stream ends with no content at all, the reasoning is the only answer
-			// and is emitted then (see emit's terminal path).
-			s.completionBytes += len(choice.Delta.Reasoning)
-			s.reasoningBuf += choice.Delta.Reasoning
+		if reasoning := choice.Delta.ReasoningText(); reasoning != "" {
+			// Reasoning — reasoning_content on some upstreams, plain "reasoning"
+			// on vLLM 0.26 — has no Anthropic thinking signature, so it used to be
+			// forwarded as assistant text. That put internal deliberation into the
+			// transcript, where the model re-read it as its own final answer and
+			// repeated work it had already done. Count it for usage and buffer it —
+			// if the stream ends with no content at all, the reasoning is the only
+			// answer and is emitted then (see emit's terminal path).
+			s.completionBytes += len(reasoning)
+			s.reasoningBuf += reasoning
 		}
 		if choice.Delta.Content != "" {
 			s.reasoningBuf = ""
-			s.completionBytes += len(choice.Delta.Content)
 			s.completionBytes += len(choice.Delta.Content)
 			if err := s.flushTools(c); err != nil {
 				return err
