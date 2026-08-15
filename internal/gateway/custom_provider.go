@@ -66,7 +66,7 @@ func (r *CustomProviderRegistry) Reload(providers []storage.CustomProvider) erro
 	for _, definition := range providers {
 		entry := &customProvider{definition: definition}
 		for _, key := range definition.Keys {
-			client, err := provider.NewOpenAICompatibleClient(
+			client, err := provider.NewOpenAICompatibleClientAllowHTTP(
 				"custom:"+definition.Prefix, definition.BaseURL, key.Secret, r.httpClient)
 			if err != nil {
 				// One bad key must not take the whole registry down; the rest of the

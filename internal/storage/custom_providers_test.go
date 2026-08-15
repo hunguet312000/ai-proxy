@@ -105,18 +105,26 @@ func TestCustomProviderValidation(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 	for name, provider := range map[string]CustomProvider{
-		"no prefix":        {Kind: CustomKindOpenAI, BaseURL: "https://a.example.com/v1"},
-		"bad prefix char":  {Prefix: "a b", Kind: CustomKindOpenAI, BaseURL: "https://a.example.com/v1"},
-		"unknown kind":     {Prefix: "p", Kind: "sideways", BaseURL: "https://a.example.com/v1"},
-		"bad api type":     {Prefix: "p", Kind: CustomKindOpenAI, APIType: "grpc", BaseURL: "https://a.example.com/v1"},
-		"relative url":     {Prefix: "p", Kind: CustomKindOpenAI, BaseURL: "/v1"},
-		"plaintext remote": {Prefix: "p", Kind: CustomKindOpenAI, BaseURL: "http://api.example.com/v1"},
+		"no prefix":       {Kind: CustomKindOpenAI, BaseURL: "https://a.example.com/v1"},
+		"bad prefix char": {Prefix: "a b", Kind: CustomKindOpenAI, BaseURL: "https://a.example.com/v1"},
+		"unknown kind":    {Prefix: "p", Kind: "sideways", BaseURL: "https://a.example.com/v1"},
+		"bad api type":    {Prefix: "p", Kind: CustomKindOpenAI, APIType: "grpc", BaseURL: "https://a.example.com/v1"},
+		"relative url":    {Prefix: "p", Kind: CustomKindOpenAI, BaseURL: "/v1"},
+		"no scheme":       {Prefix: "p", Kind: CustomKindOpenAI, BaseURL: "a.example.com/v1"},
+		"bad scheme":      {Prefix: "p", Kind: CustomKindOpenAI, BaseURL: "ftp://a.example.com/v1"},
 	} {
 		if _, err := store.CreateCustomProvider(ctx, provider); err == nil {
 			t.Fatalf("%s was accepted", name)
 		}
 	}
-	// Loopback over plain HTTP is allowed, matching the built-in provider clients.
+	// Plain HTTP is allowed for user-configured upstreams — a private server may
+	// not run TLS. This is the operator's explicit choice on this screen.
+	if _, err := store.CreateCustomProvider(ctx, CustomProvider{
+		Prefix: "http", Kind: CustomKindOpenAI, BaseURL: "http://api.example.com/v1", Enabled: true,
+	}); err != nil {
+		t.Fatalf("plaintext custom base URL rejected: %v", err)
+	}
+	// Loopback over plain HTTP is allowed as well.
 	if _, err := store.CreateCustomProvider(ctx, CustomProvider{
 		Prefix: "local", Kind: CustomKindOpenAI, BaseURL: "http://127.0.0.1:1234/v1", Enabled: true,
 	}); err != nil {

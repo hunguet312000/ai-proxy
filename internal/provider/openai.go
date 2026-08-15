@@ -33,11 +33,23 @@ func (e *ProviderError) Error() string {
 }
 
 func NewOpenAICompatibleClient(name, baseURL, apiKey string, client *http.Client) (*OpenAICompatibleClient, error) {
+	return newOpenAICompatibleClient(name, baseURL, apiKey, client, false)
+}
+
+// NewOpenAICompatibleClientAllowHTTP is NewOpenAICompatibleClient without the
+// HTTPS-only rule. Custom providers are user-configured endpoints that may
+// legitimately be plain HTTP (a private upstream with no TLS); the built-in
+// OpenAI/xAI clients keep the stricter policy.
+func NewOpenAICompatibleClientAllowHTTP(name, baseURL, apiKey string, client *http.Client) (*OpenAICompatibleClient, error) {
+	return newOpenAICompatibleClient(name, baseURL, apiKey, client, true)
+}
+
+func newOpenAICompatibleClient(name, baseURL, apiKey string, client *http.Client, allowHTTP bool) (*OpenAICompatibleClient, error) {
 	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, fmt.Errorf("invalid %s base URL", name)
 	}
-	if parsed.Scheme != "https" && parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost" {
+	if !allowHTTP && parsed.Scheme != "https" && parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost" {
 		return nil, fmt.Errorf("%s base URL must use HTTPS", name)
 	}
 	if client == nil {

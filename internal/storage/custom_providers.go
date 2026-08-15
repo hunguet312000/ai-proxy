@@ -116,9 +116,11 @@ func validateCustomProvider(provider *CustomProvider) error {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return errors.New("base URL must be absolute, e.g. https://api.example.com/v1")
 	}
-	// Same rule the built-in provider clients enforce: plaintext only for loopback.
-	if parsed.Scheme != "https" && parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost" {
-		return errors.New("base URL must use HTTPS unless it points at localhost")
+	// Custom providers may intentionally be plain HTTP (for example, a private
+	// upstream hosted without TLS). Built-in providers keep their stricter HTTPS
+	// policy; this path is explicitly user-configured.
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("base URL must use HTTP or HTTPS")
 	}
 	return nil
 }
