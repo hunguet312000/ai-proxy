@@ -27,7 +27,13 @@ import (
 // conversation id is unaffected — it is derived from the full transcript in the
 // caller, so two sessions that start differently still differ.
 func trimCursorFold(request translator.OpenAIRequest, model string) translator.OpenAIRequest {
-	budget := cursorLatencyBudget(model)
+	return trimCursorFoldToBudget(request, cursorLatencyBudget(model))
+}
+
+// trimCursorFoldToBudget is trimCursorFold parameterised by an explicit token
+// budget. Kept separate so quality-vs-latency trade-offs can be measured at
+// different budgets without touching the model defaults.
+func trimCursorFoldToBudget(request translator.OpenAIRequest, budget int) translator.OpenAIRequest {
 	if estimateRequestTokens(request) <= budget {
 		return request
 	}
