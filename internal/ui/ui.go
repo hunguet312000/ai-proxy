@@ -242,6 +242,11 @@ type Service struct {
 	modelsHook      ModelHooks
 	customProviders CustomProviderHooks
 	settings        SettingsHooks
+	// cursorTrimBudget reads/sets the per-model trim budget override used by the
+	// Cursor ACP fold. Wired from the host so the ui package has no dependency on
+	// the oauth pool.
+	cursorTrimBudget  func(string) int
+	setCursorTrimBudget func(string, int)
 	usage           UsageHooks
 	apiToken        string
 	models          []string
@@ -1059,10 +1064,24 @@ func New(
 	usageHooks UsageHooks,
 	models ...string,
 ) (*Service, error) {
+	service := &Service{
+		pool: accountPool, apiToken: apiToken, models: append([]string(nil), models...), startOAuth: startOAuth, refreshQuota: refreshQuota,
+		listSnapshots: listSnapshots, updateAccount: updateAccount, deleteAccount: deleteAccount,
+		apiKeys: apiKeys, modelsHook: modelHooks, settings: settings, usage: usageHooks,
+		refreshing: map[string]struct{}{},
+	}
 	funcs := template.FuncMap{
 		"urlquery": url.QueryEscape, "quotaBucket": quotaBucket, "modelIDExample": modelIDExample,
 		"formatReset": formatReset, "formatFetched": formatFetched, "formatPlan": formatPlan, "planClass": planClass,
-		"formatUSD": formatUSD, "formatInt": formatInt, "formatUsageInt": formatUsageInt, "formatTokens": formatTokens, "prettyModel": storage.PrettyModelLabel, "formatContextWindow": storage.FormatContextWindow, "pct": pct, "pct64": pct64, "effortLevels": func() []string { return storage.EffortLevels }, "honoursEffort": providerHonoursEffort, "providerLabel": providerLabel, "providerLogo": providerLogo, "endpointLabel": endpointLabel, "formatClock": formatClock, "formatDayTime": formatDayTime,
+		"formatUSD": formatUSD, "formatInt": formatInt, "formatUsageInt": formatUsageInt, "formatTokens": formatTokens, "prettyModel": storage.PrettyModelLabel, "formatContextWindow": storage.FormatContextWindow, "pct": pct, "pct64": pct64, "effortLevels": func() []string { return storage.EffortLevels }, "honoursEffort": providerHonoursEffort, "providerLabel": providerLabel, "providerLogo": providerLogo, "endpointLabel": endpointLabel, "formatClock": formatClock, "formatDayTime": formatDayTime, "cursorTrimBudget": func(id string) string {
+			if service.cursorTrimBudget == nil {
+				return ""
+			}
+			if v := service.cursorTrimBudget(id); v > 0 {
+				return fmt.Sprintf("%d", v)
+			}
+			return ""
+		},
 	}
 	index, err := template.New("index.html").Funcs(funcs).ParseFS(assets, "assets/index.html", "assets/tabs.html", "assets/accounts.html")
 	if err != nil {
@@ -1083,12 +1102,11 @@ func New(
 	if _, err := account.ParseFS(assets, "assets/accounts.html"); err != nil {
 		return nil, err
 	}
-	return &Service{
-		pool: accountPool, apiToken: apiToken, models: append([]string(nil), models...), startOAuth: startOAuth, refreshQuota: refreshQuota,
-		listSnapshots: listSnapshots, updateAccount: updateAccount, deleteAccount: deleteAccount,
-		apiKeys: apiKeys, modelsHook: modelHooks, settings: settings, usage: usageHooks,
-		index: index, accounts: accounts, account: account, tab: tab, refreshing: map[string]struct{}{},
-	}, nil
+	service.index = index
+	service.accounts = accounts
+	service.account = account
+	service.tab = tab
+	return service, nil
 }
 
 func (s *Service) SetResetCodex(fn func(context.Context, string) error) {
@@ -1097,6 +1115,39 @@ func (s *Service) SetResetCodex(fn func(context.Context, string) error) {
 
 func (s *Service) SetCompleteOAuth(fn func(context.Context, string, string) error) {
 	s.completeOAuth = fn
+}
+
+// SetCursorTrimBudget wires the per-model Cursor trim budget override. get
+// returns the current override (0 = default); set records a new one.
+func (s *Service) SetCursorTrimBudget(get func(string) int, set func(string, int)) {
+	s.cursorTrimBudget = get
+	s.setCursorTrimBudget = set
+}
+
+func (s *Service) updateTrimBudgetHandler(c echo.Context) error {
+	if !sameOrigin(c.Request()) {
+		return echo.NewHTTPError(http.StatusForbidden, "cross-origin request denied")
+	}
+	if s.setCursorTrimBudget == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "trim budget unavailable")
+	}
+	provider := normalizeProviderID(c.FormValue("provider"))
+	id, err := url.PathUnescape(c.Param("id"))
+	if err != nil || provider != "cursor" || strings.TrimSpace(id) == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "a Cursor model id is required")
+	}
+	raw := strings.TrimSpace(c.FormValue("trim_budget"))
+	budget := 0
+	if raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			return echo.NewHTTPError(http.StatusBadRequest, "trim budget must be a positive integer or blank")
+		}
+		budget = parsed
+	}
+	s.setCursorTrimBudget(id, budget)
+	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
+	return s.renderModelCatalog(c, provider)
 }
 
 func (s *Service) Register(e *echo.Echo) error {
@@ -1136,6 +1187,7 @@ func (s *Service) Register(e *echo.Echo) error {
 	e.POST("/ui/models/:id/context", s.updateModelContextHandler)
 	e.POST("/ui/models/:id/context-probe", s.probeModelContextHandler)
 	e.POST("/ui/models/:id/effort", s.updateModelEffortHandler)
+	e.POST("/ui/models/:id/trim-budget", s.updateTrimBudgetHandler)
 	e.POST("/ui/models/test", s.testModelHandler)
 	e.DELETE("/ui/models/:id", s.deleteModelHandler)
 	e.POST("/ui/setup/:tool/:action", s.cliSetupHandler)

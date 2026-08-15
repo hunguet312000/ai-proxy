@@ -21,16 +21,22 @@ package oauth
 
 import (
 	"strings"
+	"sync"
 )
 
 // cursorLatencyBudget returns the token budget a cache-miss fold may send, chosen
 // so the upstream answers in interactive time (measured ~5s per 25k tokens on
 // grok-4.6-low; the budget scales the other way: smaller fold → faster answer).
 //
-// These are the defaults. The dashboard can override per model via the Cursor
-// catalog, but the defaults are what make a fresh setup fast without measuring.
+// These are the defaults. The dashboard can override per model via
+// SetCursorTrimBudget; the overrides are consulted first, keyed by the exact
+// model id as it appears in the catalog (e.g. "cursor/composer-2.5").
 func cursorLatencyBudget(model string) int {
 	lower := strings.ToLower(model)
+	// A per-model override wins; blank means "use the defaults".
+	if budget := cursorTrimBudgetOverride(lower); budget > 0 {
+		return budget
+	}
 	switch {
 	case strings.Contains(lower, "xhigh"):
 		// Highest reasoning tier: give it more room to think, accept ~8-10s.
@@ -47,4 +53,40 @@ func cursorLatencyBudget(model string) int {
 	default:
 		return 30_000
 	}
+}
+
+// cursorTrimBudgetOverrides holds per-model trim budget overrides set from the
+// dashboard. Keyed by the lowercased model id; a zero value means "no override,
+// use the defaults". Guarded by a mutex so a UI write never races a request.
+var cursorTrimBudgetOverrides = struct {
+	sync.Mutex
+	values map[string]int
+}{values: make(map[string]int)}
+
+// SetCursorTrimBudget records a per-model trim budget override. budget <= 0
+// clears the override (falls back to the defaults). This is the dashboard's
+// control for the quality-vs-latency trade-off measured in
+// TestCursorBudgetQualityComparison.
+func SetCursorTrimBudget(model string, budget int) {
+	cursorTrimBudgetOverrides.Lock()
+	defer cursorTrimBudgetOverrides.Unlock()
+	key := strings.ToLower(strings.TrimSpace(model))
+	if budget <= 0 {
+		delete(cursorTrimBudgetOverrides.values, key)
+		return
+	}
+	cursorTrimBudgetOverrides.values[key] = budget
+}
+
+// CursorTrimBudget returns the override for a model, or 0 if none is set.
+func CursorTrimBudget(model string) int {
+	cursorTrimBudgetOverrides.Lock()
+	defer cursorTrimBudgetOverrides.Unlock()
+	return cursorTrimBudgetOverrides.values[strings.ToLower(strings.TrimSpace(model))]
+}
+
+func cursorTrimBudgetOverride(model string) int {
+	cursorTrimBudgetOverrides.Lock()
+	defer cursorTrimBudgetOverrides.Unlock()
+	return cursorTrimBudgetOverrides.values[model]
 }

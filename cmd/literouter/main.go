@@ -105,6 +105,7 @@ func run() int {
 			logger.Error("close storage", "error", err)
 		}
 	}()
+	restoreCursorTrimBudgets(store, logger)
 
 	migrationContext, cancelMigration := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := store.Migrate(migrationContext); err != nil {
@@ -834,6 +835,19 @@ func run() int {
 		_, err := oauthManager.CompleteManualCallback(ctx, provider, raw)
 		return err
 	})
+	uiService.SetCursorTrimBudget(
+		pooloauth.CursorTrimBudget,
+		func(model string, budget int) {
+			pooloauth.SetCursorTrimBudget(model, budget)
+			// Persist so a restart keeps the trade-off the operator chose.
+			key := "cursor.trim_budget." + model
+			if budget <= 0 {
+				_ = store.DeleteSetting(context.Background(), key)
+				return
+			}
+			_ = store.SetSetting(context.Background(), key, fmt.Sprintf("%d", budget))
+		},
+	)
 	backgroundContext, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
 	go credentialManager.Run(backgroundContext, cfg.OAuth.RefreshInterval)
@@ -1366,4 +1380,26 @@ func healthURL(addr string) (string, error) {
 		Host:   net.JoinHostPort(host, port),
 		Path:   "/health",
 	}).String(), nil
+}
+
+// restoreCursorTrimBudgets loads per-model Cursor trim budget overrides from the
+// settings table back into the in-memory override map, so a restart keeps the
+// quality-vs-latency trade-off the operator chose in the dashboard.
+func restoreCursorTrimBudgets(store *storage.Store, logger *slog.Logger) {
+	values, err := store.SettingsByPrefix(context.Background(), "cursor.trim_budget.")
+	if err != nil {
+		logger.Warn("restore cursor trim budgets", "error", err)
+		return
+	}
+	for key, raw := range values {
+		model := strings.TrimPrefix(key, "cursor.trim_budget.")
+		budget, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil || budget <= 0 {
+			continue
+		}
+		pooloauth.SetCursorTrimBudget(model, budget)
+	}
+	if len(values) > 0 {
+		logger.Info("restored cursor trim budgets", "models", len(values))
+	}
 }

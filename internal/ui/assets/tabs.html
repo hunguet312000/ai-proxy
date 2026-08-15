@@ -749,6 +749,16 @@ wire_api = "responses"</pre>
         <button class="btn sm" type="submit">Measure</button>
         <p class="model-probe-status" hidden></p>
       </form>
+      {{if eq .Provider "cursor"}}
+      <form class="model-context-form" hx-post="/ui/models/{{urlquery .ID}}/trim-budget" hx-target="#model-catalog" hx-swap="innerHTML">
+        <input type="hidden" name="provider" value="{{.Provider}}">
+        <label>
+          <span class="field-hint" title="How much of the transcript the proxy folds into each prompt. Cursor answers ~5s per 25k tokens of context, so a small budget is fast but drops old context the model cannot recall (measured: 25k loses facts from the first half of a 109k transcript; 100k keeps them at ~2x latency). Blank = the per-model default (composer 25k, grok low 30k, high 45k, xhigh 60k). Raise it if quality suffers, lower it for speed.">Trim budget (tokens, blank = default)</span>
+          <input class="field" type="number" name="trim_budget" min="1000" max="10000000" step="1" placeholder="default" value="{{cursorTrimBudget .ID}}">
+        </label>
+        <button class="btn sm" type="submit">Save</button>
+      </form>
+      {{end}}
       {{if honoursEffort .Provider}}
       <form class="model-context-form" hx-post="/ui/models/{{urlquery .ID}}/effort" hx-target="#model-catalog" hx-swap="innerHTML">
         <input type="hidden" name="provider" value="{{.Provider}}">
