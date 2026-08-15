@@ -137,6 +137,11 @@ func (s *Service) storeContextWindow(model string, window int, persist bool) boo
 // is needed. A reported count is the upstream's own arithmetic on a request it chose
 // to answer.
 func (s *Service) observeContextWindow(model string, promptTokens int) bool {
+	if s.disableContextLearning {
+		// The operator sets windows via Measure or config; a served prompt must not
+		// silently raise the floor past that choice.
+		return false
+	}
 	if model == "" || promptTokens <= minLearnableContextWindow {
 		return false
 	}
@@ -246,6 +251,11 @@ const minContextStepDownRatio = 2
 // upstream's own numbers and must not be second-guessed by an estimator that was measured
 // reading 633k for a prompt the upstream counted as 350k.
 func (s *Service) learnContextWindow(model string, sent int, err error) {
+	if s.disableContextLearning {
+		// The operator owns the window via Measure/config; an upstream rejection
+		// must not overwrite it.
+		return
+	}
 	if window, ok := parseContextWindowRejection(err); ok {
 		s.recordContextWindow(model, window)
 		return

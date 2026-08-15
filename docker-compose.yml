@@ -43,6 +43,9 @@ services:
       LITEROUTER_CONTEXT_ENABLED: "true"
       LITEROUTER_CONTEXT_MODE: "aggressive"
       LITEROUTER_CONTEXT_GUARD_ENABLED: "true"
+      # The operator sets model windows via Measure; a served prompt or an upstream
+      # rejection must not silently override that choice.
+      LITEROUTER_CONTEXT_DISABLE_LEARNING: "true"
       LITEROUTER_OPENAI_BASE_URL: "https://api.openai.com/v1"
       LITEROUTER_XAI_BASE_URL: "https://api.x.ai/v1"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"

@@ -230,6 +230,9 @@ type Service struct {
 	observedWindows    map[string]int
 	tokenScales        map[string]tokenScale
 	warnedInflated     map[string]bool
+	// disableContextLearning gates observeContextWindow and learnContextWindow.
+	// See Options.DisableContextLearning.
+	disableContextLearning bool
 	// modelEfforts overrides the reasoning effort per model. Held as a pointer so a
 	// catalog edit is visible to in-flight requests without locking the hot path.
 	modelEfforts    atomic.Pointer[map[string]string]
@@ -349,6 +352,16 @@ type Options struct {
 	// same catalog column ContextWindow already reads, so the next boot picks it up as
 	// ordinary catalog data. The floor is the half that does — see ObservedPrompts.
 	OnContextWindow func(model string, window int)
+	// DisableContextLearning turns off the two self-learning mechanisms that can
+	// silently override the operator's measured window:
+	//   - the floor from served prompts (observeContextWindow), and
+	//   - the ceiling from upstream rejections (learnContextWindow).
+	// Both exist to correct an under/over-stated catalogue, but when the operator
+	// sets the window deliberately — via Measure or config — the learning is
+	// fighting them: a single large served turn raises the floor above the chosen
+	// window and pins it there, and the operator's value stops taking effect.
+	// With this set, only Measure writes the window and the guard trusts it.
+	DisableContextLearning bool
 	// ObservedPrompts seeds, per model, the largest prompt the upstream counted itself
 	// and answered. It is a floor under that model's window: resolveContextWindow raises
 	// a belief to meet it and never lowers one, so a wrong entry cannot strangle a model.
@@ -411,6 +424,7 @@ func New(options Options) *Service {
 		onCalibration:   options.OnCalibration,
 		contextGuard:    options.ContextGuard, contextLimits: options.ContextLimits, contextWindow: options.ContextWindow, contextPolicy: options.ContextPolicy,
 		customProviders: options.CustomProviders, touchCustomKey: options.TouchCustomKey,
+		disableContextLearning: options.DisableContextLearning,
 		summarizer: options.Summarizer, summaryCache: options.SummaryCache, summaryModel: options.SummaryModel,
 		summaryMaxTokens: options.SummaryMaxTokens, summaryTimeout: options.SummaryTimeout,
 		onUsage:   options.OnUsage,
@@ -422,8 +436,13 @@ func New(options Options) *Service {
 	service.SetLongContext(options.LongContextModel, options.LongContextPercent)
 	service.SetImageRoute(options.ImageModel, options.TextOnlyModels)
 	service.SetBuildImagePrompt(options.BuildImagePrompt)
+	// Disabled learning also means a persisted floor must not be seeded back in at
+	// boot — otherwise the operator's window is overridden from disk before the
+	// first request. Measure remains the only writer.
+	if !options.DisableContextLearning {
+		service.seedObservedPrompts(options.ObservedPrompts)
+	}
 	service.seedTokenScales(options.LearnedCalibrations)
-	service.seedObservedPrompts(options.ObservedPrompts)
 	mode := ContextModeOff
 	if options.ContextEnabled {
 		mode = strings.ToLower(strings.TrimSpace(options.ContextMode))

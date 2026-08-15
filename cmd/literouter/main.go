@@ -1283,6 +1283,7 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 		ContextMode:    cfg.Context.Mode,
 		SummarizeMode:  cfg.Context.Summarize,
 		ContextGuard:   cfg.Context.GuardEnabled,
+		DisableContextLearning: cfg.Context.DisableContextLearning,
 		ContextLimits:  contextguard.Limits{Default: cfg.Context.DefaultWindow, Models: cfg.Context.ModelWindows},
 		ContextWindow: func(_ context.Context, model string) (int, error) {
 			if windowResolver == nil {

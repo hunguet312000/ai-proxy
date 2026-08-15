@@ -146,6 +146,12 @@ type ContextConfig struct {
 	SummarizeMaxTokens int            `yaml:"summarize_max_tokens"`
 	SummarizeTimeout   time.Duration  `yaml:"summarize_timeout"`
 	ModelWindows       map[string]int `yaml:"model_windows"`
+	// DisableContextLearning stops the gateway from silently correcting a model's
+	// context window from traffic (served-prompt floors and rejection ceilings).
+	// When set, only the operator — via Measure or model_windows — decides a
+	// window; a single large served turn can no longer pin it above the chosen
+	// value. See gateway.Options.DisableContextLearning.
+	DisableContextLearning bool `yaml:"disable_context_learning"`
 }
 
 type ProvidersConfig struct {
@@ -289,6 +295,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if value, ok := os.LookupEnv("LITEROUTER_CONTEXT_SUMMARIZE_MODEL"); ok {
 		cfg.Context.SummarizeModel = value
+	}
+	if value, ok := os.LookupEnv("LITEROUTER_CONTEXT_DISABLE_LEARNING"); ok {
+		cfg.Context.DisableContextLearning = value == "1" || strings.EqualFold(value, "true")
 	}
 	if value, ok := os.LookupEnv("LITEROUTER_ROUTER_IMAGE_MODEL"); ok {
 		cfg.Router.ImageModel = value

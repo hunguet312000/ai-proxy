@@ -86,6 +86,26 @@ func TestResolveContextWindowPrefersLearnedCeiling(t *testing.T) {
 	}
 }
 
+func TestDisableContextLearningKeepsOperatorWindow(t *testing.T) {
+	service := New(Options{
+		ContextWindow:          func(context.Context, string) (int, error) { return 272_000, nil },
+		ObservedPrompts:        map[string]int{"cx/gpt-5.6-sol": 370_000},
+		DisableContextLearning: true,
+	})
+	// A persisted floor from a previous run must not be seeded back in at boot.
+	if window := service.resolveContextWindow(context.Background(), "cx/gpt-5.6-sol"); window != 272_000 {
+		t.Fatalf("seeded floor overrode operator window: got %d, want 272000", window)
+	}
+	// A served prompt that would normally raise the floor must not move the window.
+	service.recordUsage(UsageEvent{Model: "cx/gpt-5.6-sol", PromptTokens: 370_000})
+	// A rejection that would normally lower it must not either.
+	service.learnContextWindow("cx/gpt-5.6-sol", 400_000,
+		contextRejection("prompt is too long: 400000 tokens > 200000 tokens"))
+	if window := service.resolveContextWindow(context.Background(), "cx/gpt-5.6-sol"); window != 272_000 {
+		t.Fatalf("window = %d, want the operator-set 272000 to survive", window)
+	}
+}
+
 func TestObservedPromptRaisesWindowAboveCatalogGuess(t *testing.T) {
 	service := New(Options{
 		ContextWindow: func(context.Context, string) (int, error) { return 128_000, nil },

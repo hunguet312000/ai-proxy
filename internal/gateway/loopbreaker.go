@@ -31,6 +31,17 @@ var editLoopErrors = []string{
 	"does not exist in the file",
 	"text not found",
 	"is not present",
+	// Claude Code's own failure text for a rejected/conflicting edit.
+	"error editing file",
+	"error applying edit",
+	"edit failed",
+	"failed to edit",
+	"concurrent modification",
+	"conflicting change",
+	"file was modified",
+	"target file changed",
+	"out of date",
+	"stale",
 }
 
 // editLoopError reports whether a tool output looks like a failed text replacement.
