@@ -303,18 +303,7 @@ func contentHasImage(blocks []translator.AnthropicContent) bool {
 }
 
 // isTextOnly reports whether a model has been declared unable to read images.
-//
-// Every Cursor agent model (composer, grok-*) is text-only by construction on this
-// proxy: the agent path folds the request into a single flat text prompt and a
-// base64 data URI in that text is not decoded by the service — measured live, a
-// transcription through a Cursor model cogitates and hangs. They are treated as
-// text-only regardless of the declared list so an image turn is always transcribed
-// first (through the vision model) instead of reaching a Cursor model raw.
 func (route *imageRoute) isTextOnly(model string) bool {
-	lower := strings.ToLower(strings.TrimSpace(model))
-	if strings.HasPrefix(lower, "cursor/") || strings.HasPrefix(lower, "cu/") {
-		return true
-	}
 	for _, id := range route.textOnly {
 		if contextguard.LookupByModel(map[string]int{id: 1}, model) == 1 {
 			return true

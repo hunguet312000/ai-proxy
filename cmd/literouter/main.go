@@ -105,7 +105,6 @@ func run() int {
 			logger.Error("close storage", "error", err)
 		}
 	}()
-	restoreCursorTrimBudgets(store, logger)
 
 	migrationContext, cancelMigration := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := store.Migrate(migrationContext); err != nil {
@@ -129,7 +128,6 @@ func run() int {
 	claudeProvider := pooloauth.NewClaudeProvider(nil)
 	grokProvider := pooloauth.NewGrokProvider(nil)
 	antigravityProvider := pooloauth.NewAntigravityProvider(nil)
-	cursorCLIProvider := pooloauth.NewCursorCLIProvider(nil)
 	// The OAuth app identity comes from LiteRouter's own settings, configured in the UI —
 	// never hardcoded and never from env. Restore it here so a restart keeps the login.
 	if clientID, storedErr := store.GetSetting(context.Background(), "antigravity.client_id"); storedErr == nil {
@@ -144,7 +142,7 @@ func run() int {
 	// The OAuth flows must use the same provider instance that carries the configured
 	// credentials; a fresh one inside the manager would authorize with an empty client id.
 	oauthManager.SetAntigravityProvider(antigravityProvider)
-	credentialManager := pooloauth.NewCredentialManager(store, accountPool, logger, codexProvider, claudeProvider, grokProvider, antigravityProvider, cursorCLIProvider)
+	credentialManager := pooloauth.NewCredentialManager(store, accountPool, logger, codexProvider, claudeProvider, grokProvider, antigravityProvider)
 	usageService := usage.NewService(store, accountPool, credentialManager)
 	usageService.SetLogger(logger)
 	oauthManager.SetOnAccountConnected(func(ctx context.Context, accountID string) {
@@ -358,8 +356,6 @@ func run() int {
 			result, err = oauthManager.StartGrok(ctx)
 		case "antigravity":
 			result, err = oauthManager.StartAntigravity(ctx)
-		case "cursor":
-			result, err = oauthManager.StartCursorCLI(ctx)
 		default:
 			return ui.OAuthResult{}, fmt.Errorf("unsupported provider")
 		}
@@ -752,13 +748,6 @@ func run() int {
 			return model, textOnly, nil
 		},
 		SetImageRoute: func(ctx context.Context, model, textOnly string) error {
-			// The Cursor agent path (composer/grok) folds everything into a single text
-			// prompt and cannot see images — a base64 data URI in the prompt text is not
-			// decoded, so a transcription through it cogitates and hangs. Refuse it as an
-			// image model up front instead of failing every image turn at runtime.
-			if lower := strings.ToLower(strings.TrimSpace(model)); strings.HasPrefix(lower, "cursor/") || strings.HasPrefix(lower, "cu/") {
-				return fmt.Errorf("Cursor models cannot transcribe images (they are text-only on this proxy); pick a vision model like opencode/mimo-v2.5")
-			}
 			if err := store.SetSetting(ctx, "router.image_model", model); err != nil {
 				return err
 			}
@@ -828,26 +817,9 @@ func run() int {
 		return err
 	})
 	uiService.SetCompleteOAuth(func(ctx context.Context, provider, raw string) error {
-		if strings.EqualFold(provider, "cursor") {
-			_, err := oauthManager.CompleteCursorCLI(ctx)
-			return err
-		}
 		_, err := oauthManager.CompleteManualCallback(ctx, provider, raw)
 		return err
 	})
-	uiService.SetCursorTrimBudget(
-		pooloauth.CursorTrimBudget,
-		func(model string, budget int) {
-			pooloauth.SetCursorTrimBudget(model, budget)
-			// Persist so a restart keeps the trade-off the operator chose.
-			key := "cursor.trim_budget." + model
-			if budget <= 0 {
-				_ = store.DeleteSetting(context.Background(), key)
-				return
-			}
-			_ = store.SetSetting(context.Background(), key, fmt.Sprintf("%d", budget))
-		},
-	)
 	backgroundContext, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
 	go credentialManager.Run(backgroundContext, cfg.OAuth.RefreshInterval)
@@ -921,10 +893,8 @@ func run() int {
 			result, err = oauthManager.StartGrok(c.Request().Context())
 		case "antigravity":
 			result, err = oauthManager.StartAntigravity(c.Request().Context())
-		case "cursor":
-			result, err = oauthManager.StartCursorCLI(c.Request().Context())
 		default:
-			return echo.NewHTTPError(http.StatusBadRequest, "provider must be codex, claude, xai, antigravity, or cursor")
+			return echo.NewHTTPError(http.StatusBadRequest, "provider must be codex, claude, xai, or antigravity")
 		}
 		if err != nil {
 			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
@@ -1380,26 +1350,4 @@ func healthURL(addr string) (string, error) {
 		Host:   net.JoinHostPort(host, port),
 		Path:   "/health",
 	}).String(), nil
-}
-
-// restoreCursorTrimBudgets loads per-model Cursor trim budget overrides from the
-// settings table back into the in-memory override map, so a restart keeps the
-// quality-vs-latency trade-off the operator chose in the dashboard.
-func restoreCursorTrimBudgets(store *storage.Store, logger *slog.Logger) {
-	values, err := store.SettingsByPrefix(context.Background(), "cursor.trim_budget.")
-	if err != nil {
-		logger.Warn("restore cursor trim budgets", "error", err)
-		return
-	}
-	for key, raw := range values {
-		model := strings.TrimPrefix(key, "cursor.trim_budget.")
-		budget, err := strconv.Atoi(strings.TrimSpace(raw))
-		if err != nil || budget <= 0 {
-			continue
-		}
-		pooloauth.SetCursorTrimBudget(model, budget)
-	}
-	if len(values) > 0 {
-		logger.Info("restored cursor trim budgets", "models", len(values))
-	}
 }

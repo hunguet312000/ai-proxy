@@ -242,11 +242,6 @@ type Service struct {
 	modelsHook      ModelHooks
 	customProviders CustomProviderHooks
 	settings        SettingsHooks
-	// cursorTrimBudget reads/sets the per-model trim budget override used by the
-	// Cursor ACP fold. Wired from the host so the ui package has no dependency on
-	// the oauth pool.
-	cursorTrimBudget  func(string) int
-	setCursorTrimBudget func(string, int)
 	usage           UsageHooks
 	apiToken        string
 	models          []string
@@ -453,9 +448,6 @@ func knownProviders() []ProviderInfo {
 		{ID: "claude", Name: "Claude", Description: "Anthropic OAuth", Icon: "claude", OAuthValue: "claude"},
 		{ID: "xai", Name: "xAI (Grok)", Description: "Browser OAuth · auth.x.ai", Icon: "xai", OAuthValue: "xai"},
 		{ID: "antigravity", Name: "Antigravity", Description: "Google OAuth · Cloud Code", Icon: "antigravity", OAuthValue: "antigravity"},
-		// Cursor connects through the CLI's deep-link login (like `agent login`):
-		// the token lands in LiteRouter's DB, encrypted, with a refresh token.
-		{ID: "cursor", Name: "Cursor", Description: "CLI OAuth · cursor.com login", Icon: "cursor", OAuthValue: "cursor"},
 	}
 }
 
@@ -696,8 +688,6 @@ func providerLogo(p string) string {
 		return "xai"
 	case "antigravity", "gemini":
 		return "antigravity"
-	case "cursor", "cu":
-		return "cursor"
 	default:
 		return "literouter"
 	}
@@ -724,8 +714,6 @@ func providerLabel(p string) string {
 		return "xAI (Grok)"
 	case "antigravity", "gemini":
 		return "Google Antigravity"
-	case "cursor", "cu":
-		return "Cursor"
 	case "", "unknown":
 		return "Unknown"
 	default:
@@ -1073,15 +1061,7 @@ func New(
 	funcs := template.FuncMap{
 		"urlquery": url.QueryEscape, "quotaBucket": quotaBucket, "modelIDExample": modelIDExample,
 		"formatReset": formatReset, "formatFetched": formatFetched, "formatPlan": formatPlan, "planClass": planClass,
-		"formatUSD": formatUSD, "formatInt": formatInt, "formatUsageInt": formatUsageInt, "formatTokens": formatTokens, "prettyModel": storage.PrettyModelLabel, "formatContextWindow": storage.FormatContextWindow, "pct": pct, "pct64": pct64, "effortLevels": func() []string { return storage.EffortLevels }, "honoursEffort": providerHonoursEffort, "providerLabel": providerLabel, "providerLogo": providerLogo, "endpointLabel": endpointLabel, "formatClock": formatClock, "formatDayTime": formatDayTime, "cursorTrimBudget": func(id string) string {
-			if service.cursorTrimBudget == nil {
-				return ""
-			}
-			if v := service.cursorTrimBudget(id); v > 0 {
-				return fmt.Sprintf("%d", v)
-			}
-			return ""
-		},
+		"formatUSD": formatUSD, "formatInt": formatInt, "formatUsageInt": formatUsageInt, "formatTokens": formatTokens, "prettyModel": storage.PrettyModelLabel, "formatContextWindow": storage.FormatContextWindow, "pct": pct, "pct64": pct64, "effortLevels": func() []string { return storage.EffortLevels }, "honoursEffort": providerHonoursEffort, "providerLabel": providerLabel, "providerLogo": providerLogo, "endpointLabel": endpointLabel, "formatClock": formatClock, "formatDayTime": formatDayTime,
 	}
 	index, err := template.New("index.html").Funcs(funcs).ParseFS(assets, "assets/index.html", "assets/tabs.html", "assets/accounts.html")
 	if err != nil {
@@ -1115,39 +1095,6 @@ func (s *Service) SetResetCodex(fn func(context.Context, string) error) {
 
 func (s *Service) SetCompleteOAuth(fn func(context.Context, string, string) error) {
 	s.completeOAuth = fn
-}
-
-// SetCursorTrimBudget wires the per-model Cursor trim budget override. get
-// returns the current override (0 = default); set records a new one.
-func (s *Service) SetCursorTrimBudget(get func(string) int, set func(string, int)) {
-	s.cursorTrimBudget = get
-	s.setCursorTrimBudget = set
-}
-
-func (s *Service) updateTrimBudgetHandler(c echo.Context) error {
-	if !sameOrigin(c.Request()) {
-		return echo.NewHTTPError(http.StatusForbidden, "cross-origin request denied")
-	}
-	if s.setCursorTrimBudget == nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, "trim budget unavailable")
-	}
-	provider := normalizeProviderID(c.FormValue("provider"))
-	id, err := url.PathUnescape(c.Param("id"))
-	if err != nil || provider != "cursor" || strings.TrimSpace(id) == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "a Cursor model id is required")
-	}
-	raw := strings.TrimSpace(c.FormValue("trim_budget"))
-	budget := 0
-	if raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed <= 0 {
-			return echo.NewHTTPError(http.StatusBadRequest, "trim budget must be a positive integer or blank")
-		}
-		budget = parsed
-	}
-	s.setCursorTrimBudget(id, budget)
-	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
-	return s.renderModelCatalog(c, provider)
 }
 
 func (s *Service) Register(e *echo.Echo) error {
@@ -1187,7 +1134,6 @@ func (s *Service) Register(e *echo.Echo) error {
 	e.POST("/ui/models/:id/context", s.updateModelContextHandler)
 	e.POST("/ui/models/:id/context-probe", s.probeModelContextHandler)
 	e.POST("/ui/models/:id/effort", s.updateModelEffortHandler)
-	e.POST("/ui/models/:id/trim-budget", s.updateTrimBudgetHandler)
 	e.POST("/ui/models/test", s.testModelHandler)
 	e.DELETE("/ui/models/:id", s.deleteModelHandler)
 	e.POST("/ui/setup/:tool/:action", s.cliSetupHandler)
@@ -2192,15 +2138,6 @@ func (s *Service) oauthHandler(c echo.Context) error {
 		step2 = "Step 2: Paste the full callback URL here"
 		step2hint = "Prefer the full localhost callback URL. If the browser only shows a broken page, paste the bare code= value and LiteRouter will pair it with the open session."
 		placeholder = "http://127.0.0.1:1456/callback?code=…&state=…  or bare code"
-	case "cursor":
-		title = "Connect Cursor"
-		waiting = "Waiting for Cursor login…"
-		step1 = "Step 1: Open this Cursor login link in your browser"
-		step2 = "Step 2: After logging in, click Done"
-		step2hint = "No callback URL to paste. Just log in with your Cursor account, then click Done — LiteRouter finishes the login in the background."
-		placeholder = ""
-		manualCallback = false
-		submitLabel = "Done — I've logged in"
 	}
 
 	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
@@ -2229,9 +2166,6 @@ func (s *Service) oauthCompleteHandler(c echo.Context) error {
 	if err := s.completeOAuth(c.Request().Context(), provider, raw); err != nil {
 		// Return 200 HTML so HTMX swaps the error into the modal (4xx is not swapped by default).
 		hint := `<p class="oauth-error-hint">Best: full URL <code>http://127.0.0.1:1456/callback?code=…&amp;state=…</code>. Also OK: bare <code>code</code> right after clicking Connect (uses the open session).</p>`
-		if strings.EqualFold(provider, "cursor") {
-			hint = `<p class="oauth-error-hint">Open the login link, complete login in the browser, then click Done again. If it keeps failing, click Connect to start a fresh session.</p>`
-		}
 		_, werr := fmt.Fprintf(c.Response(), `<div class="oauth-modal-error" role="alert"><strong>Connect failed</strong><p>%s</p>%s</div>`, template.HTMLEscapeString(err.Error()), hint)
 		return werr
 	}

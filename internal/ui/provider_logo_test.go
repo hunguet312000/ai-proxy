@@ -23,7 +23,6 @@ func TestProviderLogoCoversEveryRoutedProvider(t *testing.T) {
 		"claude": "claude", "anthropic": "claude",
 		"xai": "xai", "grok": "xai",
 		"antigravity": "antigravity", "gemini": "antigravity",
-		"cursor": "cursor", "cu": "cursor",
 	} {
 		if got := providerLogo(provider); got != want {
 			t.Errorf("providerLogo(%q) = %q, want %q", provider, got, want)
@@ -43,7 +42,7 @@ func TestProviderLogoAssetsExist(t *testing.T) {
 	// A name with no file behind it renders as a broken image, which is how the drift
 	// would come back unnoticed.
 	seen := map[string]bool{}
-	for _, provider := range []string{"codex", "claude", "xai", "antigravity", "cursor", "custom:x", "unknown"} {
+	for _, provider := range []string{"codex", "claude", "xai", "antigravity", "custom:x", "unknown"} {
 		seen[providerLogo(provider)] = true
 	}
 	for name := range seen {
@@ -53,10 +52,7 @@ func TestProviderLogoAssetsExist(t *testing.T) {
 	}
 }
 
-func TestProviderLabelNamesCursorAndCustomUpstreams(t *testing.T) {
-	if got := providerLabel("cursor"); got != "Cursor" {
-		t.Errorf("providerLabel(cursor) = %q, want Cursor", got)
-	}
+func TestProviderLabelNamesCustomUpstreams(t *testing.T) {
 	if got := providerLabel("custom:fpt-ai"); got != "fpt-ai (custom)" {
 		t.Errorf("providerLabel(custom:fpt-ai) = %q, want it marked as custom", got)
 	}

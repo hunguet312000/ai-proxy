@@ -485,24 +485,3 @@ func TestCustomProviderHeroShowsNameAndKeyCount(t *testing.T) {
 	}
 }
 
-func TestCursorDetailPageOffersOAuth(t *testing.T) {
-	// Cursor connects through the CLI deep-link login like every other OAuth
-	// provider; the old IDE-session import form is gone.
-	e, _ := newCustomProviderUI(t, CustomProviderHooks{
-		List: func(context.Context) ([]storage.CustomProvider, error) { return nil, nil },
-	})
-	recorder := httptest.NewRecorder()
-	e.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/ui/providers/cursor", nil))
-	body := recorder.Body.String()
-	if !strings.Contains(body, "Add Cursor OAuth") {
-		t.Fatalf("the Cursor page no longer offers the OAuth connect button: %s", body)
-	}
-	for _, gone := range []string{"Detect local Cursor session", "Import pasted session",
-		"cursorAuth/accessToken", "storage.serviceMachineId", "agent.api5.cursor.sh"} {
-		if strings.Contains(body, gone) {
-			t.Fatalf("legacy IDE-import UI still present: %q in %s", gone, body)
-		}
-	}
-}
-
-

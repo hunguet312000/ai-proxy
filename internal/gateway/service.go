@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1293,27 +1292,8 @@ func requestAlreadySummarized(request provider.Request) bool {
 // larger window than the model has (the 1M beta on a ~194k model), which puts every
 // turn past the soft ratio — trimming on the estimate then loses history the
 // upstream would have served. The refusal path is the ground truth and still works.
-//
-// Only cursor models with a large enough window (composer ~194k) skip; the small
-// window grok variants (161k) must still trim, or a long session overflows the
-// window and the upstream hangs instead of answering.
-//
-// The ACP transport (LITEROUTER_CURSOR_ACP_HOST set) feeds the whole transcript
-// to the CLI agent as one prompt fold, so trimming there directly cuts what the
-// agent must read — a 300k-token turn is otherwise shipped raw and costs tens of
-// seconds of agent time. With ACP enabled, cursor no longer skips: the pipeline
-// compacts/trims before the fold, keeping the payload bounded.
 func skipPreemptiveTrimFor(model string, window int) bool {
-	if providerNameForModel(model) != "cursor" {
-		return false
-	}
-	if os.Getenv("LITEROUTER_CURSOR_ACP_HOST") != "" {
-		return false
-	}
-	// Cursor models whose window is at or above the composer floor keep their
-	// history; smaller windows (grok 161k) trim preemptively so a long session
-	// still fits.
-	return window >= 190000
+	return false
 }
 
 // resolveSummaryModel picks who writes proxy summaries: the explicit configured
@@ -1762,8 +1742,6 @@ func providerNameForModel(model string) string {
 		return "antigravity"
 	case strings.HasPrefix(m, "claude"), strings.HasPrefix(m, "anthropic"):
 		return "claude"
-	case strings.HasPrefix(m, "cursor/"), strings.HasPrefix(m, "cu/"):
-		return "cursor"
 	case strings.HasPrefix(m, "grok"), strings.HasPrefix(m, "xai/"):
 		return "xai"
 	case strings.HasPrefix(m, "cx/"), strings.Contains(m, "codex"), strings.HasPrefix(m, "gpt-"), strings.HasPrefix(m, "o1"), strings.HasPrefix(m, "o3"), strings.HasPrefix(m, "o4"):

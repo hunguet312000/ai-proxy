@@ -115,8 +115,8 @@ func TestModelChipShowsAnActiveEffortOverride(t *testing.T) {
 }
 
 func TestEffortControlOnlyAppearsWhereItReachesTheWire(t *testing.T) {
-	// Cursor's agent request has no effort field, so the control there would save a
-	// setting that changes nothing while the chip claimed it was in force.
+	// An upstream that ignores effort must not offer the control — the setting
+	// would save nothing while the chip claimed it was in force.
 	service, err := New(pool.New(nil), "token", nil, nil, nil, nil, nil,
 		APIKeyHooks{}, ModelHooks{}, SettingsHooks{}, UsageHooks{})
 	if err != nil {
@@ -130,17 +130,14 @@ func TestEffortControlOnlyAppearsWhereItReachesTheWire(t *testing.T) {
 		return out.String()
 	}
 
-	cursor := render([]storage.CatalogModel{
-		{Provider: "cursor", ID: "cursor/composer-2.5-fast", ContextWindow: 200_000, Effort: "high"},
+	noEffort := render([]storage.CatalogModel{
+		{Provider: "antigravity", ID: "ag/gemini", ContextWindow: 400_000, Effort: "high"},
 	})
-	if strings.Contains(cursor, "/effort") {
+	if strings.Contains(noEffort, "/effort") {
 		t.Error("an upstream that ignores effort must not offer the control")
 	}
-	if strings.Contains(cursor, "model-effort-chip") {
+	if strings.Contains(noEffort, "model-effort-chip") {
 		t.Error("no chip may claim an override that never reaches the upstream")
-	}
-	if !strings.Contains(cursor, "no reasoning effort") {
-		t.Error("the row must say why the setting is absent")
 	}
 
 	codex := render([]storage.CatalogModel{
@@ -160,7 +157,7 @@ func TestProviderHonoursEffortMatchesTheOnlySender(t *testing.T) {
 			t.Errorf("providerHonoursEffort(%q) = false, want true", provider)
 		}
 	}
-	for _, provider := range []string{"cursor", "antigravity", "xai", "claude", "custom:fpt-ai", ""} {
+	for _, provider := range []string{"antigravity", "xai", "claude", "custom:fpt-ai", ""} {
 		if providerHonoursEffort(provider) {
 			t.Errorf("providerHonoursEffort(%q) = true, but that path drops the field", provider)
 		}

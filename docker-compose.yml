@@ -13,7 +13,6 @@ services:
       - "127.0.0.1:1455:1455"
       - "127.0.0.1:1457:1457"
       - "127.0.0.1:1456:1456"
-      - "127.0.0.1:1458:1458"
     environment:
       LITEROUTER_SERVER_ADDR: ":8317"
       HOME: "/host-home"
@@ -49,26 +48,13 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       XAI_API_KEY: "${XAI_API_KEY:-}"
       LITEROUTER_LOG_LEVEL: "${LITEROUTER_LOG_LEVEL:-info}"
-      # The Cursor CLI ships a macOS binary that cannot run in this Linux
-      # container, so LiteRouter talks to a host-side bridge over TCP instead:
-      # scripts/cursor-acp-bridge.js spawns `agent acp` on the host and relays
-      # newline-delimited JSON-RPC. Start it with:
-      #   node scripts/cursor-acp-bridge.js
-      # (Port 1459 is bound on the host and published below.)
-      LITEROUTER_CURSOR_ACP_HOST: "host.docker.internal:1459"
     volumes:
       - literouter-data:/data
       # Host home so CLI Apply/Reset can write ~/.claude and ~/.codex like 9router.
       - ${HOME}:/host-home
-      # Read-only, and only so Cursor's product.json can be read: its version and
-      # commit have to match the installed IDE or every Cursor request is refused.
+      # Read-only, and only so the IDE product.json can be read where a provider
+      # needs the installed version to match (Cursor no longer ships on this proxy).
       - /Applications:/host-apps:ro
-      # Cursor CLI for the ACP-based integration: the binary lives in
-      # ~/.local/share/cursor-agent/versions/<ver>/ (the ~/.local/bin/agent symlink
-      # points there), and the node runtime is bundled alongside it. Mounted
-      # read-only — the CLI authenticates through the token LiteRouter stores in its
-      # own DB, so it never needs to write its own auth state.
-      - ${HOME}/.local/share/cursor-agent:/host-cursor-cli:ro
     healthcheck:
       test: ["CMD", "/literouter", "-healthcheck"]
       interval: 10s
