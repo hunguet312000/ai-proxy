@@ -1190,10 +1190,18 @@ func (s *Service) prepareContextStages(ctx context.Context, request provider.Req
 	// reach 154,651, which already fits. Two summarize rounds per compaction is most of why
 	// a compact sat at 95% for minutes.
 	//
+	// The same double-work applies to any turn that already carries a proxy summary in
+	// its first user message (the post-compact continuation, or a session the proxy's
+	// own summarize stage previously rewrote). That summary is the older conversation in
+	// compressed form; summarizing it again here adds a second compress-and-replace pass
+	// over a transcript that is already the output of one, for the same reason the
+	// compaction request itself is skipped. Measured on a real post-compact turn, the
+	// second pass cost another ~35s before the deterministic trim ran anyway.
+	//
 	// The trade is real and worth stating: trim drops the oldest turn-units outright, so the
 	// summary the client ends up with covers less of the beginning than a compressed-then-
 	// summarized history would. Latency was the priority; reverting is deleting one clause.
-	if s.summarizer == nil || isCompactTurn(ctx) || s.SummarizeMode() == SummarizeModeTrim || len(contextguard.SummaryMessages(prepared.Request.Messages, 1, policy.BoundaryQuantum)) == 0 {
+	if s.summarizer == nil || isCompactTurn(ctx) || requestAlreadySummarized(prepared.Request) || s.SummarizeMode() == SummarizeModeTrim || len(contextguard.SummaryMessages(prepared.Request.Messages, 1, policy.BoundaryQuantum)) == 0 {
 		if contextguard.ExceedsHardLimit(prepared, policy) {
 			return s.trimStage(prepared.Request, limits, policy, outcome)
 		}
@@ -1251,6 +1259,32 @@ func (s *Service) prepareContextStages(ctx context.Context, request provider.Req
 	}
 	outcome.afterTokens = verified.AfterTokens
 	return verified.Request, outcome, nil
+}
+
+// requestAlreadySummarized reports whether the request already carries a proxy
+// summary as its oldest message — the marker a prior summarize stage wrote, or
+// the summary the client's post-compact continuation quotes back as its first
+// user message. Such a request is the output of a previous summarization, so
+// summarizing it again here would compress an already-compressed conversation.
+//
+// The marker is the proxy's own (ProxySummaryMarker), checked only in the oldest
+// user message: that is where ApplySummary writes it and where the client's
+// post-compact continuation quotes it. A marker anywhere else is history quoting
+// a summary, not the request being one.
+func requestAlreadySummarized(request provider.Request) bool {
+	for _, message := range request.Messages {
+		if message.Role != "user" {
+			continue
+		}
+		for _, block := range message.Content {
+			if block.Type == "text" && strings.Contains(block.Text, contextguard.ProxySummaryMarker) {
+				return true
+			}
+		}
+		// The summary lives in the oldest user message; nothing after it can be one.
+		break
+	}
+	return false
 }
 
 // skipPreemptiveTrimFor reports whether a model should skip the pipeline's

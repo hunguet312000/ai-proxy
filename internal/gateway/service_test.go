@@ -904,3 +904,59 @@ func TestCompleteReturnsEmptyResponseAfterBoundedReplays(t *testing.T) {
 		t.Fatalf("upstream attempts = %d, want %d", client.calls, 1+maxEmptyTurnReplays)
 	}
 }
+
+func TestRequestAlreadySummarized(t *testing.T) {
+	summaryText := contextguard.ProxySummaryMarker + " Historical context from earlier turns."
+	cases := []struct {
+		name     string
+		messages []provider.Message
+		want     bool
+	}{
+		{
+			name: "proxy summary as the oldest user message",
+			messages: []provider.Message{
+				{Role: "user", Content: []provider.Content{{Type: "text", Text: summaryText}}},
+				{Role: "assistant", Content: []provider.Content{{Type: "text", Text: "ok"}}},
+				{Role: "user", Content: []provider.Content{{Type: "text", Text: "continue"}}},
+			},
+			want: true,
+		},
+		{
+			name: "post-compact continuation quoting the summary first",
+			messages: []provider.Message{
+				{Role: "user", Content: []provider.Content{{Type: "text", Text: "Continue the conversation.\n\n" + summaryText}}},
+				{Role: "user", Content: []provider.Content{{Type: "text", Text: "finish the task"}}},
+			},
+			want: true,
+		},
+		{
+			name: "summary marker quoted in a later message is history, not the request",
+			messages: []provider.Message{
+				{Role: "user", Content: []provider.Content{{Type: "text", Text: "ordinary opening"}}},
+				{Role: "user", Content: []provider.Content{{Type: "text", Text: summaryText}}},
+			},
+		},
+		{
+			name: "no summary marker",
+			messages: []provider.Message{
+				{Role: "user", Content: []provider.Content{{Type: "text", Text: "ordinary opening"}}},
+				{Role: "user", Content: []provider.Content{{Type: "text", Text: "continue"}}},
+			},
+		},
+		{
+			name: "oldest message is a tool result, not a summary",
+			messages: []provider.Message{
+				{Role: "user", Content: []provider.Content{{Type: "tool_result", ToolUseID: "t1", Text: "some output"}}},
+				{Role: "user", Content: []provider.Content{{Type: "text", Text: summaryText}}},
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := provider.Request{Model: "model", Messages: testCase.messages}
+			if got := requestAlreadySummarized(request); got != testCase.want {
+				t.Fatalf("requestAlreadySummarized = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}

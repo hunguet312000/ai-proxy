@@ -20,7 +20,15 @@ import (
 )
 
 func compactUserMessage() translator.AnthropicMessage {
-	return userText("Context is running low.", compactRequestMarker+" Focus on the user's requests.")
+	return userText("Context is running low.", compactRequestPrefix+" the conversation so far, paying close attention to the user's explicit requests.")
+}
+
+func compactRecentUserMessage() translator.AnthropicMessage {
+	return userText("Context is running low.", compactRequestPrefix+" the RECENT portion of the conversation — the messages that follow earlier retained context.")
+}
+
+func compactThisConversationUserMessage() translator.AnthropicMessage {
+	return userText("Context is running low.", compactRequestPrefix+" this conversation. This summary will be placed at the start of a continuing session.")
 }
 
 func TestIsCompactRequest(t *testing.T) {
@@ -61,13 +69,48 @@ func TestIsCompactRequest(t *testing.T) {
 		{
 			name: "marker inside a non-text block",
 			messages: []translator.AnthropicMessage{padding, {Role: "user", Content: []translator.AnthropicContent{
-				{Type: "tool_result", ToolUseID: "t1", Content: compactRequestMarker},
+				{Type: "tool_result", ToolUseID: "t1", Content: compactRequestPrefix + " the conversation so far"},
 			}}},
 			rawBytes: compactMinBytes,
 		},
 		{
 			name:     "marker echoed by the assistant only",
-			messages: []translator.AnthropicMessage{padding, assistantText(compactRequestMarker), userText("go on")},
+			messages: []translator.AnthropicMessage{padding, assistantText(compactRequestPrefix + " the conversation so far"), userText("go on")},
+			rawBytes: compactMinBytes,
+		},
+		{
+			name:     "recent-portion variant",
+			messages: []translator.AnthropicMessage{padding, compactRecentUserMessage()},
+			rawBytes: compactMinBytes,
+			want:     true,
+		},
+		{
+			name:     "this-conversation variant",
+			messages: []translator.AnthropicMessage{padding, compactThisConversationUserMessage()},
+			rawBytes: compactMinBytes,
+			want:     true,
+		},
+		{
+			// The post-compact continuation quotes the summary text in its FIRST user
+			// message; that summary carries the proxy's own marker, and this turn must
+			// not be re-detected as a fresh compact (it would re-route to the compact
+			// model and summarize a summary).
+			name: "post-compact continuation quoting a proxy summary is not a compact",
+			messages: []translator.AnthropicMessage{
+				userText(contextguard.ProxySummaryMarker + " Historical context from earlier turns."),
+				assistantText("understood"),
+				userText("continue the task"),
+			},
+			rawBytes: compactMinBytes,
+		},
+		{
+			name:     "prefix without a known target is not a compact",
+			messages: []translator.AnthropicMessage{padding, userText("Your task is to create a detailed summary of the repo for onboarding.")},
+			rawBytes: compactMinBytes,
+		},
+		{
+			name:     "prefix embedded in prose is not a compact",
+			messages: []translator.AnthropicMessage{padding, userText("Per the instruction, your task is to create a detailed summary of the conversation so far, then continue.")},
 			rawBytes: compactMinBytes,
 		},
 	}
@@ -154,7 +197,7 @@ func compactBody(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	instruction, err := json.Marshal(compactRequestMarker + " Focus on the user's requests.")
+	instruction, err := json.Marshal(compactRequestPrefix + " the conversation so far, paying close attention to the user's requests.")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +226,7 @@ func TestMessagesHandlerRoutesCompactTurnAtForcedEffort(t *testing.T) {
 
 	// An ordinary large no-tools turn without the marker routes unchanged.
 	oauth.models, oauth.efforts = nil, nil
-	body := strings.Replace(compactBody(t), compactRequestMarker, "please summarize my day", 1)
+	body := strings.Replace(compactBody(t), compactRequestPrefix+" the conversation so far", "please summarize my day", 1)
 	recorder = postAnthropic(t, service, body)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %q", recorder.Code, recorder.Body.String())
@@ -423,6 +466,31 @@ func TestMessagesHandlerMarksCompactTurnsForThePipeline(t *testing.T) {
 	send(newService(), body("Your task is to create a detailed summary of the conversation so far."))
 	if summarizer.calls != ordinary {
 		t.Fatalf("summarizer ran %d extra times for a compaction request; the handler flag is not reaching the pipeline",
+			summarizer.calls-ordinary)
+	}
+
+	// A post-compact continuation whose first user message quotes the proxy's summary
+	// marker is not detected as a fresh compact, but it is also not re-summarized: the
+	// pipeline sees the requestAlreadySummarized guard and skips the LLM pass the same
+	// way it skips a compaction request.
+	bodyWithSummary := func(lastText string) string {
+		payload := map[string]any{
+			"model": "model", "max_tokens": 64, "stream": true,
+			"messages": []map[string]any{
+				{"role": "user", "content": []map[string]string{{"type": "text", "text": contextguard.ProxySummaryMarker + " Historical context from earlier turns. " + filler}}},
+				{"role": "assistant", "content": []map[string]string{{"type": "text", "text": filler}}},
+				{"role": "user", "content": []map[string]string{{"type": "text", "text": lastText}}},
+			},
+		}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(encoded)
+	}
+	send(newService(), bodyWithSummary("tiếp tục công việc"))
+	if summarizer.calls != ordinary {
+		t.Fatalf("summarizer ran %d extra times for a post-compact continuation quoting the proxy summary; the already-summarized guard is not reaching the pipeline",
 			summarizer.calls-ordinary)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"literouter/internal/contextguard"
 	"literouter/internal/translator"
 )
 
@@ -24,13 +25,23 @@ import (
 //     continuation turn quotes summary content in its FIRST user message, and a
 //     transcript that merely mentions the phrase carries it in earlier messages.
 //
-// If a client update rewords the prompt, detection quietly returns false and the
-// compact runs on the session model — the status quo, slow but correct. The
-// debug line in compactRoute is what makes that drift diagnosable.
+// The instruction is matched by its load-bearing prefix plus the wording that
+// names the summarization target. Claude Code rewords the prompt across
+// releases — 2.1.228 says "a detailed summary of the conversation so far",
+// 2.1.233 says "of the RECENT portion of the conversation" for its
+// retained-context compact and "of this conversation" for the plain one — so a
+// single hardcoded sentence drifted on every release and the debug line in
+// compactRoute reported the miss. The shared prefix is stable across all of
+// them.
+//
+// If a client update rewords even the prefix, detection quietly returns false
+// and the compact runs on the session model — the status quo, slow but correct.
+// The debug line in compactRoute is what makes that drift diagnosable.
 const (
-	// compactRequestMarker is the load-bearing sentence of the summarization
-	// instruction, verified against the 2.1.x client.
-	compactRequestMarker = "Your task is to create a detailed summary of the conversation so far"
+	// compactRequestPrefix is the load-bearing, release-stable opening of every
+	// Claude Code summarization instruction, verified against the 2.1.228 and
+	// 2.1.233 clients.
+	compactRequestPrefix = "Your task is to create a detailed summary of"
 	compactMinBytes      = 32 << 10
 	// compactEffort is forced onto detected compact turns. Medium, not low: the
 	// summary seeds the continued session, so its quality is worth a real effort
@@ -38,6 +49,16 @@ const (
 	// racing to the cheapest setting.
 	compactEffort = "medium"
 )
+
+// compactRequestTargets is the wording that names what is being summarized,
+// immediately after the prefix. Matching the prefix alone would claim a turn
+// whose last user message happens to begin with those words for another
+// reason; naming the target is what makes the match specific.
+var compactRequestTargets = []string{
+	"the conversation so far",
+	"the recent portion of the conversation",
+	"this conversation",
+}
 
 // isCompactRequest reports whether this turn is a Claude Code compact/auto-compact
 // summarization request.
@@ -51,13 +72,56 @@ func isCompactRequest(request translator.AnthropicRequest, rawBytes int) bool {
 			continue
 		}
 		for _, content := range message.Content {
-			if content.Type == "text" && strings.Contains(content.Text, compactRequestMarker) {
+			if content.Type != "text" {
+				continue
+			}
+			if hasCompactInstruction(content.Text) {
 				return true
 			}
 		}
 		// Only the final user message may carry the instruction; anything earlier
 		// is history quoting it.
 		return false
+	}
+	return false
+}
+
+// hasCompactInstruction reports whether text is (or begins with) the Claude Code
+// summarization instruction.
+//
+// The prefix must be followed by a whitespace and a known target, so a message
+// that merely embeds the phrase ("…your task is to create a detailed summary of
+// the conversation so far, per the /compact instruction…") does not match — the
+// compact turn leads with the instruction, it never quotes it. A prompt that
+// already carries a LiteRouter summary marker (from the proxy's own summarize
+// stage or a prior trim) is the post-compact continuation, which must not be
+// re-detected as a fresh compact: the client's continuation would re-route to
+// the compact model at forced effort and possibly summarize again.
+func hasCompactInstruction(text string) bool {
+	index := strings.Index(text, compactRequestPrefix)
+	if index < 0 {
+		return false
+	}
+	after := text[index+len(compactRequestPrefix):]
+	if len(after) == 0 || after[0] != ' ' {
+		return false
+	}
+	// A message that carries the proxy's own summary marker anywhere is a summary
+	// being quoted or replayed, not a fresh summarization instruction — the
+	// post-compact continuation quotes the summary text in its first user message,
+	// and a summary of a summary is the double work this detection exists to stop.
+	if strings.Contains(text, contextguard.ProxySummaryMarker) {
+		return false
+	}
+	// The target follows the prefix directly (after a space), so compare against the
+	// space-stripped text. The target itself is matched in lower case, but the
+	// original casing of the phrase ("the RECENT portion") must survive in `after`
+	// — only the comparison is case-folded.
+	lower := strings.ToLower(strings.TrimSpace(after))
+	for _, target := range compactRequestTargets {
+		if strings.HasPrefix(lower, target) {
+			return true
+		}
 	}
 	return false
 }
