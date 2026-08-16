@@ -243,9 +243,14 @@ type Service struct {
 	noAutoToolChoice         map[string]bool
 	rejectedReasoningEfforts map[string]map[string]bool
 	learnedMu                sync.RWMutex
-	onOutputLimit            func(model string, limit int)
-	onContextWindow          func(model string, window int)
-	onCalibration            func(TokenCalibration)
+	// disableThinking records, per model, the operator's vLLM thinking toggle
+	// from the catalog. Guarded by its own lock because it is written by the
+	// catalog refresh and read on the request hot path.
+	disableThinking   map[string]bool
+	disableThinkingMu sync.RWMutex
+	onOutputLimit     func(model string, limit int)
+	onContextWindow   func(model string, window int)
+	onCalibration     func(TokenCalibration)
 	// contextMode is the runtime state of the proxy pipeline: off, safe, or
 	// aggressive. Atomic so the dashboard can flip it without a restart.
 	contextMode      atomic.Pointer[string]
@@ -592,6 +597,18 @@ func (s *Service) ReplaceModelEfforts(efforts map[string]string) {
 		clone[model] = effort
 	}
 	s.modelEfforts.Store(&clone)
+}
+
+// ReplaceDisableThinking installs the per-model vLLM thinking toggles from the
+// catalog.
+func (s *Service) ReplaceDisableThinking(disabled map[string]bool) {
+	clone := make(map[string]bool, len(disabled))
+	for model, on := range disabled {
+		clone[model] = on
+	}
+	s.disableThinkingMu.Lock()
+	s.disableThinking = clone
+	s.disableThinkingMu.Unlock()
 }
 
 // effortFor returns the override for a model, or empty to leave the request alone.

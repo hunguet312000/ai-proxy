@@ -152,6 +152,9 @@ func (s *Service) applyModelCapabilities(request *translator.OpenAIRequest, mode
 		rejected = s.rejectedReasoningEfforts[model]
 	}
 	s.learnedMu.RUnlock()
+	s.disableThinkingMu.RLock()
+	disabled := s.disableThinking[model]
+	s.disableThinkingMu.RUnlock()
 	if noAuto {
 		if choice, ok := request.ToolChoice.(string); ok && choice == "auto" {
 			request.ToolChoice = "none"
@@ -174,12 +177,14 @@ func (s *Service) applyModelCapabilities(request *translator.OpenAIRequest, mode
 		request.ReasoningEffort = knownSafeReasoningEffort
 	}
 	// vLLM Qwen3 with thinking enabled deliberates first and then either calls a
-	// tool or ends with a bare "\n\n" — the stall. For agent/coding traffic the
-	// reasoning is rarely worth it; disable it so the model answers directly.
-	if request.ChatTemplateKwargs == nil {
-		request.ChatTemplateKwargs = map[string]any{}
-	}
-	if _, ok := request.ChatTemplateKwargs["enable_thinking"]; !ok {
-		request.ChatTemplateKwargs["enable_thinking"] = false
+	// tool or ends with a bare "\n\n" — the stall. Only when the operator turned
+	// the toggle on for this model is thinking disabled so it answers directly.
+	if disabled {
+		if request.ChatTemplateKwargs == nil {
+			request.ChatTemplateKwargs = map[string]any{}
+		}
+		if _, ok := request.ChatTemplateKwargs["enable_thinking"]; !ok {
+			request.ChatTemplateKwargs["enable_thinking"] = false
+		}
 	}
 }

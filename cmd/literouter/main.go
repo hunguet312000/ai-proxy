@@ -321,14 +321,20 @@ func run() int {
 			return err
 		}
 		windowResolver.ReplaceCatalog(windows)
-		// Effort overrides live in the same table and change on the same edits, so they
-		// are refreshed together rather than through a second path that could drift.
+		// Effort overrides and thinking toggles live in the same table and change on
+		// the same edits, so they are refreshed together rather than through a second
+		// path that could drift.
 		efforts, err := store.CatalogEfforts(ctx)
+		if err != nil {
+			return err
+		}
+		thinking, err := store.CatalogDisableThinking(ctx)
 		if err != nil {
 			return err
 		}
 		if gatewayService != nil {
 			gatewayService.ReplaceModelEfforts(efforts)
+			gatewayService.ReplaceDisableThinking(thinking)
 		}
 		return nil
 	}
@@ -430,6 +436,12 @@ func run() int {
 		},
 		SetEffort: func(ctx context.Context, providerName, id, effort string) error {
 			if err := store.SetCatalogEffort(ctx, providerName, id, effort); err != nil {
+				return err
+			}
+			return refreshContextWindows(ctx)
+		},
+		SetDisableThinking: func(ctx context.Context, providerName, id string, disabled bool) error {
+			if err := store.SetCatalogDisableThinking(ctx, providerName, id, disabled); err != nil {
 				return err
 			}
 			return refreshContextWindows(ctx)
@@ -1279,12 +1291,12 @@ func newGateway(cfg config.Config, windowResolver *contextguard.WindowResolver, 
 			}
 			windowResolver.ReplaceCatalog(windows)
 		},
-		ContextEnabled: cfg.Context.Enabled,
-		ContextMode:    cfg.Context.Mode,
-		SummarizeMode:  cfg.Context.Summarize,
-		ContextGuard:   cfg.Context.GuardEnabled,
+		ContextEnabled:         cfg.Context.Enabled,
+		ContextMode:            cfg.Context.Mode,
+		SummarizeMode:          cfg.Context.Summarize,
+		ContextGuard:           cfg.Context.GuardEnabled,
 		DisableContextLearning: cfg.Context.DisableContextLearning,
-		ContextLimits:  contextguard.Limits{Default: cfg.Context.DefaultWindow, Models: cfg.Context.ModelWindows},
+		ContextLimits:          contextguard.Limits{Default: cfg.Context.DefaultWindow, Models: cfg.Context.ModelWindows},
 		ContextWindow: func(_ context.Context, model string) (int, error) {
 			if windowResolver == nil {
 				return 0, nil

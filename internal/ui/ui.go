@@ -85,12 +85,13 @@ type APIKeyHooks struct {
 }
 
 type ModelHooks struct {
-	List             func(context.Context, string) ([]storage.CatalogModel, error)
-	Add              func(context.Context, string, string, string, int) (storage.CatalogModel, error)
-	SetContextWindow func(context.Context, string, string, int) error
-	SetEffort        func(context.Context, string, string, string) error
-	Delete           func(context.Context, string, string) error
-	Test             func(context.Context, string) (ModelTestResult, error)
+	List               func(context.Context, string) ([]storage.CatalogModel, error)
+	Add                func(context.Context, string, string, string, int) (storage.CatalogModel, error)
+	SetContextWindow   func(context.Context, string, string, int) error
+	SetEffort          func(context.Context, string, string, string) error
+	SetDisableThinking func(context.Context, string, string, bool) error
+	Delete             func(context.Context, string, string) error
+	Test               func(context.Context, string) (ModelTestResult, error)
 	// ProbeContext measures a model's real context window by sending it a prompt of a
 	// known size. tokens > 0 tries exactly that size and reports whether it was served;
 	// tokens == 0 searches for the largest size the model will take.
@@ -1126,6 +1127,7 @@ func (s *Service) Register(e *echo.Echo) error {
 	e.POST("/ui/models/:id/context", s.updateModelContextHandler)
 	e.POST("/ui/models/:id/context-probe", s.probeModelContextHandler)
 	e.POST("/ui/models/:id/effort", s.updateModelEffortHandler)
+	e.POST("/ui/models/:id/thinking", s.updateModelThinkingHandler)
 	e.POST("/ui/models/test", s.testModelHandler)
 	e.DELETE("/ui/models/:id", s.deleteModelHandler)
 	e.POST("/ui/setup/:tool/:action", s.cliSetupHandler)
@@ -1759,6 +1761,26 @@ func (s *Service) updateModelEffortHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "provider and model id are required")
 	}
 	if err := s.modelsHook.SetEffort(c.Request().Context(), provider, id, c.FormValue("effort")); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")
+	return s.renderModelCatalog(c, provider)
+}
+
+func (s *Service) updateModelThinkingHandler(c echo.Context) error {
+	if !sameOrigin(c.Request()) {
+		return echo.NewHTTPError(http.StatusForbidden, "cross-origin request denied")
+	}
+	if s.modelsHook.SetDisableThinking == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "model thinking configuration unavailable")
+	}
+	provider := normalizeProviderID(c.FormValue("provider"))
+	id, err := url.PathUnescape(c.Param("id"))
+	if err != nil || provider == "" || strings.TrimSpace(id) == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "provider and model id are required")
+	}
+	disabled := c.FormValue("disable_thinking") == "on"
+	if err := s.modelsHook.SetDisableThinking(c.Request().Context(), provider, id, disabled); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 	c.Response().Header().Set(echo.HeaderContentType, "text/html; charset=utf-8")

@@ -19,8 +19,13 @@ type CatalogModel struct {
 	// leaves the request untouched, which is the only safe default: the client's own
 	// effort is a control the user drives with /effort, and taking it over silently
 	// would make that command appear broken.
-	Effort    string    `json:"effort,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Effort string `json:"effort,omitempty"`
+	// DisableThinking sends chat_template_kwargs {"enable_thinking": false} on
+	// custom OpenAI-compatible upstreams (vLLM Qwen3), so the model answers
+	// directly instead of deliberating into an empty turn. Only meaningful for
+	// vLLM-served reasoning models.
+	DisableThinking bool      `json:"disable_thinking,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 // EffortLevels are the reasoning levels a model override may take. Empty is always
@@ -261,9 +266,9 @@ func (s *Store) ListCatalogModels(ctx context.Context, provider string) ([]Catal
 		args  []any
 	)
 	if provider == "" {
-		query = `SELECT provider, id, label, context_window, max_output_tokens, effort, created_at FROM catalog_models ORDER BY provider COLLATE NOCASE, id COLLATE NOCASE`
+		query = `SELECT provider, id, label, context_window, max_output_tokens, effort, disable_thinking, created_at FROM catalog_models ORDER BY provider COLLATE NOCASE, id COLLATE NOCASE`
 	} else {
-		query = `SELECT provider, id, label, context_window, max_output_tokens, effort, created_at FROM catalog_models WHERE provider = ? ORDER BY id COLLATE NOCASE`
+		query = `SELECT provider, id, label, context_window, max_output_tokens, effort, disable_thinking, created_at FROM catalog_models WHERE provider = ? ORDER BY id COLLATE NOCASE`
 		args = []any{provider}
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -275,7 +280,7 @@ func (s *Store) ListCatalogModels(ctx context.Context, provider string) ([]Catal
 	for rows.Next() {
 		var model CatalogModel
 		var created int64
-		if err := rows.Scan(&model.Provider, &model.ID, &model.Label, &model.ContextWindow, &model.MaxOutputTokens, &model.Effort, &created); err != nil {
+		if err := rows.Scan(&model.Provider, &model.ID, &model.Label, &model.ContextWindow, &model.MaxOutputTokens, &model.Effort, &model.DisableThinking, &created); err != nil {
 			return nil, fmt.Errorf("scan catalog model: %w", err)
 		}
 		if model.Label == "" || model.Label == model.ID {
@@ -453,6 +458,44 @@ func (s *Store) CatalogEfforts(ctx context.Context) (map[string]string, error) {
 			return nil, err
 		}
 		out[id] = effort
+	}
+	return out, rows.Err()
+}
+
+// SetCatalogDisableThinking records the thinking toggle for one model.
+func (s *Store) SetCatalogDisableThinking(ctx context.Context, provider, id string, disabled bool) error {
+	provider = normalizeCatalogProvider(provider)
+	id = strings.TrimSpace(id)
+	if provider == "" || id == "" {
+		return fmt.Errorf("provider and model id are required")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE catalog_models SET disable_thinking = ? WHERE provider = ? AND id = ?`, disabled, provider, id)
+	if err != nil {
+		return fmt.Errorf("set disable thinking: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("model not found")
+	}
+	return nil
+}
+
+// CatalogDisableThinking maps model id to whether the operator disabled the
+// vLLM thinking block for it. Only models with the toggle on appear.
+func (s *Store) CatalogDisableThinking(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, disable_thinking FROM catalog_models WHERE disable_thinking <> 0`)
+	if err != nil {
+		return nil, fmt.Errorf("list catalog disable_thinking: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		var disabled bool
+		if err := rows.Scan(&id, &disabled); err != nil {
+			return nil, err
+		}
+		out[id] = disabled
 	}
 	return out, rows.Err()
 }
@@ -668,6 +711,14 @@ func (s *Store) migrateCatalogModels(ctx context.Context) error {
 				msg := strings.ToLower(err.Error())
 				if !strings.Contains(msg, "duplicate column") {
 					return fmt.Errorf("add catalog_models.context_window: %w", err)
+				}
+			}
+		}
+		if !strings.Contains(lower, "disable_thinking") {
+			if _, err := s.db.ExecContext(ctx, `ALTER TABLE catalog_models ADD COLUMN disable_thinking INTEGER NOT NULL DEFAULT 0`); err != nil {
+				msg := strings.ToLower(err.Error())
+				if !strings.Contains(msg, "duplicate column") {
+					return fmt.Errorf("add catalog_models.disable_thinking: %w", err)
 				}
 			}
 		}
