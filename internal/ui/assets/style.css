@@ -284,6 +284,11 @@ h1,h2,h3,p { margin: 0; }
 .model-row code { display: block; color: var(--brand-text); font-size: 11px; margin-top: 2px; }
 select.field { appearance: none; }
 
+/* A checkbox inside a model-context form must not grow to field size; keep it a
+   normal checkbox on the label line. */
+.model-checkbox { display: flex; align-items: center; gap: 6px; }
+.model-checkbox input[type="checkbox"] { width: auto; height: auto; min-height: 0; padding: 0; margin: 0; }
+
 .provider-detail { gap: 10px; }
 .back-link {
   display: inline-flex; align-items: center; gap: 6px; width: fit-content;

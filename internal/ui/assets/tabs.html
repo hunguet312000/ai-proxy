@@ -764,9 +764,9 @@ wire_api = "responses"</pre>
       </form>
       <form class="model-context-form" hx-post="/ui/models/{{urlquery .ID}}/thinking" hx-target="#model-catalog" hx-swap="innerHTML">
         <input type="hidden" name="provider" value="{{.Provider}}">
-        <label>
+        <label class="model-checkbox">
           <span>vLLM thinking</span>
-          <input class="field" type="checkbox" name="disable_thinking"{{if .DisableThinking}} checked{{end}}>
+          <input type="checkbox" name="disable_thinking"{{if .DisableThinking}} checked{{end}}>
           Disable thinking block (Qwen3)
         </label>
         <button class="btn sm" type="submit">Save</button>
