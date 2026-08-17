@@ -307,6 +307,24 @@
         <input class="field sm" name="api_key" type="password" placeholder="add key" autocomplete="off" required>
         <button class="btn secondary sm" type="submit">Add key</button>
       </form>
+      <details class="custom-edit">
+        <summary class="btn secondary sm" role="button" tabindex="0">Edit</summary>
+        <form class="inline-form custom-provider-form custom-edit-form" hx-post="/ui/providers/custom/{{urlquery .ID}}" hx-target="#custom-providers" hx-swap="innerHTML">
+          <input class="field" name="name" value="{{.Name}}" placeholder="Name (e.g. AI Telegram)" maxlength="64">
+          <input class="field" name="prefix" value="{{.Prefix}}" placeholder="prefix (e.g. ai-tele)" maxlength="32" required>
+          <select class="field" name="kind" aria-label="Provider kind">
+            <option value="openai" {{if eq .Kind "openai"}}selected{{end}}>OpenAI compatible</option>
+            <option value="anthropic" {{if eq .Kind "anthropic"}}selected{{end}}>Anthropic compatible</option>
+          </select>
+          <select class="field" name="api_type" aria-label="API type">
+            <option value="chat" {{if eq .APIType "chat"}}selected{{end}}>Chat Completions</option>
+            <option value="responses" {{if eq .APIType "responses"}}selected{{end}}>Responses API</option>
+          </select>
+          <input class="field grow" name="base_url" value="{{.BaseURL}}" placeholder="https://api.example.com/v1" required>
+          <input type="hidden" name="enabled" value="{{if .Enabled}}true{{else}}false{{end}}">
+          <button class="btn primary sm" type="submit">Save</button>
+        </form>
+      </details>
       <form hx-post="/ui/providers/custom/{{urlquery .ID}}" hx-target="#custom-providers" hx-swap="innerHTML">
         <input type="hidden" name="name" value="{{.Name}}">
         <input type="hidden" name="prefix" value="{{.Prefix}}">

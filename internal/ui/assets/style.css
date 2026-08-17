@@ -1982,6 +1982,26 @@ select.field { appearance: none; }
 .custom-key code { display: inline; margin: 0; font-size: 10.5px; }
 .custom-key em { font-style: normal; font-size: 10px; color: var(--muted); }
 .hint.danger { color: var(--danger); }
+/* Inline edit for a custom provider: a details/summary inside the row's btn-row,
+   with the form dropping below in its own surface so it reads as a dialog. */
+.custom-edit { position: relative; }
+.custom-edit summary { list-style: none; }
+.custom-edit summary::-webkit-details-marker { display: none; }
+.custom-edit[open] summary { opacity: .7; }
+.custom-edit-form {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
+  width: 520px; max-width: calc(100vw - 32px);
+  flex-wrap: wrap; align-items: flex-end;
+  padding: 10px; margin: 0;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.18);
+}
+.custom-edit-form .field { min-width: 0; flex: 1 1 200px; }
+.custom-edit-form .field.grow { flex-basis: 100%; }
+@media (max-width: 720px) {
+  .custom-edit-form { position: static; width: auto; max-width: none; }
+  .custom-edit { width: 100%; }
+}
 
 @media (max-width: 720px) {
   .custom-provider-row { flex-direction: column; }
