@@ -200,6 +200,36 @@
 {{end}}
 {{with .CustomProvider}}
 <p class="hint">Base URL <code>{{.BaseURL}}</code> · {{if eq .Kind "anthropic"}}Anthropic · Messages{{else if eq .APIType "responses"}}OpenAI · Responses{{else}}OpenAI · Chat{{end}} · {{if .Enabled}}active{{else}}paused{{end}}</p>
+<div class="detail-actions">
+  <details class="custom-edit">
+    <summary class="btn secondary sm" role="button" tabindex="0">Edit</summary>
+    <form class="inline-form custom-provider-form custom-edit-form" hx-post="/ui/providers/custom/{{urlquery .ID}}?view=detail" hx-target="#custom-providers" hx-swap="innerHTML">
+      <input class="field" name="name" value="{{.Name}}" placeholder="Name (e.g. AI Telegram)" maxlength="64">
+      <input class="field" name="prefix" value="{{.Prefix}}" placeholder="prefix (e.g. ai-tele)" maxlength="32" required>
+      <select class="field" name="kind" aria-label="Provider kind">
+        <option value="openai" {{if eq .Kind "openai"}}selected{{end}}>OpenAI compatible</option>
+        <option value="anthropic" {{if eq .Kind "anthropic"}}selected{{end}}>Anthropic compatible</option>
+      </select>
+      <select class="field" name="api_type" aria-label="API type">
+        <option value="chat" {{if eq .APIType "chat"}}selected{{end}}>Chat Completions</option>
+        <option value="responses" {{if eq .APIType "responses"}}selected{{end}}>Responses API</option>
+      </select>
+      <input class="field grow" name="base_url" value="{{.BaseURL}}" placeholder="https://api.example.com/v1" required>
+      <input type="hidden" name="enabled" value="{{if .Enabled}}true{{else}}false{{end}}">
+      <button class="btn primary sm" type="submit">Save</button>
+    </form>
+  </details>
+  <form hx-post="/ui/providers/custom/{{urlquery .ID}}?view=detail" hx-target="#custom-providers" hx-swap="innerHTML">
+    <input type="hidden" name="name" value="{{.Name}}">
+    <input type="hidden" name="prefix" value="{{.Prefix}}">
+    <input type="hidden" name="kind" value="{{.Kind}}">
+    <input type="hidden" name="api_type" value="{{.APIType}}">
+    <input type="hidden" name="base_url" value="{{.BaseURL}}">
+    <input type="hidden" name="enabled" value="{{if .Enabled}}false{{else}}true{{end}}">
+    <button class="btn secondary sm" type="submit">{{if .Enabled}}Pause{{else}}Resume{{end}}</button>
+  </form>
+  <button class="btn danger sm" hx-delete="/ui/providers/custom/{{urlquery .ID}}?view=detail" hx-target="#custom-providers" hx-swap="innerHTML" hx-confirm="Delete this provider and its keys?">Delete</button>
+</div>
 {{if .Keys}}
 <div class="custom-key-list">
   {{range .Keys}}
