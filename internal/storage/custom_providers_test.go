@@ -72,7 +72,16 @@ func TestCustomProviderCRUDAndKeyEncryption(t *testing.T) {
 		t.Fatalf("updated = %#v", updated)
 	}
 
-	// Deleting the provider must take its credentials with it.
+	// A model registered under the provider's prefix must also go, or the picker
+	// keeps offering ai-tele/... entries that can no longer route anywhere.
+	if _, err := store.AddCatalogModel(ctx, created.Prefix, "deepseek-v4", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddCatalogModel(ctx, "other-prefix", "kept", "", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Deleting the provider must take its credentials and models with it.
 	if err := store.DeleteCustomProvider(ctx, created.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +92,17 @@ func TestCustomProviderCRUDAndKeyEncryption(t *testing.T) {
 	}
 	if remaining != 0 {
 		t.Fatalf("%d orphaned keys survived the provider", remaining)
+	}
+	// Models under the deleted prefix are gone; models under other prefixes are not.
+	for prefix, want := range map[string]int{"ai-tele": 0, "other-prefix": 1} {
+		var count int
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT COUNT(1) FROM catalog_models WHERE provider = ?`, prefix).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != want {
+			t.Fatalf("model catalog for %q = %d, want %d", prefix, count, want)
+		}
 	}
 }
 

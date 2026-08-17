@@ -178,16 +178,38 @@ WHERE id = ?`,
 }
 
 func (s *Store) DeleteCustomProvider(ctx context.Context, id string) error {
-	// Keys go with it via ON DELETE CASCADE, so a deleted provider cannot leave
-	// orphaned credentials behind in the database.
-	result, err := s.db.ExecContext(ctx, `DELETE FROM custom_providers WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("delete custom provider: %w", err)
 	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
+	defer tx.Rollback()
+	// The routing prefix is what model catalog rows are keyed on, so it has to be
+	// read before the provider row goes away. The provider table is the FK owner
+	// here; catalog_models has no foreign key at all because built-in providers
+	// share the same table.
+	var prefix string
+	if err := tx.QueryRowContext(ctx, `SELECT prefix FROM custom_providers WHERE id = ?`, id).Scan(&prefix); err != nil {
+		return fmt.Errorf("delete custom provider: %w", err)
+	}
+	// Models registered under this provider must go with it, or the picker keeps
+	// offering prefix/... entries that can no longer route anywhere.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM catalog_models WHERE provider = ?`, prefix); err != nil {
+		return fmt.Errorf("delete custom provider models: %w", err)
+	}
+	// Keys go with it via ON DELETE CASCADE, so a deleted provider cannot leave
+	// orphaned credentials behind in the database.
+	result, err := tx.ExecContext(ctx, `DELETE FROM custom_providers WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete custom provider: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete custom provider: %w", err)
+	}
+	if affected == 0 {
 		return sql.ErrNoRows
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ListCustomProviders returns providers with their key metadata but never the key
