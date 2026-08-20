@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ApplyResult is returned after writing host client config in-process.
@@ -55,6 +57,40 @@ func LoadClaude() (Request, error) {
 	}, nil
 }
 
+// LoadOMP reads back the provider LiteRouter manages in omp's models.yml. It reports the
+// endpoint; the auth token is deliberately not read back — it is a credential, and
+// re-applying always pulls it fresh from the running instance. Model is not reported:
+// omp is a plain provider, so the model list is written wholesale and the user picks in
+// omp itself, leaving nothing model-shaped to echo into the form.
+func LoadOMP() (Request, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return Request{}, fmt.Errorf("cannot resolve host home directory")
+	}
+	raw, err := os.ReadFile(filepath.Join(ompRoot(home), "models.yml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Request{}, nil
+		}
+		return Request{}, err
+	}
+	// Parse the whole file, then reach only the managed provider. This reads whatever
+	// omp would, so an unrelated provider in the same file does not confuse it.
+	var doc struct {
+		Providers map[string]struct {
+			BaseURL string `yaml:"baseUrl"`
+		} `yaml:"providers"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return Request{}, fmt.Errorf("decode omp models: %w", err)
+	}
+	provider, ok := doc.Providers[providerName]
+	if !ok {
+		return Request{}, nil
+	}
+	return Request{Tool: ToolOMP, BaseURL: provider.BaseURL}, nil
+}
+
 // ApplyDirect writes Claude/Codex host config immediately (9router-style),
 // without generating a downloadable shell script.
 func ApplyDirect(request Request) (ApplyResult, error) {
@@ -92,6 +128,19 @@ func ApplyDirect(request Request) (ApplyResult, error) {
 			return ApplyResult{}, err
 		}
 		return ApplyResult{Tool: "codex", Action: "reset", Message: "Codex reset", Path: path}, nil
+	case ToolOMP:
+		if request.Action == Apply {
+			path, err := applyOMP(home, request)
+			if err != nil {
+				return ApplyResult{}, err
+			}
+			return ApplyResult{Tool: "omp", Action: "apply", Message: "oh-my-pi configured", Path: path}, nil
+		}
+		path, err := resetOMP(home)
+		if err != nil {
+			return ApplyResult{}, err
+		}
+		return ApplyResult{Tool: "omp", Action: "reset", Message: "oh-my-pi reset", Path: path}, nil
 	default:
 		return ApplyResult{}, fmt.Errorf("unsupported CLI tool %q", request.Tool)
 	}
@@ -353,6 +402,191 @@ func resetCodex(home string) (string, error) {
 		_ = os.Remove(path + ".literouter.bak")
 	}
 	return configPath, nil
+}
+
+// ompRoot returns the directory omp reads its models.yml from, honouring omp's own
+// override (PI_CODING_AGENT_DIR) so the profile LiteRouter writes is the one the user is
+// actually running rather than a guess at a home path. Empty means omp's default.
+func ompRoot(home string) string {
+	if v := strings.TrimSpace(os.Getenv("PI_CODING_AGENT_DIR")); v != "" {
+		return v
+	}
+	return filepath.Join(home, ".omp", "agent")
+}
+
+// ompProviderValue renders the `providers.<name>` value apply writes into models.yml:
+// baseUrl (with /v1, since omp posts to {baseUrl}/chat/completions verbatim), apiKey,
+// the api marker omp requires on a hand-declared provider, and the model list.
+func ompProviderValue(provider string, baseURL, apiKey string, models []OMPModel) *yaml.Node {
+	value := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	add := func(key string, node *yaml.Node) {
+		value.Content = append(value.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, node)
+	}
+	add("baseUrl", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: baseURL})
+	add("apiKey", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: apiKey})
+	add("api", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "openai-completions"})
+	if len(models) > 0 {
+		seq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		for _, m := range models {
+			entry := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			entry.Content = []*yaml.Node{
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "id"},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: m.ID},
+			}
+			if m.Name != "" {
+				entry.Content = append(entry.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "name"},
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: m.Name})
+			}
+			if m.ContextWindow > 0 {
+				entry.Content = append(entry.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "contextWindow"},
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: fmt.Sprintf("%d", m.ContextWindow)})
+			}
+			if m.MaxTokens > 0 {
+				entry.Content = append(entry.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "maxTokens"},
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: fmt.Sprintf("%d", m.MaxTokens)})
+			}
+			if m.Reasoning {
+				entry.Content = append(entry.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "reasoning"},
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "true"})
+			}
+			entry.Content = append(entry.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "input"},
+				&yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Tag: "!!str", Value: "text"},
+				}})
+			seq.Content = append(seq.Content, entry)
+		}
+		add("models", seq)
+	}
+	return value
+}
+
+// ompProvidersMap walks a parsed models.yml document and returns the `providers` mapping
+// node if present, or nil. models.yml's providers map is where omp's custom providers
+// live; sibling top-level keys must be left untouched.
+func ompProvidersMap(doc *yaml.Node) *yaml.Node {
+	if doc == nil || doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "providers" {
+			return root.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// applyOMP merges the LiteRouter provider into omp's models.yml's providers map, backing
+// the file up once. It parses the document and edits only the managed provider key, so
+// every sibling provider and non-provider top-level key survives. The primary path is
+// in-process (this function); the downloadable script mirrors the same merge in Python.
+func applyOMP(home string, request Request) (string, error) {
+	root := ompRoot(home)
+	path := filepath.Join(root, "models.yml")
+	backup := path + ".literouter.bak"
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", fmt.Errorf("create omp config dir: %w", err)
+	}
+	var doc yaml.Node
+	raw, err := os.ReadFile(path)
+	hadFile := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if hadFile {
+		if _, statErr := os.Stat(backup); statErr != nil {
+			_ = os.WriteFile(backup, raw, 0o600)
+		}
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			return "", fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else {
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{
+			{Kind: yaml.MappingNode, Tag: "!!map"},
+		}}
+	}
+	providers := ompProvidersMap(&doc)
+	if providers == nil {
+		providers = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		doc.Content[0].Content = append(doc.Content[0].Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "providers"}, providers)
+	}
+	models := request.OMPModels
+	if len(models) == 0 && request.Model != "" {
+		models = []OMPModel{{ID: request.Model}}
+	}
+	// Replace the existing literouter entry (if any) in place.
+	for i := 0; i+1 < len(providers.Content); i += 2 {
+		if providers.Content[i].Value == providerName {
+			providers.Content[i+1] = ompProviderValue(providerName, normalizeBase(request.BaseURL, true), request.Token, models)
+			if err := writeYAMLNodeAtomic(path, &doc); err != nil {
+				return "", err
+			}
+			return path, nil
+		}
+	}
+	providers.Content = append(providers.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: providerName},
+		ompProviderValue(providerName, normalizeBase(request.BaseURL, true), request.Token, models))
+	if err := writeYAMLNodeAtomic(path, &doc); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// resetOMP removes the managed provider from models.yml's providers map, leaving every
+// sibling provider and top-level key alone. As with Claude/Codex, the backup is not
+// renamed back into place — that would discard providers and settings added since the
+// first apply.
+func resetOMP(home string) (string, error) {
+	root := ompRoot(home)
+	path := filepath.Join(root, "models.yml")
+	backup := path + ".literouter.bak"
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			_ = os.Remove(backup)
+			return path, nil
+		}
+		return "", err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	providers := ompProvidersMap(&doc)
+	if providers != nil {
+		for i := 0; i+1 < len(providers.Content); i += 2 {
+			if providers.Content[i].Value == providerName {
+				providers.Content = append(providers.Content[:i], providers.Content[i+2:]...)
+				break
+			}
+		}
+	}
+	if err := writeYAMLNodeAtomic(path, &doc); err != nil {
+		return "", err
+	}
+	_ = os.Remove(backup)
+	return path, nil
+}
+
+// writeYAMLNodeAtomic encodes a yaml.Node document back to disk with the repo's
+// 2-space indentation and atomic replace, like the JSON and TOML writers above.
+func writeYAMLNodeAtomic(path string, doc *yaml.Node) error {
+	raw, err := yaml.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, raw)
 }
 
 func jsonString(v string) string {

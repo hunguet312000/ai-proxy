@@ -344,6 +344,8 @@ type viewData struct {
 	BaseURL                 string
 	ClaudeSetup             clisetup.Request
 	ClaudeApplied           bool
+	OMPSetup                clisetup.Request
+	OMPApplied              bool
 	PlanModel               string
 	CompactModel            string
 	FallbackModel           string
@@ -1264,6 +1266,13 @@ func (s *Service) pageData(c echo.Context, tab string) viewData {
 			if draft, draftErr := s.settings.GetCLIDraft(c.Request().Context()); draftErr == nil {
 				data.ClaudeSetup = draft.Request()
 			}
+		}
+		// omp has no independent draft: the applied provider in models.yml is the truth,
+		// and there is nothing to remember across a reset the way Claude's env keys need
+		// (resetting omp cannot erase a selection the form does not contribute to).
+		if setup, setupErr := clisetup.LoadOMP(); setupErr == nil && setup.Model != "" {
+			data.OMPSetup = setup
+			data.OMPApplied = true
 		}
 		// The plan model is LiteRouter's own routing decision, not host CLI config, so
 		// it is read from settings rather than from ~/.claude/settings.json.

@@ -23,6 +23,29 @@ func renderCLITab(t *testing.T, data viewData) string {
 	return out.String()
 }
 
+func TestSetupFormRendersOMPCard(t *testing.T) {
+	page := renderCLITab(t, viewData{OMPSetup: clisetup.Request{BaseURL: "http://127.0.0.1:8317/v1"}, OMPApplied: true})
+	for _, want := range []string{
+		`formaction="/ui/setup/omp/apply"`,
+		`formaction="/ui/setup/omp/reset"`,
+		"oh-my-pi",
+		"omp-manual",
+		"active",
+		`value="http://127.0.0.1:8317/v1"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("omp card missing %q", want)
+		}
+	}
+}
+
+func TestSetupFormOMPNotActiveByDefault(t *testing.T) {
+	page := renderCLITab(t, viewData{})
+	if strings.Contains(page, ">active</span>") {
+		t.Errorf("omp card should not show active when nothing applied")
+	}
+}
+
 // Folding rarely-used fields away is only safe if a section that holds something the
 // operator set opens itself. A collapsed section hiding a live override is how people lose
 // an afternoon to "why is this model being used".

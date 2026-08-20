@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -105,6 +106,82 @@ func runScript(t *testing.T, home string, script []byte) {
 	}
 	command := exec.Command("sh", path)
 	command.Env = append(os.Environ(), "HOME="+home)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("script failed: %v\n%s", err, output)
+	}
+}
+
+func TestOMPApplyAndResetPreserveModels(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 unavailable")
+	}
+	home := t.TempDir()
+	root := filepath.Join(home, ".omp", "agent")
+	_ = os.MkdirAll(root, 0o700)
+	_ = os.WriteFile(filepath.Join(root, "models.yml"), []byte("providers:\n  other:\n    baseUrl: \"http://keep\"\n"), 0o600)
+	apply, err := Generate(Request{
+		Tool: ToolOMP, Action: Apply, BaseURL: "http://127.0.0.1:8317/v1", Token: "secret", Model: "m1",
+		OMPModels: []OMPModel{{ID: "cx/a", ContextWindow: 200000, MaxTokens: 64000}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runScriptWithAgentDir(t, home, root, apply.Content)
+	raw, _ := os.ReadFile(filepath.Join(root, "models.yml"))
+	text := string(raw)
+	for _, want := range []string{"http://127.0.0.1:8317/v1", "api: openai-completions", "id: cx/a", "contextWindow: 200000", "http://keep"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("apply models.yml missing %q:\n%s", want, text)
+		}
+	}
+	reset, _ := Generate(Request{Tool: ToolOMP, Action: Reset})
+	runScriptWithAgentDir(t, home, root, reset.Content)
+	raw, _ = os.ReadFile(filepath.Join(root, "models.yml"))
+	if !strings.Contains(string(raw), "http://keep") || strings.Contains(string(raw), "literouter") {
+		t.Fatalf("reset models.yml = %s", raw)
+	}
+}
+
+func TestApplyDirectOMPWritesCatalog(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", root)
+	if _, err := ApplyDirect(Request{
+		Tool: ToolOMP, Action: Apply, BaseURL: "http://127.0.0.1:8317", Token: "secret",
+		OMPModels: []OMPModel{{ID: "cx/a", Name: "A", ContextWindow: 200000, MaxTokens: 8192}, {ID: "ag/b", ContextWindow: 128000}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(root, "models.yml"))
+	text := string(raw)
+	// Direct path and script agree on /v1: omp posts to {baseUrl}/chat/completions verbatim.
+	if !strings.Contains(text, "http://127.0.0.1:8317/v1") || !strings.Contains(text, "id: cx/a") || !strings.Contains(text, "id: ag/b") {
+		t.Fatalf("applyOMP = %s", text)
+	}
+	loaded, err := LoadOMP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model is not reported: omp is a plain provider, routing is configured in omp.
+	if loaded.BaseURL != "http://127.0.0.1:8317/v1" || loaded.Model != "" || loaded.Token != "" {
+		t.Fatalf("LoadOMP() = %#v", loaded)
+	}
+	if _, err := ApplyDirect(Request{Tool: ToolOMP, Action: Reset}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(filepath.Join(root, "models.yml"))
+	if strings.Contains(string(raw), "literouter") {
+		t.Fatalf("reset left provider: %s", raw)
+	}
+}
+
+func runScriptWithAgentDir(t *testing.T, home, root string, script []byte) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "setup.sh")
+	if err := os.WriteFile(path, script, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("sh", path)
+	command.Env = append(os.Environ(), "HOME="+home, "PI_CODING_AGENT_DIR="+root)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("script failed: %v\n%s", err, output)
 	}
@@ -377,7 +454,10 @@ func TestDraftRoundTripsThroughRequest(t *testing.T) {
 		t.Fatalf("draft carried tool/action/token: %#v", rebuilt)
 	}
 	rebuilt.Tool, rebuilt.Action, rebuilt.Token = request.Tool, request.Action, request.Token
-	if rebuilt != request {
+	// OMPModels is catalog-injected, never user-entered, so a draft must not carry it;
+	// both sides are nil here. The comparison is DeepEqual rather than struct equality
+	// because Request now holds a slice that == cannot compare.
+	if !reflect.DeepEqual(rebuilt, request) {
 		t.Fatalf("round trip lost fields:\n got %#v\nwant %#v", rebuilt, request)
 	}
 }

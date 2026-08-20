@@ -709,6 +709,36 @@ ANTHROPIC_AUTH_TOKEN=$LITEROUTER_API_TOKEN</pre>
 base_url = "{{.BaseURL}}/v1"
 wire_api = "responses"</pre>
       </article>
+
+      <article class="cli-card">
+        <header>
+          <img src="/ui/assets/providers/literouter.png" alt="" width="28" height="28">
+          <div>
+            <b>oh-my-pi</b>
+            <small>OpenAI-compatible · provider literouter</small>
+          </div>
+          {{if .OMPApplied}}<span class="tag ok">active</span>{{else}}<span class="tag">not applied</span>{{end}}
+        </header>
+        <form class="form-grid" method="post" data-cli-setup-form>
+          <p class="hint">Apply registers LiteRouter in omp as a plain provider named <tt>literouter</tt>: the base URL, the token and the whole model catalog go into <tt>~/.omp/agent/models.yml</tt>. How models are routed (default, smol/slow/plan, roles) is your call inside omp — pick models there with <tt>omp --model literouter/&lt;id&gt;</tt>.</p>
+          <details class="form-section">
+            <summary><span>Endpoint</span><em>optional · defaults to this dashboard</em></summary>
+            <label><span class="field-hint" title="Empty uses the address you loaded this dashboard from, which is almost always right; set it only when omp reaches LiteRouter at a different address than your browser does. omp is told the full /v1 base URL because it appends /chat/completions verbatim.">Endpoint</span><input class="field" name="base_url" value="{{if .OMPSetup.BaseURL}}{{.OMPSetup.BaseURL}}{{else}}{{.BaseURL}}{{end}}" placeholder="auto · same address as this dashboard"></label>
+          </details>
+          <div class="btn-row">
+            <button class="btn primary" type="submit" formaction="/ui/setup/omp/apply">Apply</button>
+            <button class="btn secondary" type="submit" formaction="/ui/setup/omp/reset" formnovalidate>Reset</button>
+            <button class="btn ghost" type="button" data-manual-toggle="omp-manual">Manual</button>
+            <button class="btn ghost sm" type="submit" formaction="/ui/setup/omp/apply" data-download="1" title="Download shell script instead">Download .sh</button>
+          </div>
+          <div class="cli-setup-result" aria-live="polite"></div>
+        </form>
+        <pre id="omp-manual" class="code-block" hidden>providers:
+  literouter:
+    baseUrl: "{{.BaseURL}}/v1"
+    apiKey: "$LITEROUTER_API_TOKEN"
+    api: openai-completions</pre>
+      </article>
     </div>
   </section>
 </section>

@@ -41,6 +41,19 @@ func (s *Service) cliSetupHandler(c echo.Context) error {
 		SonnetModel: c.FormValue("sonnet_model"), HaikuModel: c.FormValue("haiku_model"),
 		Effort: c.FormValue("effort"), MaxContext: c.FormValue("max_context"),
 	}
+	// omp does not discover a custom provider's models — it must be given a hand-declared
+	// list — so the whole LiteRouter catalog is injected here, the same way "auto"
+	// context is. That way the card can write every model omp can pick from, rather than
+	// stranding the user on the single selected one.
+	if tool == clisetup.ToolOMP && req.Action == clisetup.Apply {
+		models := s.loadCatalogModels(c.Request().Context(), "")
+		req.OMPModels = make([]clisetup.OMPModel, 0, len(models))
+		for _, m := range models {
+			req.OMPModels = append(req.OMPModels, clisetup.OMPModel{
+				ID: m.ID, Name: m.Label, ContextWindow: m.ContextWindow, MaxTokens: m.MaxOutputTokens,
+			})
+		}
+	}
 	// "auto" is resolved here rather than inside clisetup, which has no way to reach the
 	// gateway's view of the catalog. Resolved on every apply, so the number written to
 	// the client tracks whatever has been learned since the last one.

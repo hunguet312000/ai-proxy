@@ -15,6 +15,7 @@ type Action string
 const (
 	ToolClaude Tool   = "claude"
 	ToolCodex  Tool   = "codex"
+	ToolOMP    Tool   = "omp"
 	Apply      Action = "apply"
 	Reset      Action = "reset"
 )
@@ -45,6 +46,23 @@ type Request struct {
 	// the caller because resolving it needs the catalog. Ignored unless MaxContext is
 	// "auto".
 	CatalogContextWindow int
+	// OMPModels is the catalog of models to declare in omp's models.yml. omp does not
+	// discover a custom provider's models — it must be given a hand-declared list — so
+	// the card writes the whole LiteRouter catalog rather than a single selected model.
+	// Supplied by the caller because only the dashboard can reach the catalog. Used only
+	// when Tool is OMP.
+	OMPModels []OMPModel
+}
+
+// OMPModel is one model declared in the `models:` list omp writes for a custom provider.
+// contextWindow defaults to 128000 and maxTokens to 16384 in omp when omitted, so both
+// are filled from the catalog when known to keep omp's auto-compaction budgeting honest.
+type OMPModel struct {
+	ID            string
+	Name          string
+	ContextWindow int
+	MaxTokens     int
+	Reasoning     bool
 }
 
 // Draft is the model selection a user last applied, remembered by LiteRouter itself.
@@ -189,14 +207,19 @@ func Generate(request Request) (Artifact, error) {
 			return Artifact{Filename: "literouter-codex-apply.sh", Content: codexApply(request)}, nil
 		}
 		return Artifact{Filename: "literouter-codex-reset.sh", Content: codexReset()}, nil
+	case ToolOMP:
+		if request.Action == Apply {
+			return Artifact{Filename: "literouter-omp-apply.sh", Content: ompApply(request)}, nil
+		}
+		return Artifact{Filename: "literouter-omp-reset.sh", Content: ompReset()}, nil
 	default:
 		return Artifact{}, fmt.Errorf("unsupported CLI tool %q", request.Tool)
 	}
 }
 
 func (request Request) validate() error {
-	if request.Tool != ToolClaude && request.Tool != ToolCodex {
-		return fmt.Errorf("tool must be claude or codex")
+	if request.Tool != ToolClaude && request.Tool != ToolCodex && request.Tool != ToolOMP {
+		return fmt.Errorf("tool must be claude, codex, or omp")
 	}
 	if request.Action != Apply && request.Action != Reset {
 		return fmt.Errorf("action must be apply or reset")
@@ -221,8 +244,14 @@ func (request Request) validate() error {
 			return fmt.Errorf("%s contains invalid characters or is too long", name)
 		}
 	}
-	if request.Token == "" || request.Model == "" {
-		return fmt.Errorf("token and model are required")
+	if request.Token == "" {
+		return fmt.Errorf("token is required")
+	}
+	// omp is configured as a plain provider: the catalog is written wholesale, and the
+	// user picks the model themselves inside omp, so a single "model" selection is not
+	// part of the contract. Claude and Codex still need one.
+	if request.Model == "" && request.Tool != ToolOMP {
+		return fmt.Errorf("model is required")
 	}
 	// Empty is allowed and means "do not manage effortLevel"; anything else must be a
 	// level the client will actually persist, or the write is silently ignored.

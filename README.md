@@ -81,16 +81,21 @@ Open the local dashboard, then unlock mutations with `LITEROUTER_API_TOKEN` / M�
 
 ## CLI Tool Setup / Cấu hình CLI
 
-The dashboard generates authenticated Apply/Reset scripts for Claude Code and Codex. LiteRouter runs in Docker and never mounts or writes host CLI configuration directly. Select endpoint/models, download the script, then run it on the host; Python 3 is required.
+The dashboard generates authenticated Apply/Reset scripts for Claude Code, Codex, and oh-my-pi (`omp`). LiteRouter runs in Docker and never mounts or writes host CLI configuration directly. Select endpoint/models, download the script, then run it on the host; Python 3 is required.
 
-Dashboard tạo script Apply/Reset có xác thực cho Claude Code và Codex. LiteRouter chạy Docker, không mount hoặc ghi trực tiếp cấu hình CLI trên host. Chọn endpoint/model, tải script rồi chạy trên host; cần Python 3.
+Dashboard tạo script Apply/Reset có xác thực cho Claude Code, Codex và oh-my-pi (`omp`). LiteRouter chạy Docker, không mount hoặc ghi trực tiếp cấu hình CLI trên host. Chọn endpoint/model, tải script rồi chạy trên host; cần Python 3.
 
 ```sh
 sh ~/Downloads/literouter-claude-apply.sh
 sh ~/Downloads/literouter-codex-apply.sh
+sh ~/Downloads/literouter-omp-apply.sh
 ```
 
 Claude uses the base URL without `/v1`; Codex uses `/v1` with `wire_api = "responses"`. Scripts back up and merge existing settings instead of replacing unrelated configuration.
+
+oh-my-pi is configured as a plain provider named `literouter` in `~/.omp/agent/models.yml` (or `$PI_CODING_AGENT_DIR/models.yml`): the base URL (with `/v1`), the API token, and the whole LiteRouter model catalog. Routing — default model, smol/slow/plan roles — is set up inside omp itself, e.g. `omp --model literouter/<id>` or `modelRoles` in omp's `config.yml`.
+
+oh-my-pi được cấu hình như một provider thông thường tên `literouter` trong `~/.omp/agent/models.yml` (hoặc `$PI_CODING_AGENT_DIR/models.yml`): base URL (kèm `/v1`), API token, và toàn bộ catalog model của LiteRouter. Việc điều phối — model mặc định, vai trò smol/slow/plan — được cấu hình ngay trong omp, ví dụ `omp --model literouter/<id>` hoặc `modelRoles` trong `config.yml` của omp.
 
 ## OAuth and quota / OAuth và quota
 
